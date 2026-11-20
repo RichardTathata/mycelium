@@ -138,6 +138,41 @@ pub struct Appended {
 
 pub(crate) enum Msg {
     Append { bytes: Vec<u8>, ack: oneshot::Sender<Result<(u64, LocalDurability), String>> },
+    /// Replace the file with the records `keep` answers `true` for ([`Journal::rewrite`]).
+    // Its one sender, the identity journal's compaction, is in builds with `tls`.
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
+    Rewrite { keep: KeepRecord, ack: oneshot::Sender<Result<RewriteOutcome, String>> },
+}
+
+/// A compaction's choice, record by record, made **inside the writer** — after every append acknowledged before it,
+/// before any queued behind it.
+pub(crate) type KeepRecord = Box<dyn FnMut(&[u8]) -> bool + Send>;
+
+/// What a [`Journal::rewrite`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Rewritten {
+    /// Records the journal holds now.
+    pub kept: u64,
+    /// Records the rewrite left out. `0` means the file was not touched.
+    pub dropped: u64,
+}
+
+/// How a [`Journal::rewrite`] the writer ran ended, when the journal is still sound.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RewriteOutcome {
+    /// The journal is the records kept (or was left alone because nothing was dropped).
+    Done(Rewritten),
+    /// The rewrite failed **before its rename**: the journal is exactly what it was, and the writer goes on. The
+    /// caller's bookkeeping of what the journal holds is still true.
+    Unchanged(String),
+}
+
+/// The name a compaction writes the live set under before it is renamed over the journal. A crash before the rename
+/// leaves it beside an untouched journal, and the next [`Journal::open`] removes it.
+fn compact_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".compact");
+    PathBuf::from(name)
 }
 
 /// The journal handle.
@@ -188,7 +223,7 @@ impl Journal {
         stream: &'static str,
         hooks: Hooks,
     ) -> Result<Arc<Self>, std::io::Error> {
-        let Hooks { fault, trace } = hooks;
+        let Hooks { fault, trace, crash } = hooks;
         let path = path.to_path_buf();
         // Every directory this creates has its entry synced in the one above it, and once the file
         // exists the directory naming it is synced — on every open, before the writer is spawned, so
@@ -201,6 +236,9 @@ impl Journal {
             })?;
         }
         let lock = acquire_ownership(&path)?;
+        // A compaction that crashed before its rename left its temporary beside a journal it never touched: the journal
+        // stands as it was, and the temporary — possibly half written — is removed, under the lock, before anything else.
+        remove_stale_compaction(&path, trace.as_ref())?;
         let recovered = recover(&path)?;
         let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
         fsync_parent(&path, trace.as_ref())?;
@@ -231,7 +269,30 @@ impl Journal {
             // and the writer must not put an acknowledged record behind it. It refuses every later
             // append by name until a reopen scans and repairs the file (F02's second half).
             let mut poisoned: Option<String> = None;
-            while let Some(Msg::Append { bytes, ack }) = rx.recv().await {
+            while let Some(msg) = rx.recv().await {
+                let (bytes, ack) = match msg {
+                    Msg::Append { bytes, ack } => (bytes, ack),
+                    Msg::Rewrite { mut keep, ack } => {
+                        let reply = match &poisoned {
+                            Some(why) => Err(format!(
+                                "the journal is poisoned by an earlier failure and refuses until it is reopened and repaired: {why}"
+                            )),
+                            None => match rewrite_file(&file_path, &mut file, &mut keep, trace.as_ref(), crash.as_deref()) {
+                                Ok(done) => {
+                                    seq = done.kept;
+                                    Ok(RewriteOutcome::Done(done))
+                                }
+                                Err(RewriteError { poison: false, why }) => Ok(RewriteOutcome::Unchanged(why)),
+                                Err(RewriteError { poison: true, why }) => {
+                                    poisoned = Some(format!("compaction: {why}"));
+                                    Err(why)
+                                }
+                            },
+                        };
+                        let _ = ack.send(reply);
+                        continue;
+                    }
+                };
                 if let Some(why) = &poisoned {
                     let _ = ack.send(Err(format!(
                         "the journal is poisoned by an earlier failed append and refuses until it is reopened and repaired: {why}"
@@ -308,12 +369,130 @@ impl Journal {
             mycelium_core::sim_seam::ChanVerdict::Closed => return Err(JournalError::Closed),
         }
 
-        match tokio::time::timeout(ACK_TIMEOUT, ack_rx).await {
-            Ok(Ok(Ok((seq, durability)))) => Ok(Appended { content_hash, seq, durability }),
-            Ok(Ok(Err(e))) => Err(JournalError::Failed(e)),
-            // The writer dropped the ack without replying.
-            Ok(Err(_)) => Err(JournalError::DeliveryUnknown),
-            Err(_) => Err(JournalError::DeliveryUnknown),
+        let (seq, durability) = await_ack(ack_rx).await?;
+        Ok(Appended { content_hash, seq, durability })
+    }
+
+    /// **Compact the journal:** replace the file with the records `keep` answers `true` for, in their order
+    /// (identity-and-lifecycle I2, the maintainer's decision of 2026-11-17: the kept-anchor budget counts what a node
+    /// keeps now, not what it ever kept).
+    ///
+    /// Crash-safe, in the order the persistence invariants require: the live set is written to `<path>.compact` and
+    /// **fsynced**, that file is **renamed** over the journal, and the **directory is fsynced**. A crash before the
+    /// rename leaves the journal exactly as it was (the temporary is removed at the next open); a crash after it leaves
+    /// the compacted journal, whole. When nothing is dropped the file is not touched.
+    ///
+    /// `keep` runs inside the writer, so it sees every record acknowledged before the rewrite and none queued behind
+    /// it; those are appended to the new file. A failure before the rename changes nothing and says so
+    /// ([`RewriteOutcome::Unchanged`]); one after it is an `Err` and poisons the writer as a failed append does, because
+    /// the open handle may name the replaced file. On any `Err` — a poisoned writer, a lost acknowledgement — the caller
+    /// does not know which file the journal is.
+    ///
+    /// **Only for a journal its consumer folds as a set.** Sequence numbers restart at the kept count, as a restart
+    /// would number them, so a journal whose records are cited by position or chained by hash (the evidence journal)
+    /// must never be rewritten; this is `pub(crate)` and the identity journal is its one caller.
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))] // its one caller, the identity ledger, is under `tls`
+    pub(crate) async fn rewrite(&self, keep: KeepRecord) -> Result<RewriteOutcome, JournalError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        match mycelium_core::sim_seam::chan_try_send(self.stream, &self.tx, Msg::Rewrite { keep, ack: ack_tx }) {
+            mycelium_core::sim_seam::ChanVerdict::Sent => {}
+            mycelium_core::sim_seam::ChanVerdict::Full => return Err(JournalError::Saturated),
+            mycelium_core::sim_seam::ChanVerdict::Closed => return Err(JournalError::Closed),
+        }
+        await_ack(ack_rx).await
+    }
+}
+
+/// Wait for the writer's answer: its result, or `DeliveryUnknown` when none arrives in [`ACK_TIMEOUT`] or the writer
+/// dropped the acknowledgement.
+async fn await_ack<T>(ack_rx: oneshot::Receiver<Result<T, String>>) -> Result<T, JournalError> {
+    match tokio::time::timeout(ACK_TIMEOUT, ack_rx).await {
+        Ok(Ok(Ok(done))) => Ok(done),
+        Ok(Ok(Err(e))) => Err(JournalError::Failed(e)),
+        // The writer dropped the ack without replying.
+        Ok(Err(_)) => Err(JournalError::DeliveryUnknown),
+        Err(_) => Err(JournalError::DeliveryUnknown),
+    }
+}
+
+/// Why a rewrite did not finish, and whether the writer may go on appending.
+struct RewriteError {
+    /// The journal's name may now be the new file while the open handle is the old one: no append is safe.
+    poison: bool,
+    why: String,
+}
+
+/// Where a test stops a rewrite, as a crash would: `1` after the temporary is written and synced, before the rename;
+/// `2` after the rename, before the directory sync and the reopen. Production passes none.
+type CrashAt = std::sync::atomic::AtomicU8;
+
+/// The compaction itself ([`Journal::rewrite`]), run by the writer between appends.
+fn rewrite_file(
+    path: &Path,
+    file: &mut std::fs::File,
+    keep: &mut KeepRecord,
+    trace: Option<&Trace>,
+    crash: Option<&CrashAt>,
+) -> Result<Rewritten, RewriteError> {
+    use std::io::Write as _;
+    let unchanged = |e: std::io::Error| RewriteError { poison: false, why: e.to_string() };
+    let records = read_journal(path).map_err(unchanged)?;
+    let total = records.len() as u64;
+    let live: Vec<Vec<u8>> = records.into_iter().filter(|r| keep(r)).collect();
+    let done = Rewritten { kept: live.len() as u64, dropped: total - live.len() as u64 };
+    if done.dropped == 0 {
+        return Ok(done);
+    }
+    let tmp = compact_path(path);
+    let written = (|| -> std::io::Result<()> {
+        let mut out = std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&tmp)?;
+        for r in &live {
+            let len = u32::try_from(r.len()).map_err(|_| std::io::Error::other("record too large"))?;
+            out.write_all(&len.to_le_bytes())?;
+            out.write_all(r)?;
+        }
+        // The new journal's bytes are durable before its name is: a rename of an unsynced file can survive a power
+        // loss as a name for nothing.
+        out.sync_all().map(|()| note(trace, "compact.sync", &tmp))
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(unchanged(e));
+    }
+    let stopped = |at: u8| crash.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst) == at);
+    if stopped(1) {
+        return Err(RewriteError { poison: true, why: "a test stopped the compaction before its rename".into() });
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(unchanged(e));
+    }
+    note(trace, "compact.rename", path);
+    // From here the journal's name is the new file and `file` is the old one: any failure poisons the writer.
+    let replaced = |e: std::io::Error| RewriteError { poison: true, why: e.to_string() };
+    if stopped(2) {
+        return Err(RewriteError { poison: true, why: "a test stopped the compaction after its rename".into() });
+    }
+    fsync_parent(path, trace).map_err(replaced)?;
+    *file = std::fs::OpenOptions::new().append(true).open(path).map_err(replaced)?;
+    Ok(done)
+}
+
+/// Remove the temporary a compaction left when it stopped before its rename, and sync the directory so the removal
+/// holds. Absent is the usual case and touches nothing.
+fn remove_stale_compaction(path: &Path, trace: Option<&Trace>) -> std::io::Result<()> {
+    let tmp = compact_path(path);
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {
+            tracing::warn!(journal = %path.display(), "journal: removed the temporary of a compaction that stopped before its rename; the journal is as it was");
+            fsync_parent(path, trace)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        // Something this journal did not leave (not a file, or not removable): no reason to refuse the journal's own
+        // open. A later compaction truncates it or fails unchanged, by name.
+        Err(e) => {
+            tracing::warn!(journal = %path.display(), error = %e, "journal: a leftover compaction temporary could not be removed; left in place");
+            Ok(())
         }
     }
 }
@@ -347,7 +526,7 @@ impl Journal {
         stream: &'static str,
         fault: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<Arc<Self>, std::io::Error> {
-        Self::open_inner(path.as_ref(), stream, Hooks { fault: Some(fault), trace: None })
+        Self::open_inner(path.as_ref(), stream, Hooks { fault: Some(fault), trace: None, crash: None })
     }
 
     /// A real journal that reports the storage steps it takes, in order, on `trace`: `dir.sync`
@@ -359,7 +538,18 @@ impl Journal {
         stream: &'static str,
         trace: Trace,
     ) -> Result<Arc<Self>, std::io::Error> {
-        Self::open_inner(path.as_ref(), stream, Hooks { fault: None, trace: Some(trace) })
+        Self::open_inner(path.as_ref(), stream, Hooks { fault: None, trace: Some(trace), crash: None })
+    }
+
+    /// A real journal whose next rewrite stops where `crash` says ([`CrashAt`]), reporting its storage steps on
+    /// `trace`: how the compaction's two crash windows are arranged.
+    pub(crate) fn open_with_crash(
+        path: impl AsRef<Path>,
+        stream: &'static str,
+        crash: Arc<CrashAt>,
+        trace: Option<Trace>,
+    ) -> Result<Arc<Self>, std::io::Error> {
+        Self::open_inner(path.as_ref(), stream, Hooks { fault: None, trace, crash: Some(crash) })
     }
 
     /// The replay-seam stream this journal records under. Production never asks a journal its
@@ -375,6 +565,8 @@ impl Journal {
 struct Hooks {
     fault: Option<Arc<std::sync::atomic::AtomicBool>>,
     trace: Option<Trace>,
+    /// Where a rewrite stops as a crash would ([`CrashAt`]).
+    crash: Option<Arc<CrashAt>>,
 }
 
 /// Report one storage step to a test's trace, if one is attached.

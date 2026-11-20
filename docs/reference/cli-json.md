@@ -116,11 +116,16 @@ event, so the stream is JSON Lines. An unchanged tick prints nothing, as in the 
 **Paths and fingerprints only.** A document names the files written and the SHA-256 of each certificate's
 `SubjectPublicKeyInfo`, read back from the file on disk; it never carries a key or a certificate body —
 `tests/cli_json.rs` asserts no PEM block, no line of any file written and no hex form of a key (its DER, its seed, its raw public key) appears in the output. `command` is `ca`,
-`issue` or `pin`; `warnings` holds what `tls_writable_by_others` says about a directory another local user could
+`issue`, `pin` or `commit`; `warnings` holds what `tls_writable_by_others` says about a directory another local user could
 write (on stderr in the text form).
 
 - `ca` — `cert` (`ca-cert.pem`), `key` (the path of `ca-key.pem`, which stays on this host), `spki_sha256` (the CA
   certificate's; not a pin, since no gateway presents the CA's key).
+- `commit` (identity-and-lifecycle I2, additive) — `commitment` (the path of `ca-commit.pem`, the one file copied to
+  nodes), `successor_cert`, `successor_key` (the path of the successor's `ca-key.pem`, which stays on this host) and
+  `successor_spki_sha256`. **It has no golden yet**: while the `caGeneration` OID is provisional the binary
+  `tests/cli_json.rs` runs refuses `tls commit` by name with exit 2 and no document, which
+  `tls_commit_is_refused_by_the_binary_as_it_ships_and_writes_nothing` (`src/main.rs`) holds.
 - `issue`, `kind: "node"` — `node`, `cert`, `key`, `spki_sha256` (the value `tls pin` prints for this certificate,
   the one a partner pins), `ca_cert`, `ca_spki_sha256`.
 - `issue`, `kind: "client"` — `principal` (`token:{issuer}/{name}`), `issuer`, `name`, `cert`, `key`, `spki_sha256`

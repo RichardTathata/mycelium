@@ -11,6 +11,24 @@
 #   prose; this makes it mechanical. The release workflow's `version` job runs it on every tag push (`--release`:
 #   a blocker fails the job); on a dry run it only warns, so pull requests stay green.
 #
+#   A GATED WRITER (identity-and-lifecycle I2, PR 2b-1). `mycelium tls commit` (`commit_successor`) is a new path
+#   that would write the generation extension: a successor is a generation-1 CA. While
+#   `CA_GENERATION_OID_IS_PROVISIONAL` is `true`, that function must ask `ca_generation_oid_open()` itself, before it
+#   writes anything — so a shipped binary refuses by name and writes nothing (CI's
+#   `scripts/check-shipped-ca-generation-refusal.sh` shows the binary doing so). A `commit_successor` without the
+#   check fails this script in either mode: nothing new ships under a provisional OID. A function added later that
+#   writes the extension is added to GATED_WRITERS below.
+#
+#   WHAT THIS CHECK IS, AND WHAT IT CANNOT SEE (#812's review F6). It is a **tripwire over text**, not the guard: it
+#   requires, in the function's body with comments dropped, an `if !…ca_generation_oid_open()` ahead of the first line
+#   that mints or writes (`mint_ca_at(`, `write_public(`, `write_private(`, `hard_link(`, `fs::write(`, `fs::rename(`),
+#   whatever the function's visibility. It does not parse Rust: it cannot tell that the `if` returns rather than
+#   logging and going on, it does not see a write reached through a helper it does not name, a gate inside a block
+#   comment or a string would count, and a writer under another name is invisible until it is listed. **The guards
+#   are elsewhere:** `mint_ca_at` (through `generate_ca`) refuses a generation above 0 by itself while the gate is
+#   closed, every reader refuses the extension (`ca_generation`), and CI runs the shipped binary
+#   (`scripts/check-shipped-ca-generation-refusal.sh`). This check only makes removing the early refusal a red build.
+#
 # USAGE
 #   scripts/check-release-blockers.sh [--release] [tls.rs path]
 #     --release   a blocker is an error (exit 1); without it, a warning (exit 0)
@@ -31,9 +49,27 @@ self_test() {
   if ! "$0" "$dir/blocked.rs" >/dev/null 2>&1; then echo "self-test: a provisional OID failed without --release"; ok=0; fi
   if ! "$0" --release "$dir/clear.rs" >/dev/null 2>&1; then echo "self-test: registered OIDs failed --release"; ok=0; fi
   if "$0" --release "$dir/missing.rs" >/dev/null 2>&1; then echo "self-test: a file without a constant passed"; ok=0; fi
-  rm -f "$dir/blocked.rs" "$dir/blocked-gen.rs" "$dir/clear.rs" "$dir/missing.rs"
+  local head='pub const CONSENT_GRADE_OID_IS_PROVISIONAL: bool = false;\npub const CA_GENERATION_OID_IS_PROVISIONAL: bool = true;\n'
+  printf "${head}    pub fn commit_successor() {\n        mint();\n    }\n    pub fn next() { ca_generation_oid_open(); }\n" >"$dir/ungated.rs"
+  printf "${head}    pub fn commit_successor() {\n        if !super::ca_generation_oid_open() { return; }\n        mint();\n    }\n" >"$dir/gated.rs"
+  if "$0" "$dir/ungated.rs" >/dev/null 2>&1; then echo "self-test: an ungated commit_successor passed under a provisional OID"; ok=0; fi
+  if ! "$0" "$dir/gated.rs" >/dev/null 2>&1; then echo "self-test: a gated commit_successor failed without --release"; ok=0; fi
+  # #812's review F6: the gate named only in a comment, the gate asked after the publish with its answer discarded,
+  # and an ungated writer that is `pub(crate)`.
+  printf "${head}    pub fn commit_successor() {\n        // if !super::ca_generation_oid_open() { return; }\n        mint_ca_at();\n    }\n" >"$dir/comment.rs"
+  printf "${head}    pub fn commit_successor() {\n        mint_ca_at();\n        hard_link();\n        let _ = super::ca_generation_oid_open();\n        if !super::ca_generation_oid_open() { return; }\n    }\n" >"$dir/late.rs"
+  printf "${head}    pub(crate) fn commit_successor() {\n        mint_ca_at();\n    }\n" >"$dir/crate.rs"
+  if "$0" "$dir/comment.rs" >/dev/null 2>&1; then echo "self-test: a gate named only in a comment passed"; ok=0; fi
+  if "$0" "$dir/late.rs" >/dev/null 2>&1; then echo "self-test: a gate asked after the mint and the publish passed"; ok=0; fi
+  if "$0" "$dir/crate.rs" >/dev/null 2>&1; then echo "self-test: an ungated pub(crate) commit_successor passed"; ok=0; fi
+  # A wrapper that hands to the writer holding the gate passes; one that hands to an ungated writer does not.
+  printf "${head}    pub fn commit_successor() {\n        commit_successor_observed()\n    }\n    pub(super) fn commit_successor_observed() {\n        if !super::ca_generation_oid_open() { return; }\n        mint_ca_at();\n    }\n" >"$dir/wrapped.rs"
+  printf "${head}    pub fn commit_successor() {\n        commit_successor_observed()\n    }\n    pub(super) fn commit_successor_observed() {\n        mint_ca_at();\n    }\n" >"$dir/wrapped-ungated.rs"
+  if ! "$0" "$dir/wrapped.rs" >/dev/null 2>&1; then echo "self-test: a wrapper over a gated writer failed"; ok=0; fi
+  if "$0" "$dir/wrapped-ungated.rs" >/dev/null 2>&1; then echo "self-test: a wrapper over an ungated writer passed"; ok=0; fi
+  rm -f "$dir/blocked.rs" "$dir/blocked-gen.rs" "$dir/clear.rs" "$dir/missing.rs" "$dir/ungated.rs" "$dir/gated.rs" "$dir/comment.rs" "$dir/late.rs" "$dir/crate.rs" "$dir/wrapped.rs" "$dir/wrapped-ungated.rs"
   rmdir "$dir"
-  if [[ $ok == 1 ]]; then echo "check-release-blockers --self-test: ok (5 cases)"; else exit 1; fi
+  if [[ $ok == 1 ]]; then echo "check-release-blockers --self-test: ok (12 cases)"; else exit 1; fi
 }
 
 release=0
@@ -65,6 +101,34 @@ for constant in CONSENT_GRADE_OID_IS_PROVISIONAL CA_GENERATION_OID_IS_PROVISIONA
     fi
   fi
 done
+# Writers of the generation extension must be gated while its OID is provisional (see A GATED WRITER above).
+# `commit_successor` hands straight to `commit_successor_observed`, which holds the gate (and reports its steps to a
+# test): a listed writer may delegate to another listed writer before it writes anything, and each is checked itself.
+GATED_WRITERS=(commit_successor commit_successor_observed)
+delegates=$(IFS='|'; echo "${GATED_WRITERS[*]}")
+if grep -qE '^pub const CA_GENERATION_OID_IS_PROVISIONAL: bool = true;' "$file"; then
+  for fn in "${GATED_WRITERS[@]}"; do
+    # Whatever its visibility: `fn`, `pub fn`, `pub(crate) fn`.
+    if grep -qE "^[[:space:]]*(pub(\([a-z]+\))? )?fn ${fn}\(" "$file"; then
+      # The body runs from the function's line to the next `fn` item. Comments are dropped first, so a call named in
+      # one does not count. The gate must be an `if !…ca_generation_oid_open()` — its answer acted on — and must come
+      # before the first line that mints or writes.
+      if ! awk -v fn="$fn" -v delegates="$delegates" '
+            $0 ~ "^[[:space:]]*(pub(\\([a-z]+\\))? )?fn " fn "\\(" { inside = 1; next }
+            inside && $0 ~ /^[[:space:]]*(pub(\([a-z]+\))? )?fn / { exit }
+            inside {
+              line = $0; sub(/\/\/.*/, "", line)
+              if (!wrote && line ~ /if[[:space:]]+!.*ca_generation_oid_open\(\)/) gated = 1
+              if (!wrote && line ~ ("(^|[^a-z_])(" delegates ")\\(") && line !~ ("fn " fn "\\(")) gated = 1
+              if (line ~ /mint_ca_at\(|write_public\(|write_private\(|hard_link\(|fs::write\(|fs::rename\(/) wrote = 1
+            }
+            END { exit(gated ? 0 : 1) }' "$file"; then
+        echo "::error::check-release-blockers: \`${fn}\` in $file writes the caGeneration extension and does not refuse on \`if !…ca_generation_oid_open()\` before its first mint or write: nothing new ships under a provisional OID (identity-and-lifecycle I2, decision (e))" >&2
+        exit 1
+      fi
+    fi
+  done
+fi
 if [[ $blocked == 1 ]]; then exit 1; fi
 if [[ $warned == 1 ]]; then exit 0; fi
 echo "check-release-blockers: no blocker"

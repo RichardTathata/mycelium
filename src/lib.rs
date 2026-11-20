@@ -104,6 +104,7 @@
 //! | `sys/revocation/{node}/{key-hex}[/{revoker-hex}]` | WS-D — signed key revocation; post-360 row Q: keyed `(revoked, revoker)`, the v1 bytes then a trailer carrying the certificates it rests on; counts only when signed by an anchored key issued after the revoked one's; honoured by every verifier of a node's key (`tls`) |
 //! | `sys/identity-cert/{node}/{key-hex}` | post-360 row Q — a node's **certificate record**: the DER of a CA-issued certificate naming the node by `mycelium://<node>`, issuance (ms) in the serial; the only source of key standing (`tls`) |
 //! | `sys/client-cert/{principal-hex}/{key-hex}` | identity-and-lifecycle I1 — a service's **client certificate**: the DER of a CA-issued certificate naming `mycelium-client://{issuer}/{name}` for the principal `token:{issuer}/{name}`, issuance (ms) in the serial; published by `POST /gateway/identity/client-cert`, judged by the certificate, never by write time; the newest supersedes (`tls`). Also identity-and-lifecycle I7's **consent certificates**, `mycelium-consent://{issuer}/{name}` over a P-256 key with its grade, for `consent:{issuer}/{name}` — `{key-hex}` the 130-digit X9.63 point; each principal its own supersession |
+//! | `sys/ca-commit/{node}/{predecessor-hex}` | identity-and-lifecycle I2 (PR 2b) — a **CA commitment a node pinned**, one key per committing CA (`{predecessor-hex}` the SHA-256 of that CA's certificate), republished by that node while it trusts that CA: the `ca-commit.pem` document (the successor CA's certificate and the old CA's signature over it, `mycelium tls commit`). **For detection only**: a node pins a commitment from the file its operator placed (`{auto_cert_dir}/ca-commit.pem`) and from nowhere else — a copy here is never a source of a pin. **Verified at read**: a reader checks a copy against a root it trusts (the old CA signed it) and compares it with its own pin; one that fails is read as absent and counted (`GET /stats` `ca_commitment_unverified`), one that verifies and differs from the pin the reader holds for that copy's CA is refused and counted (`ca_commitment_conflict`) — two commitments from one CA are a mistake or a stolen CA key. Bounded against a member flooding the prefix: a value over 4 KiB is skipped unread, a scan reads 1,024 copies in key order, and what it left is a gauge (`ca_commitment_scan_skipped`). Absence means no detection, never a different trust (`tls`) |
 //! | `sys/capauthz/{ns}/{name}`          | Gossip-level capability-authz policy (`required_roles`; resolve-time enforcement) (`compliance`) |
 //! | `sys/config/{param}`               | `ClusterTuner` advisory config (WS-C M9) — a fleet recommendation a node may adopt, today `writer_channel_depth` (u64 LE), written only when it changes (`src/agent/cluster_tuner.rs`, `CONFIG_PREFIX`) |
 //! | `sys/govern/timing`                 | Timing governor — the fleet timing intent (evaporating soft state; local-wins), written through `POST /gateway/govern/timing` (`src/agent/timing_governor.rs`, `TIMING_INTENT_KEY`) |
@@ -323,6 +324,14 @@ pub use mycelium_core::{config, error, hlc, signal};
 /// the `chmod` that closes it.
 #[cfg(feature = "tls")]
 pub use mycelium_core::tls::{issue_node_cert, mint_ca, writable_by_others as tls_writable_by_others};
+/// **The CA's commitment to its successor** (identity-and-lifecycle I2): `commit_successor` is `mycelium tls commit` —
+/// on the issuer's host, the old CA mints its successor and signs `ca-commit.pem`, the file an operator copies into
+/// each node's certificate directory; a node pins the first it is given and refuses another. Refused by name while
+/// the `caGeneration` OID is provisional, so no shipped build writes one yet.
+#[cfg(feature = "tls")]
+pub use mycelium_core::tls::{commit_successor, CaCommitError, CaCommitment, CA_COMMIT_FILE};
+#[cfg(feature = "tls")]
+pub use agent::ca_commit::{ca_commit_key, CA_COMMIT_PREFIX};
 /// Identity-and-lifecycle I1: a **client certificate** for a service's process (`mycelium tls issue --client`),
 /// naming `mycelium-client://{issuer}/{name}` for the gateway principal `token:{issuer}/{name}`. Refused at the
 /// mesh by both verifiers; published by `POST /gateway/identity/client-cert`; a newer one supersedes the older

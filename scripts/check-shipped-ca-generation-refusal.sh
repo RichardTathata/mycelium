@@ -7,6 +7,10 @@
 # CA as every node reads its roots (`ca_cert_to_der`), and must refuse naming the OID and write nothing. CI's Eve fleet
 # job runs this against the release's NODE_FEATURES binary.
 #
+# Since I2's PR 2b-1 it also asks the binary to **commit to a successor** (`mycelium tls commit`), the one new shipped
+# path that would write the extension: a successor is a generation-1 CA. The binary must refuse naming the command and
+# the OID, and leave neither a successor directory nor a `ca-commit.pem` (nothing new ships under a provisional OID).
+#
 # USAGE: scripts/check-shipped-ca-generation-refusal.sh <path to a mycelium binary built without provisional-ca-generation>
 set -euo pipefail
 bin="${1:?usage: $0 <mycelium binary>}"
@@ -15,7 +19,7 @@ if ! grep -qE '^pub const CA_GENERATION_OID_IS_PROVISIONAL: bool = true;' myceli
   exit 0
 fi
 work=$(mktemp -d)
-cleanup() { rm -rf -- "${work:?}/ca" "${work:?}/out"; rm -f -- "${work:?}/err"; rmdir -- "$work"; }
+cleanup() { rm -rf -- "${work:?}/ca" "${work:?}/out" "${work:?}/fleet" "${work:?}/successor"; rm -f -- "${work:?}/err"; rmdir -- "$work"; }
 trap cleanup EXIT
 mkdir -p "$work/ca"
 openssl genpkey -algorithm ed25519 -out "$work/ca/ca-key.pem" 2>/dev/null
@@ -30,3 +34,16 @@ if [[ $code -eq 0 ]] || ! grep -q "1.3.6.1.4.1.32473.2.1" "$work/err" || ! grep 
   exit 1
 fi
 echo "check-shipped-ca-generation-refusal: refused by name, exit $code, nothing written: $(cat "$work/err")"
+
+# `tls commit`: the fleet CA this binary mints (generation 0) commits to a successor (generation 1).
+"$bin" tls ca --out "$work/fleet" >/dev/null 2>"$work/err" || { echo "::error::tls ca failed: $(cat "$work/err")"; exit 1; }
+set +e
+"$bin" tls commit --ca-dir "$work/fleet" --successor "$work/successor" 2>"$work/err" >/dev/null
+code=$?
+set -e
+if [[ $code -eq 0 ]] || ! grep -q "tls commit" "$work/err" || ! grep -q "1.3.6.1.4.1.32473.2.1" "$work/err" || ! grep -q "provisional" "$work/err" \
+   || [[ -e "$work/successor" ]] || [[ -e "$work/fleet/ca-commit.pem" ]]; then
+  echo "::error::a shipped-configuration binary committed to a successor, or did not refuse \`tls commit\` by name, or wrote something (exit $code): $(cat "$work/err")"
+  exit 1
+fi
+echo "check-shipped-ca-generation-refusal: tls commit refused by name, exit $code, nothing written: $(cat "$work/err")"

@@ -190,6 +190,10 @@ pub(crate) mod audit;
 /// row Q); issued under `compliance`.
 #[cfg(feature = "tls")]
 pub(crate) mod revocation;
+/// Identity-and-lifecycle I2 (PR 2b): the CA's commitment to its successor on a node — pinned from the operator's
+/// file only, persisted; KV copies compared with the pin for detection.
+#[cfg(feature = "tls")]
+pub(crate) mod ca_commit;
 /// Identity-and-lifecycle I1: client certificates for services — which of a client principal's keys is current.
 #[cfg(feature = "tls")]
 pub(crate) mod client_cert;
@@ -205,6 +209,8 @@ mod client_grant_tests;
 mod client_cert_tests;
 #[cfg(all(test, feature = "tls"))]
 mod succession_tests;
+#[cfg(all(test, feature = "tls", feature = "provisional-ca-generation"))]
+mod ca_commit_tests;
 #[cfg(feature = "compliance")]
 mod knowledge_keys;
 /// Closure plan C5: applying member removals at the agent.
@@ -1163,6 +1169,10 @@ pub(crate) struct TaskCtx {
     /// (`revocation::IdentityLedger`, lock-free).
     #[cfg(feature = "tls")]
     pub(crate) identity_ledger: Arc<revocation::IdentityLedger>,
+    /// Identity-and-lifecycle I2 (PR 2b): the CA commitment this node pinned from its operator's file, and the
+    /// conflicting or unverified copies it has refused (`ca_commit::CommitmentState`, lock-free).
+    #[cfg(feature = "tls")]
+    pub(crate) ca_commitment: Arc<ca_commit::CommitmentState>,
     /// Identity-and-lifecycle I1: each client principal's newest verified certificate (its high-water mark), and
     /// the journal of supersessions under `[persistence]` (`client_cert::ClientCertLedger`, lock-free).
     #[cfg(feature = "tls")]
@@ -1823,6 +1833,8 @@ impl GossipAgent {
             membership: std::sync::OnceLock::new(),
             #[cfg(feature = "tls")]
             identity_ledger: Arc::new(revocation::IdentityLedger::default()),
+            #[cfg(feature = "tls")]
+            ca_commitment: Arc::default(),
             #[cfg(feature = "tls")]
             client_certs: Arc::new(client_cert::ClientCertLedger::default()),
             #[cfg(feature = "tls")]
@@ -2744,9 +2756,20 @@ impl GossipAgent {
         // to be (#805's review F2, N1): one whose append was already in flight is waited for too. What I2's PR 2b relies
         // on before it persists a Narrowed phase. A failed append leaves its certificate in memory, counted, and a later
         // fold retries it after its backoff.
-        let kept = self.task_ctx.identity_ledger.kept_certs();
-        if !self.task_ctx.identity_ledger.anchors_durable_for(&kept).await {
-            tracing::warn!("a change of roots: a kept-anchor journal append failed; those anchors are kept in this process only");
+        let ledger = &self.task_ctx.identity_ledger;
+        let mut durable = ledger.anchors_durable_for(&ledger.kept_certs()).await;
+        // The budget counts the anchors kept now (the maintainer's decision of 2026-11-17): when a kept certificate is
+        // not journaled and the journal still holds records of anchors this change of roots (or an earlier one) dropped,
+        // the journal is compacted, the fold offers the certificate again, and the wait is asked once more — so a
+        // long-lived, often-rotated node's answer can be `true` again.
+        if !durable && ledger.compact_anchor_journal().await > 0 {
+            while !revocation::refresh_now(&self.task_ctx) {
+                tokio::task::yield_now().await;
+            }
+            durable = ledger.anchors_durable_for(&ledger.kept_certs()).await;
+        }
+        if !durable {
+            tracing::warn!("a change of roots: a kept anchor is not journaled (a failed append, or more anchors kept at once than the budget); those anchors are kept in this process only");
         }
         Ok(())
     }

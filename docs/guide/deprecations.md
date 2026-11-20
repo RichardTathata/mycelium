@@ -4904,7 +4904,7 @@ a node restarted under `[persistence]` keeps an anchor whose record was hidden w
 kept for the process's life only. A node whose anchors were all dropped **trusts nothing** for that node (it keeps an
 empty entry), where before it fell back to the legacy rule (`peer_keys`). Counters: `anchors_dropped`,
 `anchor_journal_refused` (the anchors' own budget: 32 per node, 65 536 in all; past it an anchor lives in memory only;
-the budget is accepted, and a compaction of the anchor journal is a later row, **not built**) and `anchor_append_failed`,
+the budget is accepted; **since §120 it counts the anchors a node keeps now, and the journal is compacted**) and `anchor_append_failed`,
 all on `GET /stats` (`identity_anchors_dropped`, `identity_anchor_journal_refused`, `identity_anchor_append_failed`). A
 kept certificate is marked journaled only once its append is durable; one that failed, or could not be handed to the
 journal, is tried again by a later fold — after a backoff once an append has failed (1 s, doubling, at most 64 s), and a
@@ -5180,6 +5180,143 @@ not held now: the door admits what the evaluator permits.
 
 *Check:* `curl -s http://NODE:HTTP_PORT/stats | jq .evidence_history_unreadable` — `0` on every node. A `1` means that
 node establishes no limited rule: find the `WARN` naming the journal, repair or replace the file, and restart.
+
+## 120. `mycelium tls commit` and `ca-commit.pem`: a CA commits to its successor and a node pins the commitment; the kept-anchor budget counts what a node keeps now (unreleased, identity-and-lifecycle I2, PR 2b-1)
+
+The first part of the succession protocol (`docs/plans/identity-and-lifecycle.md` row I2, §8 row "I2 (PR 2b-1 of 7)"):
+the commitment and the node's pin of it, and the compaction of the kept-anchor journal. **Nothing here changes what a
+node trusts**: the record the successor signs and the phases that act on it are the row's next PR. **No shipped build
+makes or reads a commitment yet**: a successor is a generation-1 CA, and the `caGeneration` extension's OID is
+provisional (§117), so `tls commit` and a node given a `ca-commit.pem` both refuse by name until the registered arc
+replaces it. A node that is given no commitment behaves exactly as before.
+
+**`mycelium tls commit --ca-dir <dir> --successor <dir>` (new).** On the issuer's host, the fleet CA in `<ca-dir>`
+commits to its successor: a successor CA is minted into `<successor>` (the same fleet id, the old CA's generation plus
+one) and `<ca-dir>/ca-commit.pem` is written — the successor's certificate, and the **old** CA's signature over its own
+certificate's digest and the successor's. It names the successor and nothing else. **A CA commits once**: a second run
+is refused naming the existing `ca-commit.pem`, and mints nothing. The successor's files, the commitment and their
+directories are synced to disk before the command returns (the commitment's bytes before its name); an empty or
+damaged `ca-commit.pem` — what a crash could leave — is refused by the next run as an interrupted one, with what to do,
+never read as a commitment already made. The sync order is read from the code; no test witnesses it. `--format json` prints a `mycelium.tls/1` document
+(`command: "commit"`, the two paths, the successor's SPKI SHA-256; no key material).
+- Test: `tls_commit_commits_once_and_a_second_run_changes_nothing`,
+  `a_commitment_is_the_old_cas_signature_over_its_successor_and_every_other_is_refused_by_name`,
+  `a_closed_provisional_gate_refuses_tls_commit_and_a_commitment_and_writes_nothing` (`mycelium-core/src/tls.rs`),
+  `tls_commit_is_refused_by_the_binary_as_it_ships_and_writes_nothing` (`src/main.rs`), and CI's
+  `scripts/check-shipped-ca-generation-refusal.sh` against the release's binary.
+
+**A node pins the commitment its operator places, and only that.** An operator copies `ca-commit.pem` into the node's
+certificate directory (`[tls] auto_cert_dir`). At start the node assesses it against the root it trusts — the named CA
+signed it, the successor is a distinct CA of the next generation — and **pins it**: the commitment is written to
+`{auto_cert_dir}/succession/pin-{predecessor}.pem` (a temporary, fsynced, renamed, the directory fsynced) before the
+node goes on. **A pin is per committing CA** (the maintainer's decision of 2026-11-18): `{predecessor}` is the 64 hex
+digits of the SHA-256 of the committing CA's certificate, a node holds at most one pin per CA, and once it trusts the
+successor it pins **one** commitment from the successor the same way, keeping the first. The operator's file is never written. New refusals at start, each by name:
+- **a commitment the node cannot assess** — malformed, carrying a private key, signed by another key, naming a CA that
+  is not the node's root, a successor of the wrong generation — refuses the start. It is never read as "no commitment";
+- **a node holding a commitment (the file, or a pin) with no `[persistence]`** refuses the start, naming
+  `[persistence]`: a succession needs a node that remembers across a restart what it no longer trusts;
+- **a pin that can no longer be placed** — its committing CA is not a root the node trusts, nor is its successor, and
+  no other pin continues from it — or one damaged or under another CA's name, refuses the start, naming that one file
+  and the way out: remove **that file**. The node's other pins are untouched, and the directory will hold the
+  node's phase from the release that adds the phases, so it is not the thing to remove.
+
+**A second commitment from the same CA is refused and counted, wherever it is seen.** A node that pinned one
+commitment keeps it, and the operator's file beside a pin is assessed before it is called anything:
+- a second commitment **the pinned CA's key signed**, naming another successor, is refused and counted
+  (`ca_commitment_conflict`); the start goes on with the pin and the log names both digests;
+- a file the node cannot read as a commitment — empty, damaged, carrying a private key — or one a CA it trusts did
+  not sign **refuses the start** by name, with a pin exactly as without one. It is never called a conflict;
+- a commitment from a CA the node holds **no pin for**: pinned, if that CA is a root the node trusts (the successor's
+  own commitment to its successor, on a node that now trusts the successor — a different promiser, and no conflict);
+- **the one difference a pin makes:** a well-formed commitment from a CA the node does not trust (yet) — the
+  successor's commitment placed before the node has cut over — pins nothing either way. On a node with **no pin** it
+  refuses the start (unknown predecessor). On a node **holding a pin** the start goes on: the file is warned by name,
+  reported on `GET /stats` as `ca_commitment_file_untrusted_ca` (the operator's file's own signal, apart from the
+  KV's `ca_commitment_unverified`), and read again at the next start — so pushing the successor's commitment to a
+  whole fleet does not stop the nodes that have not cut over from restarting. The difference is one constant
+  (`EARLY_COMMITMENT_BESIDE_A_PIN_STARTS`), and it stays as built (the maintainer's decision of 2026-11-20).
+
+**Removing a pin, and what it takes with it.** A pin stands when its committing CA is a root the node trusts, or its
+successor is, or its successor committed in another pin that stands. So removing a pin leaves the pins of **later**
+CAs untouched, and makes every **earlier** pin unplaceable if they stood only through it: the next start is refused
+naming every such file at once. **A spent pin's signature is not checked at a start** — the pin does not carry its
+committing CA's certificate — so it is the node's own record of a succession it went through, and nothing reads a
+successor from it for trust. **"Per CA" is per CA certificate:** a CA re-issued under the same key with another
+certificate is another committing CA, and a pin for the old certificate then refuses the start.
+
+There is no in-band way to replace a pin. To change one deliberately an operator removes that CA's pin file,
+`succession/pin-{predecessor}.pem` (`docs/operations/cert-rotation.md` says what that costs).
+- Test: `a_node_pins_the_operators_commitment_persists_it_and_refuses_another`,
+  `the_successors_own_commitment_is_pinned_beside_a_spent_pin_and_a_second_from_it_is_refused`,
+  `a_commitment_from_a_ca_the_node_does_not_trust_yet_is_refused_by_name_and_pins_nothing`,
+  `a_spent_pin_is_kept_and_an_unassessable_one_refuses_the_start_until_that_pin_is_removed`,
+  `a_pin_under_another_cas_name_and_a_damaged_pin_refuse_the_start_naming_the_file`,
+  `removing_a_middle_pin_refuses_the_start_naming_every_pin_that_no_longer_stands`,
+  `beside_a_pin_an_unverifiable_operator_file_is_not_a_conflict` (`mycelium-core/src/tls.rs`);
+  `a_node_pins_one_commitment_per_committing_ca_and_keeps_both_across_restarts`,
+  `a_node_holding_a_commitment_without_persistence_refuses_to_start_by_name`,
+  `a_node_pins_from_the_operators_file_publishes_it_and_keeps_the_pin_across_restarts` (`src/agent/ca_commit_tests.rs`).
+
+**A new KV namespace, `sys/ca-commit/{node}/{predecessor}`, for detection only.** A node publishes each commitment it
+pinned, while it trusts that commitment's CA, under its own key and republishes it when it is overwritten or removed.
+Every node compares a copy it sees with the pin it holds **for that copy's CA** (a verifiable copy from a CA it holds
+no pin for is not a conflict):
+a copy no root it trusts signed is read as absent and counted (`ca_commitment_unverified`), and a copy the CA's key
+**did** sign that differs from the pin is refused and counted (`ca_commitment_conflict`) — two commitments from one CA
+are a mistake or a stolen CA key, and this is where it shows. **A copy in the KV is never pinned**: a node with no
+operator's file holds no commitment, whatever the KV carries. `GET /stats` gains `ca_commitment_pinned`,
+`ca_commitment_pins` (the count: one per committing CA), `ca_commitment_conflict`, `ca_commitment_unverified`,
+`ca_commitment_file_untrusted_ca` and
+`ca_commitment_scan_skipped`.
+- **The scan is bounded, because any member can write any key under the prefix.** A value over 4 KiB is skipped
+  unread (a commitment is under 2 KiB); a scan reads at most 1,024 copies, in key order **from where the last scan
+  stopped**, wrapping, so with `n` readable copies every one is read within `ceil(n / 1,024)` scans — keys that sort
+  ahead of a genuine copy delay its reading and do not hide it (the bound is for a key set that stands still: under
+  churn the delay grows with the flood); `ca_commitment_scan_skipped` is a gauge of what the
+  last scan left for the next. Each distinct copy is counted once and never again; past 1,024 distinct unverified
+  copies (64 distinct conflicts, in a set of their own) in a process's life a further distinct one is not counted. The prefix is under `sys/`, so the raw KV routes refuse a
+write to it as they do any owned key. An older node ignores the namespace.
+- Test: `a_kv_copy_of_a_commitment_is_compared_with_the_pin_and_never_becomes_one`,
+  `a_kv_copy_is_compared_with_the_pin_for_its_own_ca_and_never_pins`,
+  `a_flooded_prefix_is_counted_once_and_never_again`, `a_scan_reads_a_bounded_number_of_copies_and_reports_the_rest`,
+  `a_conflict_behind_a_flood_of_keys_is_counted_within_a_bounded_number_of_scans`,
+  `a_value_too_large_to_be_a_commitment_is_skipped_unread`.
+
+**The kept-anchor budget counts the anchors a node keeps now** (the maintainer's decision of 2026-11-17; it replaces
+§117's "32 per node" over the node's life). When the budget is met and the identity journal still holds `Anchor`
+records of certificates the node has since dropped, the journal is **compacted**: the records the node still needs are
+written to `revocations.journal.compact`, that file is fsynced and renamed over the journal, and the directory is
+fsynced. Counted revocations and saturation marks are carried over unchanged, as is any record this binary cannot
+decode or would not restore. **The last record of a peer the node keeps nothing of is kept too**: that record is the
+node's memory that it once anchored the peer, which is what makes such a peer trusted for nothing after a restart
+instead of reading as legacy (§117); it leaves once a certificate of the peer is kept and journaled again. A crash before the rename leaves the journal as it was (the next start removes the temporary); a crash after
+it leaves the compacted journal, whole. The on-disk format is unchanged: the same frames, fewer of them.
+- **Behaviour change:** a long-lived node whose peers rotate often no longer reaches a point where every further anchor
+  is "kept in this process only". `identity_anchor_journal_refused` now counts only a node that keeps more than the
+  budget **at once** (32 certificates per peer, 65 536 in all), which is refused by name as before.
+- `GET /stats` gains `identity_anchor_journal_compacted` (records removed) and `identity_anchor_compaction_failed` (a
+  failed compaction leaves the journal as it was and is tried again after a minute).
+- **Downgrade, stated:** an older binary reads a compacted journal as it reads any other.
+- Test: `the_anchor_budget_counts_the_anchors_kept_now`, `a_certificate_past_the_anchor_budget_is_counted_once`,
+  `a_crash_before_the_compactions_rename_leaves_the_journal_as_it_was`,
+  `a_crash_after_the_compactions_rename_leaves_the_compacted_journal_whole`,
+  `a_compaction_that_changes_nothing_leaves_the_journaled_set_as_it_was` (`src/agent/revocation.rs`);
+  `a_rewrite_keeps_the_chosen_records_and_later_appends_land_in_the_new_file`,
+  `a_compaction_syncs_the_new_file_renames_it_and_syncs_the_directory`,
+  `an_open_removes_the_temporary_of_a_compaction_that_stopped_before_its_rename`
+  (`src/agent/journal_repair_tests.rs`); `an_often_rotated_peer_does_not_exhaust_the_kept_anchor_budget`,
+  `a_change_of_roots_compacts_the_anchor_journal_before_it_answers` (`src/agent/succession_tests.rs`).
+
+**API.** mycelium-core (`tls`): `CaCommitment`, `CaCommitError`, `CommitmentPins`, `PinnedCommitment`,
+`OfferedCommitment`, `commit_successor`, `pin_ca_commitment`, `held_ca_commitment`, `ca_commit_pin_file`, `sha256`,
+`CA_COMMIT_FILE`, `CA_COMMIT_PIN_PREFIX`, `CA_COMMIT_PIN_SUFFIX`, `EARLY_COMMITMENT_BESIDE_A_PIN_STARTS`, `CA_COMMIT_PEM_LABEL` and `SUCCESSION_DIR` are
+new. mycelium: `commit_successor`, `CaCommitment`, `CaCommitError`, `CA_COMMIT_FILE`, `ca_commit_key` and
+`CA_COMMIT_PREFIX` are re-exported. Nothing is removed or renamed, and no configuration field is added.
+
+*Check:* `ls <auto_cert_dir>/ca-commit.pem <auto_cert_dir>/succession 2>/dev/null` on each node — a node that holds
+either needs `[persistence]`; `grep -rn "identity_anchor_journal_refused" <your dashboards>` — it no longer rises with a
+node's age.
 
 ## 122. `wire-check` reads an edge to a hosted component as the provider built from the declaration decides a member's call of it: the rule must be the host's own, for a node, in a form that provider admits (unreleased, the maintainer's choice of 2026-11-18)
 

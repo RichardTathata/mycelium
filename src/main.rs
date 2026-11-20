@@ -769,6 +769,8 @@ fn explain_cli(args: Vec<String>) -> i32 {
 /// before the first `issue`; refused when `<dir>` already holds a CA, names a mint that was interrupted, and needs a
 /// filesystem with hard links. Only `ca-cert.pem` ever goes to a node.
 ///
+/// `mycelium tls commit --ca-dir <dir> --successor <dir>` — the fleet CA commits to its successor ([`tls_commit`]).
+///
 /// `mycelium tls pin <cert.pem>` — the hex SHA-256 of a certificate's `SubjectPublicKeyInfo`, read from its
 /// structural position: the value a partner's federation client pins (`FederationClient::with_tls_pins`) for a
 /// gateway that serves this certificate's key. An operator hands the partner this line, never the key
@@ -779,7 +781,7 @@ fn explain_cli(args: Vec<String>) -> i32 {
 /// material, no certificate body. The warnings `tls_writable_by_others` gives go into the document's `warnings`
 /// rather than to stderr; a refusal is on stderr with its exit code and no document.
 fn tls_cli(args: Vec<String>) -> i32 {
-    const USAGE: &str = "Usage: mycelium tls ca --out <dir> [--format text|json]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir> [--force] [--format text|json]\n       mycelium tls issue --ca-dir <dir> --client <name> --issuer <issuer> --out <dir> [--force] [--format text|json]\n       mycelium tls issue --ca-dir <dir> --client <name> --consent --public-key <spki.pem> --grade <grade> --issuer <issuer> --out <dir> [--force] [--format text|json]\n         (--grade: what the enrolment told you about where the key lives; you vouch for it, and no node can check it)\n       mycelium tls pin <cert.pem> [--format text|json]";
+    const USAGE: &str = "Usage: mycelium tls ca --out <dir> [--format text|json]\n       mycelium tls commit --ca-dir <dir> --successor <dir> [--format text|json]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir> [--force] [--format text|json]\n       mycelium tls issue --ca-dir <dir> --client <name> --issuer <issuer> --out <dir> [--force] [--format text|json]\n       mycelium tls issue --ca-dir <dir> --client <name> --consent --public-key <spki.pem> --grade <grade> --issuer <issuer> --out <dir> [--force] [--format text|json]\n         (--grade: what the enrolment told you about where the key lives; you vouch for it, and no node can check it)\n       mycelium tls pin <cert.pem> [--format text|json]";
     // `--format` is the one flag every subcommand takes; read it out first, so each keeps its own parsing.
     let mut json = false;
     let mut rest = Vec::with_capacity(args.len());
@@ -796,6 +798,7 @@ fn tls_cli(args: Vec<String>) -> i32 {
         Some("issue") => {}
         Some("pin") => return tls_pin(it.collect(), json),
         Some("ca") => return tls_ca(it.collect(), json),
+        Some("commit") => return tls_commit(it.collect(), json),
         _ => { eprintln!("{USAGE}"); return 2; }
     }
     let (mut ca_dir, mut node, mut out): (Option<String>, Option<String>, Option<String>) = (None, None, None);
@@ -1045,6 +1048,54 @@ fn tls_ca(args: Vec<String>, json: bool) -> i32 {
     {
         let _ = (dir, json);
         eprintln!("mycelium tls ca needs a binary built with the `tls` feature");
+        2
+    }
+}
+
+/// `mycelium tls commit --ca-dir <dir> --successor <dir>` — on the issuer's host, the fleet CA in `<ca-dir>` commits to
+/// its successor (identity-and-lifecycle I2): a successor CA is minted into `<successor>` (the same fleet, the next
+/// generation) and `<ca-dir>/ca-commit.pem` is written, signed with the **old** CA's key. An operator copies that one
+/// file into each node's certificate directory; a node pins the first commitment it is given and refuses another, so a
+/// CA commits once and a second run is refused. Neither CA key ever goes to a node. Exits 2 on usage or a refusal —
+/// which is every run of a build that ships while the `caGeneration` OID is provisional: it writes nothing.
+fn tls_commit(args: Vec<String>, json: bool) -> i32 {
+    let (mut ca_dir, mut successor) = (None, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match (a.as_str(), it.next()) {
+            ("--ca-dir", Some(v)) => ca_dir = Some(v.clone()),
+            ("--successor", Some(v)) => successor = Some(v.clone()),
+            _ => { ca_dir = None; break; }
+        }
+    }
+    let (Some(ca_dir), Some(successor)) = (ca_dir, successor) else {
+        eprintln!("Usage: mycelium tls commit --ca-dir <dir> --successor <dir> [--format text|json]");
+        return 2;
+    };
+    #[cfg(feature = "tls")]
+    match mycelium::commit_successor(std::path::Path::new(&ca_dir), std::path::Path::new(&successor)) {
+        Ok((commitment, cert)) => {
+            let warnings = mycelium::tls_writable_by_others(std::path::Path::new(&successor));
+            if json {
+                return tls_json(serde_json::json!({
+                    "command": "commit", "commitment": commitment.display().to_string(), "successor_cert": cert.display().to_string(),
+                    "successor_key": std::path::Path::new(&successor).join("ca-key.pem").display().to_string(), "warnings": warnings,
+                }), &[("successor_spki_sha256", &cert)]);
+            }
+            println!("committed: {} names the successor CA in {successor}", commitment.display());
+            println!("copy {} into each node's certificate directory (`[tls] auto_cert_dir`); a node pins the first commitment it is given", commitment.display());
+            println!("keep both ca-key.pem files on this host; a CA commits once");
+            for said in warnings {
+                eprintln!("warning: {said}");
+            }
+            0
+        }
+        Err(e) => { eprintln!("{e}"); 2 }
+    }
+    #[cfg(not(feature = "tls"))]
+    {
+        let _ = (ca_dir, successor, json);
+        eprintln!("mycelium tls commit needs a binary built with the `tls` feature");
         2
     }
 }
@@ -1385,6 +1436,28 @@ mod tls_cli_tests {
         let d = std::env::temp_dir().join(format!("mycelium-tls-cli-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    /// Identity-and-lifecycle I2 (PR 2b), decision (e): **`tls commit`, in the binary as it ships, is refused by name
+    /// and writes nothing** — no successor directory, no `ca-commit.pem` — while the `caGeneration` OID is provisional;
+    /// a usage error is exit 2 too. (With the test-only `provisional-ca-generation` feature the same call commits; the
+    /// library's tests cover that path, and this test is not built there.) Seen failing first with `tls commit`'s own
+    /// gate check removed: the successor's directory was made before the mint refused.
+    #[cfg(not(feature = "provisional-ca-generation"))]
+    #[test]
+    fn tls_commit_is_refused_by_the_binary_as_it_ships_and_writes_nothing() {
+        let (ca, successor) = (scratch("commit-ca"), scratch("commit-successor"));
+        assert_eq!(tls_ca(vec!["--out".into(), ca.display().to_string()], false), 0);
+        let args = |ca: &std::path::Path, s: &std::path::Path| vec!["--ca-dir".to_string(), ca.display().to_string(), "--successor".to_string(), s.display().to_string()];
+        assert_eq!(tls_commit(args(&ca, &successor), false), 2, "refused");
+        assert_eq!(tls_commit(args(&ca, &successor), true), 2, "and as JSON: no document, exit 2");
+        assert!(!successor.exists(), "no successor directory");
+        assert!(!ca.join("ca-commit.pem").exists(), "no commitment");
+        let err = mycelium::commit_successor(&ca, &successor).expect_err("refused").to_string();
+        assert!(err.contains("tls commit") && err.contains("1.3.6.1.4.1.32473.2.1") && err.contains("provisional"), "{err}");
+        assert_eq!(tls_commit(vec!["--ca-dir".into(), ca.display().to_string()], false), 2, "usage: no successor");
+        assert_eq!(tls_commit(vec!["--successor".into()], false), 2, "usage: a flag without its value");
+        let _ = std::fs::remove_dir_all(&ca);
     }
 
     /// `tls ca` mints a CA `tls issue` can sign with, and refuses a second over it; `tls pin` of the issued

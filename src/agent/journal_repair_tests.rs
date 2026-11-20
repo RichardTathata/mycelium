@@ -296,3 +296,95 @@ async fn reopening_a_journal_syncs_its_directory_and_creates_none() {
     assert!(trace[..trace.len() - 1].iter().all(|o| *o == "dir.sync") && trace.len() > 1, "{trace:?}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+// ── Compaction (identity-and-lifecycle I2; the maintainer's decision of 2026-11-17) ─────────────
+
+fn keep_all_but(drop: &'static [u8]) -> KeepRecord {
+    Box::new(move |r: &[u8]| r != drop)
+}
+
+/// **A rewrite keeps the records chosen, in order, and the journal goes on appending to the new file.** Three records,
+/// the middle one left out; a record appended after the rewrite is read back behind the two kept, at the sequence a
+/// restart would give it. Seen failing first with the writer left on the handle it had (no reopen after the rename):
+/// the later append was acknowledged `OnDisk` into the replaced file, and no reader returned it.
+#[tokio::test]
+async fn a_rewrite_keeps_the_chosen_records_and_later_appends_land_in_the_new_file() {
+    let path = dir("rewrite").join("j.log");
+    let j = Journal::open(&path, "test/rewrite").unwrap();
+    for r in [&b"one"[..], b"two", b"three"] {
+        j.append(r.to_vec()).await.unwrap();
+    }
+    assert_eq!(j.rewrite(keep_all_but(b"two")).await.unwrap(), RewriteOutcome::Done(Rewritten { kept: 2, dropped: 1 }));
+    assert_eq!(read_journal(&path).unwrap(), vec![b"one".to_vec(), b"three".to_vec()]);
+    let later = j.append(b"four".to_vec()).await.unwrap();
+    assert_eq!(later.seq, 2, "numbered as a restart over the compacted file would number it");
+    assert_eq!(read_journal(&path).unwrap(), vec![b"one".to_vec(), b"three".to_vec(), b"four".to_vec()]);
+    // Nothing to drop: the file is not touched.
+    let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+    assert_eq!(j.rewrite(Box::new(|_| true)).await.unwrap(), RewriteOutcome::Done(Rewritten { kept: 3, dropped: 0 }));
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before);
+    drop(j);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let j = Journal::open(&path, "test/rewrite").unwrap();
+    assert_eq!(j.append(b"five".to_vec()).await.unwrap().seq, 3);
+}
+
+/// **The compaction's storage order, witnessed: the new file is synced, then renamed over the journal, then the
+/// directory is synced** — the order the persistence invariants require (a name is never durable before its bytes,
+/// and the rename is made durable). Read from the trace the journal reports as each step returns. Seen failing first
+/// with the temporary's `sync_all` removed (no `compact.sync` before the rename) and, in a second build, with the
+/// directory sync after the rename removed (no `parent.sync` after it).
+#[tokio::test]
+async fn a_compaction_syncs_the_new_file_renames_it_and_syncs_the_directory() {
+    let path = dir("rewrite-order").join("j.log");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let j = Journal::open_traced(&path, "test/rewrite-order", tx).unwrap();
+    for r in [&b"one"[..], b"two"] {
+        j.append(r.to_vec()).await.unwrap();
+    }
+    while rx.try_recv().is_ok() {}
+    j.rewrite(keep_all_but(b"one")).await.unwrap();
+    let steps: Vec<&'static str> = rx.try_iter().map(|(op, _)| op).collect();
+    assert_eq!(steps, vec!["compact.sync", "compact.rename", "parent.sync"], "the compaction's steps, in order");
+}
+
+/// **A compaction that stopped before its rename left a temporary; the next open removes it and reads the journal as
+/// it was.** Seen failing first with the removal taken out of `open`: the temporary was still there.
+#[tokio::test]
+async fn an_open_removes_the_temporary_of_a_compaction_that_stopped_before_its_rename() {
+    let path = dir("rewrite-stale").join("j.log");
+    let crash = Arc::new(std::sync::atomic::AtomicU8::new(1));
+    let j = Journal::open_with_crash(&path, "test/rewrite-stale", crash, None).unwrap();
+    for r in [&b"one"[..], b"two"] {
+        j.append(r.to_vec()).await.unwrap();
+    }
+    assert!(matches!(j.rewrite(keep_all_but(b"one")).await, Err(JournalError::Failed(_))));
+    let tmp = PathBuf::from(format!("{}.compact", path.display()));
+    assert!(tmp.exists());
+    drop(j);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let _j = Journal::open(&path, "test/rewrite-stale").unwrap();
+    assert!(!tmp.exists(), "removed at open");
+    assert_eq!(read_journal(&path).unwrap(), vec![b"one".to_vec(), b"two".to_vec()], "the journal as it was");
+}
+
+/// **A rewrite that fails before its rename says the journal is unchanged, and the writer goes on.** The temporary's
+/// name is taken by a directory, so the new file cannot be written: the answer is `Unchanged`, the journal holds what
+/// it held, the next append lands in it, and a rewrite once the name is free succeeds. Seen failing first with a
+/// failure before the rename poisoning the writer: the append after it was refused.
+#[tokio::test]
+async fn a_rewrite_that_fails_before_its_rename_leaves_the_journal_and_its_writer_as_they_were() {
+    let path = dir("rewrite-unchanged").join("j.log");
+    let j = Journal::open(&path, "test/rewrite-unchanged").unwrap();
+    for r in [&b"one"[..], b"two"] {
+        j.append(r.to_vec()).await.unwrap();
+    }
+    let tmp = PathBuf::from(format!("{}.compact", path.display()));
+    std::fs::create_dir(&tmp).unwrap();
+    assert!(matches!(j.rewrite(keep_all_but(b"one")).await, Ok(RewriteOutcome::Unchanged(_))));
+    assert_eq!(read_journal(&path).unwrap(), vec![b"one".to_vec(), b"two".to_vec()]);
+    j.append(b"three".to_vec()).await.expect("the writer goes on");
+    std::fs::remove_dir(&tmp).unwrap();
+    assert_eq!(j.rewrite(keep_all_but(b"one")).await.unwrap(), RewriteOutcome::Done(Rewritten { kept: 2, dropped: 1 }));
+    assert_eq!(read_journal(&path).unwrap(), vec![b"two".to_vec(), b"three".to_vec()]);
+}

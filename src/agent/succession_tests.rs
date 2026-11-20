@@ -817,3 +817,178 @@ async fn a_dropped_anchor_takes_its_retry_bookkeeping_with_it() {
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[cfg(feature = "provisional-ca-generation")]
+fn persisted(base: &Path) -> crate::config::PersistenceConfig {
+    crate::config::PersistenceConfig {
+        base_path: base.join("persist"),
+        sync_mode: crate::config::SyncMode::Flush,
+        snapshot_wal_threshold: 1_000,
+        snapshot_interval_secs: 3_600,
+        on_unreadable: crate::config::OnUnreadable::Refuse,
+    }
+}
+
+/// **The decision of 2026-11-17, on a live node: a long-lived, often-rotated peer does not exhaust the kept-anchor
+/// budget.** N rotates forty times under one CA, each new key's certificate record folded as it arrives. A node keeps
+/// its sixteen newest keys, so twenty-four of the forty anchors it journaled are dropped again — and before the
+/// compaction the thirty-third was refused for good ("32 per node life"). Now the journal is compacted when the budget
+/// is met: nothing is refused, every certificate the node keeps is journaled, and a restart reads back exactly the
+/// sixteen newest keys as N's anchors, with every record hidden from the store. Seen failing first with the budget
+/// refusing whenever the journal is full: anchors were refused, `anchors_durable_for(kept_certs())` answered `false`,
+/// and the restarted node anchored N on older keys.
+#[cfg(feature = "provisional-ca-generation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_often_rotated_peer_does_not_exhaust_the_kept_anchor_budget() {
+    let base = fresh_dir("compact");
+    let ((ca1, _), _) = ca_and_successor(&base);
+    let (ia, mut cfg) = node_cfg(&base, "a", &ca1, &ca1.join("ca-cert.pem"), vec![]);
+    cfg.persistence = Some(persisted(&base));
+    let a = started(&ia, &cfg).await;
+    let n = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+    let ledger = Arc::clone(&a.task_ctx.identity_ledger);
+    let mut keys = Vec::new();
+    let mut paths = Vec::new();
+    for i in 0..40 {
+        let (k, cert) = member_cert(&base.join(format!("rot{i}")), &ca1, &n, None);
+        let path = revocation::cert_record_key(&n, &k);
+        put(&a.task_ctx, &path, &cert);
+        refold(&a.task_ctx);
+        keys.push(k);
+        paths.push(path);
+        // Distinct issuance milliseconds, so "newest" is the order of rotation.
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    }
+    // The budget's compaction runs off the fold's thread; the fold after it journals what it made room for.
+    let t = Instant::now();
+    loop {
+        refold(&a.task_ctx);
+        if ledger.anchors_durable_for(&ledger.kept_certs()).await || t.elapsed() > Duration::from_secs(15) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(ledger.anchors_durable_for(&ledger.kept_certs()).await, "every kept certificate is durable");
+    assert_eq!(ledger.anchor_journal_refused.load(std::sync::atomic::Ordering::Relaxed), 0, "no anchor refused by the budget");
+    assert!(ledger.compaction.removed.load(std::sync::atomic::Ordering::Relaxed) >= 8, "dropped anchors left the journal");
+    let newest: std::collections::HashSet<[u8; 32]> = keys[24..].iter().copied().collect();
+    assert_eq!(a.task_ctx.trusted_keys(&n).into_iter().collect::<std::collections::HashSet<_>>(), newest);
+    for p in &paths {
+        put(&a.task_ctx, p, b"hidden");
+    }
+    a.shutdown().await;
+
+    let a = started(&ia, &cfg).await;
+    refold(&a.task_ctx);
+    assert_eq!(a.task_ctx.trusted_keys(&n).into_iter().collect::<std::collections::HashSet<_>>(), newest, "the sixteen newest keys, from the compacted journal");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// **A change of roots compacts before it answers** (the decision of 2026-11-17; the must-address item #805's confirm
+/// round left for PR 2b): with the journal's budget for N full of anchors this node has dropped, the certificate a
+/// change of roots keeps is journaled before `change_roots` returns — `anchors_durable_for(kept_certs())` is `true`
+/// again, which is what a Narrowed phase waits on. The budget's own background compaction is held off, so only the
+/// change of roots can have made room. Seen failing first with the compaction removed from `change_roots`: the kept
+/// certificate was not journaled when it returned.
+#[cfg(feature = "provisional-ca-generation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_change_of_roots_compacts_the_anchor_journal_before_it_answers() {
+    let base = fresh_dir("compact-roots");
+    let ((ca1, der1), (ca2, der2)) = ca_and_successor(&base);
+    let (ia, mut cfg) = node_cfg(&base, "a", &ca1, &ca1.join("ca-cert.pem"), vec![]);
+    cfg.persistence = Some(persisted(&base));
+    let a = started(&ia, &cfg).await;
+    let ledger = Arc::clone(&a.task_ctx.identity_ledger);
+    let n = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+    // Thirty-two old-CA anchors of N journaled: sixteen keys' worth kept, the budget full.
+    let mut newest = None;
+    for i in 0..32 {
+        let (k, cert) = member_cert(&base.join(format!("rot{i}")), &ca1, &n, None);
+        put(&a.task_ctx, &revocation::cert_record_key(&n, &k), &cert);
+        refold(&a.task_ctx);
+        newest = Some(k);
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    }
+    assert!(ledger.anchors_durable_for(&ledger.kept_certs()).await);
+    assert_eq!(ledger.anchors_journaled_count_for_test(&n), 32, "the budget for N is full, sixteen of its records dead");
+    ledger.block_spawned_compaction_for_test();
+    // Widen, and N's newest key is re-issued under the successor.
+    let kn = newest.unwrap();
+    a.change_roots(a.task_ctx.tls.get().unwrap().node_cert_der(), vec![der1.clone(), der2.clone()]).await.unwrap();
+    let (_, n2) = member_cert(&base, &ca2, &n, Some(kn));
+    put(&a.task_ctx, &revocation::cert_record_key(&n, &kn), &n2);
+    refold(&a.task_ctx);
+    assert!(!ledger.anchor_journaled_for_test(&n, &n2), "the budget is full and nothing has compacted");
+    // Narrow.
+    let ka = a.task_ctx.tls.get().unwrap().verifying_key_bytes();
+    let (_, a2) = member_cert(&base, &ca2, &ia, Some(ka));
+    a.change_roots(a2, vec![der2.clone()]).await.unwrap();
+    assert!(ledger.anchor_journaled_for_test(&n, &n2), "journaled before the change of roots returned");
+    assert!(ledger.anchors_durable_for(&ledger.kept_certs()).await, "every kept certificate is durable again");
+    assert_eq!(a.task_ctx.trusted_keys(&n), vec![kn]);
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// **#812's review F1: a compaction does not hand a fail-closed peer back to legacy at the next restart** (the
+/// decision of 2026-11-16, `deprecations.md` §117: a peer whose kept certificates no longer verify is trusted for
+/// nothing, "never falling back to legacy"). Two generation-0 CAs, so legacy is open. N is anchored under CA1; the
+/// node widens, narrows to CA2, and N's record is hidden: N has an entry and no anchor, and no trusted key. The
+/// journal is then compacted — or not, the control — and the node restarted on CA2's files with N's key in
+/// `peer_keys`. Either way N still has its entry and no trusted key. The reviewer's test, adopted. Seen failing first
+/// with every dead record removable: after the compaction and the restart N had no entry and its old key was trusted.
+#[cfg(feature = "provisional-ca-generation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_compaction_then_a_restart_leaves_a_fail_closed_peer_fail_closed() {
+    for compact in [false, true] {
+        let base = fresh_dir(if compact { "f1-compacted" } else { "f1-control" });
+        let ((ca1, der1), (ca2, der2)) = two_cas(&base);
+        let (ia, mut cfg) = node_cfg(&base, "a", &ca1, &ca1.join("ca-cert.pem"), vec![]);
+        cfg.persistence = Some(persisted(&base));
+        let a = started(&ia, &cfg).await;
+        let n = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+        let (kn, n1) = member_cert(&base, &ca1, &n, None);
+        let path = revocation::cert_record_key(&n, &kn);
+        put(&a.task_ctx, &path, &n1);
+        a.task_ctx.peer_keys.pin().insert(n.clone(), vec![kn]);
+        refold(&a.task_ctx);
+        assert_eq!(a.task_ctx.trusted_keys(&n), vec![kn]);
+        assert!(a.task_ctx.identity_ledger.anchors_durable_for(&a.task_ctx.identity_ledger.kept_certs()).await);
+        // A second peer, anchored under CA1 only: its record is dead after the narrow, so the compaction has work.
+        let m = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+        let (km, m1) = member_cert(&base, &ca1, &m, None);
+        put(&a.task_ctx, &revocation::cert_record_key(&m, &km), &m1);
+        let (km2, m2) = member_cert(&base.join("m2"), &ca1, &m, None);
+        put(&a.task_ctx, &revocation::cert_record_key(&m, &km2), &m2);
+        refold(&a.task_ctx);
+        let ka = a.task_ctx.tls.get().unwrap().verifying_key_bytes();
+        a.change_roots(a.task_ctx.tls.get().unwrap().node_cert_der(), vec![der1.clone(), der2.clone()]).await.unwrap();
+        let (_, a2) = member_cert(&base, &ca2, &ia, Some(ka));
+        a.change_roots(a2.clone(), vec![der2.clone()]).await.unwrap();
+        assert!(!a.task_ctx.key_standing.legacy_closed(), "two generation-0 roots: legacy open");
+        assert!(revocation::has_anchor_entry_for_test(&a.task_ctx.identity_ledger, &n));
+        assert!(a.task_ctx.trusted_keys(&n).is_empty(), "in-process: fails closed");
+        put(&a.task_ctx, &path, b"hidden");
+        refold(&a.task_ctx);
+        if compact {
+            let removed = a.task_ctx.identity_ledger.compact_anchor_journal().await;
+            assert!(removed >= 1, "the compaction had dead records to remove ({removed})");
+        }
+        a.shutdown().await;
+
+        let cert_file = base.join("a2.cert.pem");
+        std::fs::write(&cert_file, pem(&a2)).unwrap();
+        let mut cfg2 = cfg.clone();
+        let tls2 = cfg2.tls.as_mut().unwrap();
+        tls2.cert_pem = Some(cert_file);
+        tls2.ca_cert_pem = Some(ca2.join("ca-cert.pem"));
+        let a = started(&ia, &cfg2).await;
+        a.task_ctx.peer_keys.pin().insert(n.clone(), vec![kn]);
+        refold(&a.task_ctx);
+        assert!(revocation::has_anchor_entry_for_test(&a.task_ctx.identity_ledger, &n), "compact={compact}: N's entry is rebuilt at the restart");
+        assert!(a.task_ctx.trusted_keys(&n).is_empty(), "compact={compact}: N still fails closed, never legacy");
+        a.shutdown().await;
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}

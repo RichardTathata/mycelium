@@ -736,7 +736,11 @@ impl GossipAgent {
                         });
                     }
                     super::revocation::publish_own_certificate(&self.task_ctx, &arc_tls);
+                    // Identity-and-lifecycle I2 (PR 2b): the CA's commitment to its successor — pinned from the
+                    // operator's file only, persisted, refused without `[persistence]`, a second one refused.
+                    super::ca_commit::at_start(&self.task_ctx, tls_cfg, &arc_tls)?;
                     let _ = self.task_ctx.tls.set(Arc::clone(&arc_tls));
+                    super::ca_commit::publish(&self.task_ctx);
                     // The legacy pair (what a node older than Phase 3b reads), published SIGNED now that
                     // the identity is installed: a bare `sys/identity/` or proof is not
                     // self-authenticating, so a node requiring signed frames refuses it unsigned. A peer
@@ -1304,6 +1308,8 @@ impl GossipAgent {
                 super::revocation::refresh(&ctx);
                 // Identity-and-lifecycle I1: re-judge client certificates and republish this gateway's own records.
                 super::client_cert::refresh(&ctx);
+                // I2 (PR 2b): compare the commitments the KV carries with this node's pin (detection only).
+                super::ca_commit::scan(&ctx);
             }
         });
     }
@@ -1328,6 +1334,9 @@ impl GossipAgent {
         // Identity-and-lifecycle I1: a client certificate record arriving raises its principal's mark at once, so a
         // newer record overwritten before anyone asks about its key still supersedes the older key.
         let mut client_rx = kv_subscribe_prefix(&self.task_ctx, Arc::<str>::from(super::client_cert::CLIENT_CERT_PREFIX));
+        // I2 (PR 2b): a commitment arriving in the KV is compared with this node's pin at once (detection only), and
+        // this node's own copy is republished if it was overwritten or removed.
+        let mut commit_rx = kv_subscribe_prefix(&self.task_ctx, Arc::<str>::from(super::ca_commit::CA_COMMIT_PREFIX));
         let shutdown_rx = self.shutdown_tx.subscribe();
         let peer_keys   = Arc::clone(&self.task_ctx.peer_keys);
         let anchor_keys = Arc::clone(&self.task_ctx.peer_anchor_keys);
@@ -1351,6 +1360,12 @@ impl GossipAgent {
                     res = client_rx.changed() => {
                         if res.is_err() { break; }
                         super::client_cert::refresh(&ctx);
+                        continue;
+                    }
+                    res = commit_rx.changed() => {
+                        if res.is_err() { break; }
+                        super::ca_commit::scan(&ctx);
+                        super::revocation::republish_own(&ctx, &ctx.identity_ledger);
                         continue;
                     }
                 }
