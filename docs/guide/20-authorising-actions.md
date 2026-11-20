@@ -865,12 +865,13 @@ So the check reads the rules of each unit that could host the component, in the 
   calling nodes where you know them.
 - **`host-dependent edge`** (warning): one host's rules admit and another's do not. Which host installs the
   component is decided at run time.
-- **`node-decided edge`** (warning): the only reading that admits names the requirer's **unit** principal, as the
+- **`node-decided edge`** (error): the only reading that admits names the requirer's **unit** principal, as the
   rule's actor or the holder of the mandate it requires. No node is a unit's principal, so a provider built from
   `[authority]` **refuses** this call.
-- **`mandate-dependent edge`** (warning): the admitting rule sets `requires_mandate`, and a declared mandate held
+- **`mandate-dependent edge`** (error): the admitting rule sets `requires_mandate`, and a declared mandate held
   by a `node:` principal covers it. `[authority]` entitles no authority to a mandate scope, so the provider built
-  from the declaration refuses; a node whose execution authority is attached in code can establish it.
+  from the declaration refuses; a node whose execution authority is attached in code can establish it, and is
+  not the provider the check models.
 - **`unauthorisable edge`** (error): otherwise. The message names the units whose rules the provider reads and why
   each rule written for the call does not admit — `cancellable` (the door cannot stop a begun call),
   `requires_scopes` (a member's call carries none), `signed_with` (a signed grant decision only), `requires_facts`

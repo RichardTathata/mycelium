@@ -28,6 +28,10 @@
   vocabulary the edge is `ungoverned edge` again, reworded to name the hosts and a rule they do not read. Stated,
   not read: a `requires_grant` or `requires_values` rule before a plain one shadows it at the provider; a host unit
   with an exposure rule or no `principal`. `mandate-dependent edge` has a door half that presents a mandate.
+- **The severities, decided (2026-11-20).** `node-decided edge` and `mandate-dependent edge` are errors: the check
+  models the provider `[authority]` builds and does not exit 0 on a call that provider refuses. `host-dependent edge`
+  stays a warning. Also stated as a bound, with an open row: the check does not read a rule's values, so a refusing
+  rule that names one is taken not to shadow, and it does when the call's value matches or is absent.
 
 Pages: `docs/wiki/dev/operations.md` (the overlay's hosted reading), `docs/operations/what-is-proven.md` (the proven
 row rewritten; three open rows), `docs/guide/deprecations.md` §122 (retitled), `docs/guide/20-authorising-actions.md`,

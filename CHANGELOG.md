@@ -34,10 +34,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     no node (`node:*` is no wildcard), or comes after a rule that matches the call and does not permit it —
     `unauthorisable edge`, exit 1, naming the reason, where the check was green; `mycelium test --faults --library`
     refuses such a declaration (`mycelium declare` reads no library and is unchanged);
-  - three new warnings, each exit 0: `node-decided edge` (a rule or mandate names the requirer's **unit** principal;
-    the provider decides the node, and one built from `[authority]` refuses the call), `host-dependent edge` (one host's rules admit
-    and another's do not) and `mandate-dependent edge` (the rule requires a mandate scope, which `[authority]`
-    entitles no authority to).
+  - three new finding kinds. Two are **errors**, exit 1 (the maintainer's decision of 2026-11-20: the check does not
+    exit 0 on a call the provider `[authority]` builds refuses): `node-decided edge` (a rule or mandate names the
+    requirer's **unit** principal; the provider decides the node) and `mandate-dependent edge` (the rule requires a
+    mandate scope, which `[authority]` entitles no authority to). One is a warning, exit 0: `host-dependent edge`
+    (one host's rules admit and another's do not; which host installs is decided at run time).
   - **The JSON document** (`mycelium.design/declaration/1`, unchanged): such an edge's `operations` carries a third
     entry after the two every edge has, and `findings[].kind` gains the three kinds. Additive: nothing is renamed or
     removed. The pinned `declaration.schema.json` lists `cap.invoke` among a call shape's operations, so a reader

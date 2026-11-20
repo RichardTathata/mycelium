@@ -3286,7 +3286,8 @@ Items found while building a row that the row does not own. Each names its home,
     `cap.invoke/{ns}/{name}`, or any protected kind sent unframed — for the actor `node:{sender}`
     (`provider_enforcement::check`), and a member's own mandate travels in an envelope that names `node:{self}`
     (`rpc_call_with_mandate`). A unit file's `principal` is not that actor: a `[[rule]]` whose actor is a unit's
-    principal admits nothing at that door, and `wire-check` says so (`node-decided edge`,
+    principal admits nothing at that door, and `wire-check` says so (`node-decided edge`, an **error** by the
+    maintainer's decision of 2026-11-20, a warning from 2026-11-18 until then;
     `docs/operations/what-is-proven.md#wire-check-reads-a-hosted-edge-as-its-provider-decides`). So a hosted
     capability can be opened to a node or to every member, and not to "the worker unit, wherever it runs".
   - **Who promises what (Promise Theory).** Today the calling node promises its own identity — its key signs its

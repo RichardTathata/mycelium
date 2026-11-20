@@ -622,7 +622,7 @@ async fn depot_a_runs(tag: &str, declarations: &Path) -> bool {
 /// 2. **the fixture's rule as it stood** (`skill.invoke` on `skill:route/optimize` for `worker`, placed in the
 ///    provider's own unit, the one place `[authority]` would load it from) — `unauthorisable edge`, and the provider
 ///    refuses: the receiver sees nothing;
-/// 3. **a `cap.invoke` rule naming the unit principal `worker`** — the warning `node-decided edge`, never a clean
+/// 3. **a `cap.invoke` rule naming the unit principal `worker`** — `node-decided edge`, an error, never a clean
 ///    pass, and the provider refuses;
 /// 4. **a rule naming the calling node itself**, `node:{id}` — clean, and the call runs.
 ///
@@ -646,7 +646,7 @@ async fn the_coop_fixtures_hosted_edge_is_decided_at_the_provider_as_wire_check_
 
     let as_unit = coop_depots("coop-unit-units", "[[rule]]\nactor     = \"worker\"\noperation = \"cap.invoke\"\nresource  = \"cap:route/optimize\"\n");
     let (kinds, r) = reads_optimizer(&as_unit);
-    assert!(kinds == ["node-decided edge"], "PASSED SILENTLY, or refused outright: the provider decides the calling node:\n{}", r.render_text());
+    assert!(kinds == ["node-decided edge"] && r.exit_code() == 1, "PASSED: the provider decides the calling node and refuses:\n{}", r.render_text());
     assert!(!depot_a_runs("coop-unit", &as_unit).await, "the provider decides node:{{sender}}, which a rule for the unit principal does not name");
 
     // The caller's own node, named: the declaration is written once the node's address is known.
@@ -723,7 +723,7 @@ async fn a_hosted_edges_rule_admits_only_from_a_unit_that_hosts_it() {
 /// - `signed_with`: the rule applies only to a signed grant decision;
 /// - `requires_facts`: the reference evaluator `[authority]` builds cannot establish a fact;
 /// - a cancellable rule **before** the plain one: the evaluator decides by the first allowance that matches;
-/// - `requires_mandate`, with a mandate a node holds: the warning `mandate-dependent edge` — `[authority]` entitles
+/// - `requires_mandate`, with a mandate a node holds: `mandate-dependent edge`, an error — `[authority]` entitles
 ///   no authority to that scope, so the provider built from the declaration refuses.
 ///
 /// Seen failing first: on the overlay as it was at #814's first head every one of these was read clean, exit 0.
@@ -798,7 +798,7 @@ async fn a_presented_mandate_is_not_established_by_a_provider_built_from_its_dec
     let rules = "[[rule]]\nactor     = \"*\"\noperation = \"cap.invoke\"\nresource  = \"cap:route/optimize\"\nrequires_mandate = \"routing\"\n\n[[mandate]]\nholder = \"node:10.0.0.7:7946\"\nscope = \"routing\"\noperations = [\"cap.invoke:cap:route/optimize\"]\n";
     let declarations = coop_depots("coop-presented-units", rules);
     let (kinds, r) = reads_optimizer(&declarations);
-    assert!(kinds == ["mandate-dependent edge"] && r.exit_code() == 0, "{}", r.render_text());
+    assert!(kinds == ["mandate-dependent edge"] && r.exit_code() == 1, "{}", r.render_text());
     let (ran, reply) = door_answers("coop-presented", Some("depot-a"), MemberCall::Mandated("cap.invoke/route/optimize", "routing"), move |_| declarations).await;
     assert!(!ran, "RAN: a provider built from [authority] established an operator's mandate: {reply}");
     // Every refusal at this door carries the reason `authority_not_established`; what tells this one apart is the
@@ -812,7 +812,7 @@ async fn a_presented_mandate_is_not_established_by_a_provider_built_from_its_dec
 /// **A hosted component in the `tool` namespace is decided for the calling node too** (#814's review, F3). It is
 /// decided as the tool it is — `tools/call` on `tool:{name}@{node}` — and a member's direct call of it for
 /// `node:{sender}`, like any hosted capability. A `tools/call` rule naming the requirer's unit principal is the
-/// warning `node-decided edge` and the provider refuses; the rule for any node passes and the call runs.
+/// error `node-decided edge` and the provider refuses; the rule for any node passes and the call runs.
 ///
 /// Seen failing first: on the overlay as it was at #814's first head the unit-principal rule was read clean, exit 0
 /// with no finding — and a test of that PR asserted it.
@@ -830,7 +830,7 @@ async fn a_hosted_tool_is_decided_for_the_calling_node_as_wire_check_reads_it() 
 
     let as_unit = declaration("tool-unit-units", "worker");
     let (kinds, r) = reads(&as_unit, &library, "worker", "tool/optimize");
-    assert!(kinds == ["node-decided edge"], "PASSED SILENTLY: the provider decides the calling node:\n{}", r.render_text());
+    assert!(kinds == ["node-decided edge"] && r.exit_code() == 1, "PASSED: the provider decides the calling node and refuses:\n{}", r.render_text());
     let d = as_unit.clone();
     assert!(!door_decides("tool-unit", "depot-a", call, move |_| d).await, "a member's direct call of the tool is decided as node:{{sender}}");
 

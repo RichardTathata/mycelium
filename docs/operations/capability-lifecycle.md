@@ -66,9 +66,9 @@ Each finding has a `kind` a script can key on (`src/wire_check.rs`):
 | `would bind by provisioning` — no deployed provider, but a hostable artifact matches | warning; error with `--strict-deployed` |
 | `would bind after acceptance` — as above, but the artifact is **proposed** and loads only into a shadow lane until accepted | warning; error with `--strict-deployed` |
 | `ungoverned edge` — the requirer declares no mandate and no rule while other units do | warning |
-| `node-decided edge` — an edge to a hosted component is admitted only by a rule or mandate naming the requirer's unit principal, where its provider decides the calling node (`node:{sender}`): a provider built from `[authority]` refuses the call | warning |
+| `node-decided edge` — an edge to a hosted component is admitted only by a rule or mandate naming the requirer's unit principal, where its provider decides the calling node (`node:{sender}`): a provider built from `[authority]` refuses the call | error |
 | `host-dependent edge` — of the units that could host a component, one's own rules admit the call and another's do not | warning |
-| `mandate-dependent edge` — the rule that would admit a hosted edge requires a mandate scope; a provider built from `[authority]` entitles no authority to one | warning |
+| `mandate-dependent edge` — the rule that would admit a hosted edge requires a mandate scope; a provider built from `[authority]` entitles no authority to one, and refuses | error |
 | `unranked ranking` — a ranking on an attribute no matching capability carries | warning |
 | `single provider` — exactly one possible provider | warning |
 

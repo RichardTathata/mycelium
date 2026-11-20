@@ -5210,8 +5210,8 @@ that could host the component, in order, each field as that provider reads it:
 | actor `"*"` or `"node:<ip>:<port>"`, on the hosted shape (resource bare, `@<ip>:<port>`, or `"*"`), in every host | `unauthorisable edge`, exit 1 | clean |
 | the same, in one host and not another | `unauthorisable edge`, exit 1 | warning **`host-dependent edge`** |
 | `skill.invoke` on `skill:{ns}/{name}`, or `tools/call` on `tool:{name}` outside the `tool` namespace | clean, exit 0 | **`unauthorisable edge`, exit 1** |
-| actor the requirer's unit principal — or any-node, requiring a mandate that unit principal holds | `unauthorisable edge` (clean in the `tool` namespace) | warning **`node-decided edge`** |
-| any-node, `requires_mandate`, with a declared mandate a `node:` principal holds | `unauthorisable edge`, exit 1 | warning **`mandate-dependent edge`** |
+| actor the requirer's unit principal — or any-node, requiring a mandate that unit principal holds | `unauthorisable edge` (clean, exit 0, in the `tool` namespace) | **`node-decided edge`, exit 1** — an error of its own kind |
+| any-node, `requires_mandate`, with a declared mandate a `node:` principal holds | `unauthorisable edge`, exit 1 | **`mandate-dependent edge`, exit 1** — an error of its own kind |
 | `cancellable = true`; `requires_scopes`; `signed_with`; `requires_facts`; `actor = "node:*"` or another string that is no node; a resource ending `@` or naming no node; a rule after one that matches the call and does not permit it | as the row it otherwise falls in | **`unauthorisable edge`, exit 1**, naming the form |
 | the right rule, declared only by a unit that does not host the component, where a host (or the requirer) declares some rule or mandate of its own | as the row it otherwise falls in | **`unauthorisable edge`, exit 1**, naming that unit and the hosts |
 | the requirer declares nothing, a host declares some rule or mandate, and none of the hosts' rules admits the call | `ungoverned edge`, exit 0 | **`unauthorisable edge`, exit 1** — the edge is the host's to decide, and it declares authority |
@@ -5238,16 +5238,22 @@ or the call lacks the value: then the rule is the first match, the provider refu
 on the plain rule behind it. Which of the two happens is the call's arguments, a run-time fact; an open row on
 [what-is-proven](../operations/what-is-proven.md#wire-check-does-not-read-a-rules-values).
 
-**The three warnings**, each exit 0:
+**The three new kinds.** Two are errors, exit 1, and one a warning, exit 0 — the maintainer's decision of
+2026-11-20: the check models the provider `[authority]` builds, and does not exit 0 on a call that provider refuses.
+(On this branch the first and third were warnings from 2026-11-18 until that decision; no release carried them so.)
 
-- **`node-decided edge`** — a rule or a mandate names the calling **unit**, and the provider reads the calling
-  **node**. No node is a unit's principal, so **a provider built from `[authority]` refuses this call**. It is a warning and not
-  an error by the maintainer's choice of 2026-11-18 (the severity is one constant, `wire_check::NODE_DECIDED`).
-- **`host-dependent edge`** — which host installs the component is decided at run time, and the call runs at one and
-  is refused at another. Declare the rule in each unit that could host it.
-- **`mandate-dependent edge`** — `[authority]` entitles no authority to a mandate scope (it entitles grants only), so
-  the provider built from the declaration refuses; only a node whose execution authority is attached in code, entitled
-  for that scope, can establish the mandate a calling node presents.
+- **`node-decided edge`** (error) — a rule or a mandate names the calling **unit**, and the provider reads the
+  calling **node**. No node is a unit's principal, so **a provider built from `[authority]` refuses this call**. Name
+  the calling node, `node:<ip>:<port>`, or `"*"`.
+- **`host-dependent edge`** (warning) — which host installs the component is decided at run time, and the call runs
+  at one and is refused at another. Declare the rule in each unit that could host it.
+- **`mandate-dependent edge`** (error) — `[authority]` entitles no authority to a mandate scope (it entitles grants
+  only), so the provider built from the declaration refuses. A node whose execution authority is attached in code,
+  entitled for that scope, can establish the mandate a calling node presents; that is not the provider the check
+  models, so for such a deployment run the check with `--no-authority`, or drop `requires_mandate` from the rule the
+  declared provider reads.
+
+Each severity is one constant (`wire_check::NODE_DECIDED`, `HOST_DEPENDENT`, `MANDATE_DEPENDENT`).
 
 **What to do.** For each `unauthorisable edge` naming a hosted capability, write the rule the provider reads, **in
 the unit that hosts it**, before any rule that would match the call and not permit it:

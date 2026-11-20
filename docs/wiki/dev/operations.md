@@ -293,7 +293,9 @@ decides **a member's direct call**:
   (`mandate-dependent edge`); `requires_grant` and `requires_values` are run-time and not read. `limit`, `data_class`,
   `locality` and `counter` exist on `Rule` and cannot be written in a unit file.
 
-The severities of the three hosted warnings are constants (`NODE_DECIDED`, `HOST_DEPENDENT`, `MANDATE_DEPENDENT`).
+The severities of the three hosted kinds are constants (`NODE_DECIDED` and `MANDATE_DEPENDENT`, errors by the
+maintainer's decision of 2026-11-20: the check does not exit 0 on a call the provider `[authority]` builds refuses;
+`HOST_DEPENDENT`, a warning).
 The reusable rule: **a design-time check predicts a decision another agent makes, so it reads the shape, the actor,
 the rule set and each field from that agent's own code path, pairs every reading with a test at that agent's door,
 and says *could admit*; where the declaration cannot show what the decider will see it warns or states the bound,

@@ -56,8 +56,9 @@ runs it, and the [sixth tutorial](../guide/tutorials/06-declared-versus-observed
   the ones a node with [`[authority]`](declared-authority.md) loads — on the shape that provider decides
   (`cap.invoke` on `cap:{ns}/{name}`; `tools/call` on `tool:{name}` in the `tool` namespace), for the calling
   **node**, field by field and in order ([deprecations §108, §122](../guide/deprecations.md)). A rule for `"*"` or
-  `node:<ip>:<port>` in every host passes the edge; `host-dependent edge`, `node-decided edge` and
-  `mandate-dependent edge` are warnings, never a silent pass; anything else is `unauthorisable edge`, naming the
+  `node:<ip>:<port>` in every host passes the edge; `node-decided edge` and `mandate-dependent edge`
+  are errors of their own kind (a provider built from `[authority]` refuses the call), `host-dependent edge` is a
+  warning; anything else is `unauthorisable edge`, naming the
   reason. The co-op fixture's `depot-a.toml` over `route-optimizer.toml` is the worked case, and each reading is
   tested beside the provider's decision.
 - **Not built, each an open ledger row:** an edge to a **deployed** provider is read for the requirer's unit
