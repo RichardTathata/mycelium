@@ -240,6 +240,9 @@ mod call_mint_tests;
 /// Identity-and-lifecycle I4, PR 3: the cancel doors — the cancel-forward, the receipt, MCP and A2A.
 #[cfg(all(test, feature = "compliance"))]
 mod call_cancel_tests;
+/// Identity-and-lifecycle I4, PR 4: the soak (exit 14) and the measurements (exit 18).
+#[cfg(all(test, feature = "compliance", feature = "a2a"))]
+mod call_soak_tests;
 /// #781's review, F1: the built-in `llm.invoke` provider runs the provider check.
 #[cfg(all(test, feature = "gateway", feature = "tls", feature = "llm"))]
 mod llm_door_tests;

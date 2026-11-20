@@ -805,3 +805,38 @@ The deeper rhyme with the contracts axis: each of these is a **record claiming m
 underlying event established** — curl's impatience reported as the server's answer, one
 iteration's body reported as another's. Same defect class as the receipts work, in the test
 harness rather than the product ([contracts-receipts](../../../design/contracts-receipts.md)).
+
+## A soak over two in-process nodes: what it has to arrange (I4's soak, 2026-11-20)
+
+`src/agent/call_soak_tests.rs` runs 10³ cancellable calls in CI and 10⁵ by hand (`#[ignore]`, dated on
+[what-is-proven](../../../operations/what-is-proven.md#call-soak)). What it had to learn, each cheap to copy and
+each a way to write a soak that passes while showing nothing:
+
+- **A registered MCP tool runs one call at a time** (`run_mcp_tool_task`, `src/agent/mcp.rs`: the handler is awaited
+  in the tool's own loop). Fifty concurrent `tools/call`s to one tool are one running call and forty-nine waiting in
+  its queue, so "cancelled while running" needs a tool per call in flight — and every tool's task reads every
+  `mcp.invoke` signal, so a few dozen tools is the practical ceiling. An `rpc_rx` receiver that spawns a task per
+  request (a skill, as `/a2a` reaches it) is the door with real concurrency.
+- **Read `running_count` only once every call of the batch has been seen running** (its handler has started) and
+  before anything ends one. It counts registrations, not calls: a call under a grant and a `call:` mandate is two.
+- **Time a bound from the event it is stated from.** Bound 1 runs from the gateway's revocation to the provider's
+  stop. The first version timed from the client's cancel to the client's answer and failed at 2.03 s against
+  *F* = 2 s while the provider had stopped within tens of milliseconds: the answer waits on each node's evidence
+  journal and the gateway's WAL, one fsync at a time. The soak reads the revoking checkpoint's `issued_at_ms` and the
+  provider's stop record for the bound, and reports the caller's wait beside it, by phase.
+- **A failure at the same call count on every run is not necessarily a count.** The durable soak failed at call 2 600
+  three times running, in different phases of the batch. It was a clock: the gateway's collector runs each minute,
+  and at the soak's rate the second pass fell there. Varying the batch size (50, 100, 200) and turning one thing off
+  at a time (the gateway's persistence) found it in three short runs; a state dump at the failure (`diagnose`) and
+  the slowest batch per phase, printed with every progress line, are what made the runs comparable.
+- **Do not let a known defect decide a CI test by the runner's speed.** With the gateway's `[persistence]` on, a run
+  still minting at the collector's pass stalls ([the finding](../../../operations/what-is-proven.md#call-cancel-behind-collector));
+  a 10³ run reaches that pass or not by how fast the machine is. The CI soak therefore runs without it, says so, and
+  the durable case is one focused test that fails today, ignored and listed with its reason.
+- **A receipt of `DeliveryUnknown` is counted, not failed on.** It is "no answer to the forward in 5 s", never a
+  negative; the soak requires the call to have stopped inside bound 1 whatever the receipt said, and prints the
+  call's timeline when it sees one.
+
+The nodes' own log can be read beside a failed run: `I4_SOAK_TRACE=mycelium=warn,mycelium_core=warn` (the `cli`
+feature's `tracing-subscriber`); `I4_SOAK_N`, `I4_SOAK_BATCH`, `I4_SOAK_TTL` and `I4_SOAK_PERSIST=1` reshape the
+ignored run.

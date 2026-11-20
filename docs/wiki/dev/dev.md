@@ -15,7 +15,7 @@ pages here cite `src/` / `mycelium-core/src/` rather than paraphrasing it.
   is this codebase's recurring bug family.
 - **[testing/](testing/testing.md)** — test conventions, the feature matrix, the CI-gated
   Docker cluster suites (+ their self-diagnosing harness), scale-test + Docker-bridge lore,
-  the SWIM divergence saga — and **[replay](testing/replay.md)**: the nondeterminism inventory,
+  the SWIM divergence saga, what a soak over two in-process nodes has to arrange — and **[replay](testing/replay.md)**: the nondeterminism inventory,
   the seams, scenarios A/B/C and the checked-in corpus — and **[the acceptor's model](testing/acceptor-model.md)**:
   the consensus design checked at a bound by Stateright, against the engine's own decision functions.
 - **[companions/](companions/companions.md)** — the companion crates built on the public API

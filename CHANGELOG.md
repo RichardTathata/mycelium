@@ -493,6 +493,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     2b-4; the split is in the plan's §8).
   - **Check:** `mycelium tls commit --ca-dir ./fleet-ca --successor ./fleet-ca-2` on a release binary exits 2 naming
     the provisional OID, and neither `./fleet-ca-2` nor `./fleet-ca/ca-commit.pem` exists afterwards.
+- **The `call:` mandate's soak and its figures — and a defect the soak found** (identity-and-lifecycle I4, PR 4;
+  no behaviour changes, so no `deprecations.md` entry; ledger:
+  [the soak](docs/operations/what-is-proven.md#call-soak),
+  [the costs](docs/operations/what-is-proven.md#call-mandate-carried-checkpoint-cost),
+  [the memory](docs/operations/what-is-proven.md#call-window-memory)). `src/agent/call_soak_tests.rs` runs cancellable
+  calls through a minting gateway to an enforcing provider — six in ten through `/a2a`, two through `/mcp`, two under
+  a grant and a `call:` mandate together — cancels half of them while they run, each through its own door, and
+  reconciles every one: the registrations counted, each cancelled call stopped inside bound 1 (from the gateway's
+  revocation to the provider's confirmed stop), a stop record for every cancelled call and for no other, both nodes'
+  `call:` views and records back to nothing. 10³ calls run on every merge; **10⁵ were run once, over a gateway with
+  no `[persistence]`**, and are dated on the ledger with the costs re-measured on the shipped code (a provider's
+  `assess` of a `call:` mandate 117.5 µs, the gateway's mint 63 µs and its two durable writes 9.14 ms, the worst-case
+  envelope 3 226 B of the 8 192 B cap) and the memory a held window takes (about 2.1 KiB per call at a gateway and
+  3.2 KiB per window at a provider, at the 64-byte term cap).
+  **Found, open:** on a gateway with `[persistence]`, a cancel asked for while the collector's minute pass is
+  deleting expired `call/` records waits for every delete queued ahead of it in the WAL — seconds for a thousand
+  records — and until then nothing of it is applied, gossiped or forwarded; a new call's mint waits the same way.
+  The 10⁵ soak fails there, a test pins it (ignored: it fails today), and the fix is the maintainer's to choose
+  ([ledger](docs/operations/what-is-proven.md#call-cancel-behind-collector)); until it lands a call cancelled in
+  that interval runs on, at most to its mandate's window (`call_mandate_ttl_secs`). **Also found:** an execution
+  authority never forgets a `grant:` scope it was fed
+  ([ledger](docs/operations/what-is-proven.md#authority-grant-scopes-not-reclaimed)). `MAX_CALL_WINDOWS`' doc
+  comment said a held scope is under 1 KiB; measured, it is about 1.4 KiB, and the comment says so.
+  *Check:* `cargo test --lib --features compliance,a2a call_soak_tests`.
 
 - **Developer consent certificates: the certificate and its principal** (identity-and-lifecycle I7, PR 1 of 3;
   `deprecations.md` §112; [feature page](docs/features/consent-certificates.md)). `mycelium tls issue --client <name>

@@ -610,6 +610,12 @@ pub(crate) mod test_hooks {
         }
     }
 
+    /// How many calls the `/mcp` table holds (I4, PR 4: the soak asserts it empty once every call has ended).
+    #[cfg_attr(not(all(feature = "compliance", feature = "a2a")), allow(dead_code))] // read by `call_soak_tests`
+    pub(crate) fn mcp_calls_held(ctx: &crate::agent::TaskCtx) -> usize {
+        ctx.call_issuer.mcp_cancels.calls.len()
+    }
+
     /// The handle the `/mcp` table holds for `key`, if any.
     #[cfg_attr(not(feature = "compliance"), allow(dead_code))] // read by `call_cancel_tests`, a `compliance` module
     pub(crate) fn mcp_sink(ctx: &crate::agent::TaskCtx, key: &super::McpCallKey) -> Option<std::sync::Arc<super::CallSink>> {

@@ -399,8 +399,11 @@ pub const RECLAIM_PER_HOLD: usize = 1_024;
 /// The most `call:` scopes a node holds windows for at once (identity-and-lifecycle I4). A call whose window
 /// would be one more is not established (and counted, `call_windows_refused`): under a cancellable rule it is
 /// refused, so memory is bounded and nothing runs uncancellable for want of room. With the term capped at
-/// [`CALL_TERM_MAX_BYTES`](crate::mandate::grant::CALL_TERM_MAX_BYTES) a held scope is under 1 KiB, so the cap is
-/// under 256 MiB.
+/// [`CALL_TERM_MAX_BYTES`](crate::mandate::grant::CALL_TERM_MAX_BYTES) a held scope was **measured at about 1.4 KiB
+/// of resident memory** in this view (I4's PR 4, 2026-11-20, 60 000 scopes, release, Apple M2 Max; counted by
+/// structure it is under 1 KiB), so the cap is about 345 MiB here — and the two records of each call in the node's
+/// KV are about 1.7 KiB more until their gateway collects them
+/// (`docs/operations/what-is-proven.md#call-window-memory`).
 pub const MAX_CALL_WINDOWS: usize = 262_144;
 
 /// The most `call:` scopes held for one issuing gateway — the envelope replay window's size, so one gateway cannot

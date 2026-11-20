@@ -90,7 +90,15 @@ work.
   ([ledger](../operations/what-is-proven.md#call-checkpoint-replay))
   ([§100](../guide/deprecations.md#100-the-execution-authority-verifies-a-call-mandate-a-call-mandate-in-the-first-slot-is-never-established-the-call-key-family-is-owned-2410-identity-and-lifecycle-i4-pr-1a)).
 - **Evidence:** the ledger rows [running work stops](../operations/what-is-proven.md#running-work-stops) and
-  [after a revocation every door runs nothing](../operations/what-is-proven.md#revocation-every-door-runs-nothing).
+  [after a revocation every door runs nothing](../operations/what-is-proven.md#revocation-every-door-runs-nothing);
+  for the `call:` mandate, [the soak](../operations/what-is-proven.md#call-soak) (10⁵ cancellable calls over two
+  nodes, half cancelled while running, run once over a gateway with no `[persistence]`; 10³ on every merge,
+  [`src/agent/call_soak_tests.rs`](../../src/agent/call_soak_tests.rs)), [its costs](../operations/what-is-proven.md#call-mandate-carried-checkpoint-cost)
+  and [the memory a held window takes](../operations/what-is-proven.md#call-window-memory).
+- **A known defect, for the `call:` mandate** (found by the soak, 2026-11-20): on a minting gateway with
+  `[persistence]`, a cancel asked for while the collector's minute pass is deleting expired `call/` records is held
+  until the pass's deletes are on disk — seconds for a thousand records — and the call runs on meanwhile, at most
+  to its window ([ledger](../operations/what-is-proven.md#call-cancel-behind-collector)).
 
 ## Go deeper
 
