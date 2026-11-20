@@ -2364,7 +2364,7 @@ async fn every_governance_write_route_audits_its_change() {
     // `let gateway = gateway.route(`, a call split across lines); `/govern` alone is the read route. Scope-map and
     // doc lines carry `/gateway/govern/`, not a bare `"/govern/`. The routes are mounted in `mod.rs` only: a family
     // file with a `.route(` of its own would be a second router, so none may have one.
-    let families: [(&str, &str); 16] = [
+    let families: [(&str, &str); 17] = [
         ("authz.rs", include_str!("authz.rs")), ("caps.rs", include_str!("caps.rs")),
         // The accept loop (external review R5): it serves the router built in mod.rs and mounts no route.
         ("listener.rs", include_str!("listener.rs")),
@@ -2376,6 +2376,8 @@ async fn every_governance_write_route_audits_its_change() {
         ("mesh.rs", include_str!("mesh.rs")), ("node.rs", include_str!("node.rs")),
         ("overlay.rs", include_str!("overlay.rs")), ("schedules.rs", include_str!("schedules.rs")),
         ("signals.rs", include_str!("signals.rs")),
+        // I4, PR 3b: the SDK serve stream's watcher — no route of its own.
+        ("served_call.rs", include_str!("served_call.rs")),
     ];
     for (name, src) in families {
         assert!(!src.contains(".route("), "{name} mounts a route outside the router in mod.rs");

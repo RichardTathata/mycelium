@@ -22,6 +22,9 @@ plant() {
     echo "ok   $name"
   fi
 }
+# The operating system's generator (#806's second confirm round, D6): a draw is a nondeterministic input, so an
+# unrouted one must be counted. (A routed one — inside `sim_seam::input` — is counted too, and sits in the baseline.)
+plant os_rng           $'fn f() { let mut b = [0u8; 16]; rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut b); }'
 plant top_alias        $'use tokio::time as tt;\nfn f() { let _ = tt::sleep(d); }'
 plant pub_use_alias    $'pub use tokio::time as tt;\nfn f() { let _ = tt::sleep(d); }'
 plant grouped_inline   $'use tokio::{time as tt, io};\nfn f() { let _ = tt::sleep(d); }'

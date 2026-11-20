@@ -142,7 +142,8 @@ async def _drain(gen) -> None:
 
 SEGMENT_CALLS = {
     "on_signal":       (lambda a, s: asyncio.run(_drain(a.on_signal(s))),            "/gateway/signal/sse/{}"),
-    "rpc_serve":       (lambda a, s: asyncio.run(_drain(a.rpc_serve(s))),            "/gateway/rpc/serve/{}"),
+    # Every serve stream says it reads `cancel` events (identity-and-lifecycle I4).
+    "rpc_serve":       (lambda a, s: asyncio.run(_drain(a.rpc_serve(s))),            "/gateway/rpc/serve/{}?cancel_events=true"),
     "mailbox":         (lambda a, s: asyncio.run(_drain(a.mailbox(s))),              "/gateway/mailbox/{}"),
     "shard_for":       (lambda a, s: a.shard_for(s, s, "k"),                         "/gateway/shard/{0}/{0}?key=k"),
     "catalog":         (lambda a, s: a.federation().catalog(s),                      "/gateway/federation/catalog/{}"),

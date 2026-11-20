@@ -74,6 +74,19 @@ pub(super) fn answer_served_rpc(ctx: &HttpCtx, sender: &crate::node_id::NodeId, 
     }
 }
 
+/// Identity-and-lifecycle I4, PR 3b: was `(sender, nonce)` streamed to `principal` within the window — and is it
+/// answered? `None`: not streamed to it. Reads only; `answer_served_rpc` is the one that marks.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(super) fn served_rpc_answered(ctx: &HttpCtx, sender: &crate::node_id::NodeId, nonce: u64, principal: &str) -> Option<bool> {
+    let now = ctx.agent_ctx.hlc.decision_now_ms();
+    let served = ctx.served_rpcs.lock().unwrap_or_else(|e| e.into_inner());
+    match served.map.get(&(sender.clone(), nonce, principal.to_string())) {
+        Some((at, _)) if now.saturating_sub(*at) > SERVED_RPC_TTL_MS => None,
+        Some((_, answered)) => Some(*answered),
+        None => None,
+    }
+}
+
 /// `POST /gateway/rpc/call`
 ///
 /// Sends a blocking RPC call to a named node. `payload_b64` is base64.
@@ -162,11 +175,24 @@ pub(super) async fn gw_rpc_call(
 /// streamed request is recorded against it (`record_served_rpc`), and `rpc/respond` answers
 /// nothing else. `mesh:serve` alone bound neither a kind nor a request, so any holder could
 /// answer any in-flight call it learned a nonce for.
+///
+/// **Cancellation** (identity-and-lifecycle I4, PR 3b; `served_call` has who promises what). Two additive query
+/// parameters, each the subscriber's own word: `cancel_events=true` — it reads a `cancel` event on this stream
+/// (`{"cancel": true, "nonce_hex", "sender", "reason": "cancelled", …}`), sent when the node stops waiting for a call
+/// it streamed; `stops_on_cancel=true` — it **declares that it stops** a call on that event (and so reads them). Only
+/// a declaring subscriber is served a call under a cancellable rule; an undeclared one is refused it by name
+/// (`door_cannot_stop`, `data.door` `sdk_serve`). A stream opened with neither is sent no `cancel` event, since an
+/// older client would read one as a request.
 pub(super) async fn gw_rpc_serve(
     Path(kind):  Path<String>,
+    Query(cancel): Query<ServeCancel>,
     State(ctx):  State<Arc<HttpCtx>>,
     caller: Option<Extension<ResolvedPrincipal>>,
 ) -> axum::response::Response {
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    if let Err(message) = cancel.window() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": "invalid_read_ahead", "message": message }))).into_response();
+    }
     // Post-360 row R's review: a kind this node serves itself is never handed to a client stream.
     if let Some(refused) = refuse_unservable_kind(&kind) {
         return refused;
@@ -202,7 +228,9 @@ pub(super) async fn gw_rpc_serve(
     let (pull_tx, pull_rx) = tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<Event>>(1);
     let loop_ctx = Arc::clone(&ctx);
     let loop_evicted = evicted.clone();
-    ctx.agent_ctx.spawn_task(serve_stream_loop(loop_ctx, rx, pull_rx, principal, loop_evicted));
+    // This stream's identifier (I4, PR 3b): in the `Mycelium-Serve-Stream` header and in every event it carries.
+    let stream_id = new_stream_id();
+    ctx.agent_ctx.spawn_task(serve_stream_loop(loop_ctx, rx, pull_rx, principal, loop_evicted, cancel, stream_id));
     let stream = futures_util::stream::unfold(pull_tx, |pull_tx| async move {
         let (want, event) = tokio::sync::oneshot::channel();
         pull_tx.send(want).await.ok()?;
@@ -225,12 +253,90 @@ pub(super) async fn gw_rpc_serve(
         })
     }), |e| async move { e });
     let stream = futures_util::StreamExt::chain(stream, tail);
-    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+    let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&stream_name(stream_id)) {
+        response.headers_mut().insert("mycelium-serve-stream", v);
+    }
+    response
+}
+
+/// `rpc/serve`'s cancellation parameters (identity-and-lifecycle I4, PR 3b): what the subscriber says of itself.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[cfg_attr(not(all(feature = "gateway", feature = "tls")), allow(dead_code))]
+pub(super) struct ServeCancel {
+    /// The subscriber reads `cancel` events.
+    #[serde(default)]
+    cancel_events: bool,
+    /// The subscriber declares that it stops a call on its `cancel` event — its promise (implies `cancel_events`).
+    #[serde(default)]
+    stops_on_cancel: bool,
+    /// For a declaring stream: how many requests it may hold unanswered before the node stops handing it more
+    /// (1..=[`SERVE_WINDOW`], which is the default). Read as text and checked by the route ([`ServeCancel::window`]):
+    /// a declaring stream's value outside the range, or not a number, is refused by name; an undeclared stream's is
+    /// ignored, since it has no window.
+    #[serde(default)]
+    read_ahead: Option<String>,
+}
+
+impl ServeCancel {
+    /// A declaring stream's window, or the refusal of a `read_ahead` that is not a whole number in
+    /// 1..=[`SERVE_WINDOW`] (#806's second confirm round, D2: refused, never clamped). `Ok(None)`: undeclared.
+    #[cfg_attr(not(all(feature = "gateway", feature = "tls")), allow(dead_code))]
+    fn window(&self) -> Result<Option<usize>, String> {
+        if !self.stops_on_cancel {
+            return Ok(None);
+        }
+        match self.read_ahead.as_deref() {
+            None => Ok(Some(SERVE_WINDOW)),
+            Some(text) => match text.parse::<usize>() {
+                Ok(n) if (1..=SERVE_WINDOW).contains(&n) => Ok(Some(n)),
+                _ => Err(format!("`read_ahead` must be a whole number from 1 to {SERVE_WINDOW}; got `{text}`")),
+            },
+        }
+    }
+}
+
+/// **The most requests a declaring serve stream holds unanswered** (#806's confirm round, C1): the depth of the
+/// stream's own channel. A declaring SDK reads its stream without pause, so a `cancel` event is never stuck behind
+/// requests; the backpressure that pause used to give is the node's own instead — it counts what it handed the
+/// stream and the stream has not ended (`rpc/respond` naming the stream; or 300 s), and past this window hands it no
+/// further request. Requests then wait in the stream's channel, whose fill the node's admission reads
+/// (`SignalHandlers::fill_ratio`), as for any slow worker.
+#[cfg_attr(not(all(feature = "gateway", feature = "tls")), allow(dead_code))]
+pub(super) const SERVE_WINDOW: usize = 256;
+
+/// A stream's name on the wire: its 128-bit id, 32 hex digits.
+pub(super) fn stream_name(stream: u128) -> String {
+    format!("{stream:032x}")
+}
+
+/// A stream's id from its name.
+pub(super) fn stream_from_name(name: &str) -> Option<u128> {
+    (name.len() == 32).then(|| u128::from_str_radix(name, 16).ok()).flatten()
+}
+
+/// **A new serve stream's id: 128 random bits** (#806's confirm round, C3), so a process that holds the same token
+/// cannot name a sibling's stream: each stream speaks only for its own work by construction, not by convention. Drawn
+/// through the sim seam as an external input (recorded, and not redrawn, under a replay): from the operating system
+/// in a build with `tls` — the only build with principals and watchers — and from the seam's own generator otherwise.
+fn new_stream_id() -> u128 {
+    let name = mycelium_core::sim_seam::input("rpc-serve/stream-id", "", || {
+        #[cfg(feature = "tls")]
+        let id = {
+            let mut bytes = [0u8; 16];
+            rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut bytes);
+            u128::from_be_bytes(bytes)
+        };
+        #[cfg(not(feature = "tls"))]
+        let id = (u128::from(mycelium_core::sim_seam::rng_u64_from("nonce", 0)) << 64) | u128::from(mycelium_core::sim_seam::rng_u64_from("nonce", 0));
+        stream_name(id)
+    });
+    stream_from_name(&name).unwrap_or_default()
 }
 
 /// What `rpc/serve` streams a checked request as, or `None` for one it drops: the caller context verified and handed
 /// on, the request recorded as served to this principal.
-fn serve_event(http_ctx: &HttpCtx, req: &super::rpc::RpcRequest, caller: Option<serde_json::Value>, principal: &str) -> Event {
+fn serve_event(http_ctx: &HttpCtx, req: &super::rpc::RpcRequest, caller: Option<serde_json::Value>, principal: &str, stream: u128) -> Event {
     use base64::Engine as _;
     // Handed to this principal: the only one `rpc/respond` will take an answer from.
     record_served_rpc(http_ctx, req.sender(), req.nonce(), principal);
@@ -239,11 +345,36 @@ fn serve_event(http_ctx: &HttpCtx, req: &super::rpc::RpcRequest, caller: Option<
         "nonce_hex":   format!("{:016x}", req.nonce()),
         "sender":      req.sender().to_string(),
         "payload_b64": payload_b64,
+        // The stream this request went out on (I4, PR 3b; the maintainer's decision of 2026-11-17): `rpc/respond`
+        // names it, so a stream's answer and its confirmation speak only for its own work.
+        "stream":      stream_name(stream),
     });
     if let Some(c) = caller {
         data["caller"] = c;
     }
     Event::default().event(req.kind().as_ref()).data(data.to_string())
+}
+
+/// **The serve loop's queue pass**: take out of `queue`, in order, every checked call whose authority has lapsed (to be
+/// answered `cancelled` without being handed out); nothing while a test holds the queue. It knows nothing of the
+/// stream's window. That the serve loop calls it **whatever the window** — ahead of the hand-out loop, outside its
+/// `!full` condition (#806's second confirm round, D3) — is the call's position, established by reading, not by a
+/// test (`docs/operations/what-is-proven.md`).
+#[cfg_attr(not(all(feature = "gateway", feature = "tls")), allow(dead_code))]
+fn take_lapsed<T>(queue: &mut std::collections::VecDeque<T>, held: bool, lapsed: impl Fn(&T) -> bool) -> Vec<T> {
+    if held {
+        return Vec::new();
+    }
+    let mut taken = Vec::new();
+    for _ in 0..queue.len() {
+        let Some(item) = queue.pop_front() else { break };
+        if lapsed(&item) {
+            taken.push(item);
+        } else {
+            queue.push_back(item);
+        }
+    }
+    taken
 }
 
 /// The `rpc/serve` loop: receive, verify the caller context, check — inline, or beside the loop when the check settles
@@ -257,8 +388,28 @@ async fn serve_stream_loop(
     mut pull: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<Event>>,
     principal: Arc<str>,
     mut evicted: tokio::sync::watch::Receiver<bool>,
+    #[cfg_attr(not(all(feature = "gateway", feature = "tls")), allow(unused_variables))] cancel: ServeCancel,
+    stream: u128,
 ) {
     let agent_ctx = Arc::clone(&ctx.agent_ctx);
+    // A declaring stream's window ([`SERVE_WINDOW`]): what it was handed and has not ended, by `(sender, nonce)` and
+    // when; `rpc/respond` tells this loop of each end through `HttpCtx::serve_streams`.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    let window = cancel.window().unwrap_or(None);
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    let mut outstanding: HashMap<(crate::node_id::NodeId, u64), u64> = HashMap::new();
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    let (ended_tx, mut ended_rx) = tokio::sync::mpsc::unbounded_channel::<(crate::node_id::NodeId, u64)>();
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    if window.is_some() {
+        ctx.serve_streams.pin().insert(stream, (Arc::clone(&principal), ended_tx));
+    }
+    // The `cancel` events the node's own stops send this stream (`served_call`), if its subscriber reads them; streamed
+    // ahead of any request.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    let (cancel_tx, mut cancel_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    let hears_cancel = (cancel.cancel_events || cancel.stops_on_cancel).then(|| cancel_tx.clone());
     let mut shutdown = agent_ctx.shutdown_tx.subscribe();
     // An open ask of the stream, and the requests checked and admitted while none was open.
     let mut want: Option<tokio::sync::oneshot::Sender<Event>> = None;
@@ -273,11 +424,59 @@ async fn serve_stream_loop(
         #[cfg(all(feature = "gateway", feature = "tls"))]
         let mut gone = false;
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        while want.is_some() && let Some((req, caller, admission)) = ready.pop_front() {
-            let event = serve_event(&ctx, &req, caller.clone(), &principal);
-            match want.take().map(|w| w.send(event)) {
-                Some(Ok(())) => super::provider_enforcement::park(&agent_ctx, req.sender(), req.nonce(), admission),
-                _ => {
+        while want.is_some() && let Ok(event) = cancel_rx.try_recv() {
+            if want.take().map(|w| w.send(event)).is_none_or(|r| r.is_err()) {
+                gone = true;
+                break;
+            }
+        }
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        let held = test_hooks::streaming_held(&agent_ctx);
+        // The window: full, nothing more is handed out (and nothing more taken off the channel) until the stream ends
+        // something or it expires. `cancel` events, above, are never held back.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        let mut full = window.is_some_and(|w| outstanding.len() >= w);
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        if full {
+            let now = agent_ctx.hlc.decision_now_ms();
+            outstanding.retain(|_, at| now.saturating_sub(*at) <= SERVED_RPC_TTL_MS);
+            full = window.is_some_and(|w| outstanding.len() >= w);
+        }
+        // A call whose authority lapsed while it waited here was never handed to anyone, so the node's stop is the
+        // whole of it: answered `cancelled` and its registration ended, a stop the node saw complete whatever the
+        // stream declared (#806's review, L7). **When:** on this loop's next turn ([`take_lapsed`]), whether or not the
+        // window has room — within a second with a full window (its timer turns the loop); with room in the window and
+        // a stream that is not asking, when the stream next asks or closes, since nothing else turns the loop then.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        for (req, _, admission) in take_lapsed(&mut ready, held, |(_, _, admission)| admission.is_lapsed()) {
+            super::rpc::rpc_respond_ctx(&agent_ctx, &req, super::served_call::cancelled_body("sdk_serve"));
+            super::provider_enforcement::count_door_stop(&agent_ctx, "sdk_serve");
+            admission.release_confirmed_by_node();
+        }
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        while !gone && !held && !full && want.is_some() && let Some((req, caller, mut admission)) = ready.pop_front() {
+            // A watcher is needed and none can be held: refused before streaming, never streamed unwatched.
+            if admission.holds_anything() && super::served_call::full(&ctx) {
+                refuse_served(&agent_ctx, &req, &super::provider_enforcement::served_calls_full());
+                continue;
+            }
+            admission.promised_stop = cancel.stops_on_cancel;
+            // The watcher is placed before the event goes out, so an answer that comes at once finds it (#806's review,
+            // L6).
+            let placed = admission.holds_anything().then(|| super::served_call::place(&ctx, &req, &principal, stream, cancel.stops_on_cancel));
+            let event = serve_event(&ctx, &req, caller.clone(), &principal, stream);
+            let sent = want.take().map(|w| w.send(event));
+            if matches!(sent, Some(Ok(()))) && let Some(w) = window {
+                outstanding.insert((req.sender().clone(), req.nonce()), agent_ctx.hlc.decision_now_ms());
+                full = outstanding.len() >= w;
+            }
+            match (sent, placed) {
+                (Some(Ok(())), Some(placed)) => placed.start(&ctx, &req, Arc::clone(&principal), admission, hears_cancel.clone()),
+                (Some(Ok(())), None) => {}
+                (_, placed) => {
+                    if let Some(placed) = placed {
+                        placed.withdraw(&ctx);
+                    }
                     ready.push_front((req, caller, admission));
                     gone = true;
                     break;
@@ -289,7 +488,7 @@ async fn serve_stream_loop(
             break;
         }
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        let take = want.is_some() && ready.is_empty() && !pending.is_full();
+        let take = want.is_some() && ready.is_empty() && !pending.is_full() && !full;
         #[cfg(not(all(feature = "gateway", feature = "tls")))]
         let take = want.is_some();
         let asking = want.is_none();
@@ -302,6 +501,22 @@ async fn serve_stream_loop(
                 Some(w) => { want = Some(w); continue; }
                 None => break,
             },
+            // The stream ended a request it was handed: room in its window.
+            Some(key) = ended_rx.recv() => {
+                outstanding.remove(&key);
+                continue;
+            }
+            // A full window is looked at again each second, for what has expired.
+            _ = mycelium_core::sim_seam::sleep_ms("rpc-serve/window", 1_000), if full => continue,
+            // Test hook: streaming held, the loop wakes to see it released.
+            _ = mycelium_core::sim_seam::sleep_ms("rpc-serve/test-hold", 20), if held => continue,
+            // A `cancel` event to send: taken while an ask is open, and sent at the top of the loop.
+            Some(event) = cancel_rx.recv(), if !asking => {
+                if want.take().map(|w| w.send(event)).is_none_or(|r| r.is_err()) {
+                    break;
+                }
+                continue;
+            }
             Some(((req, caller), checked)) = pending.next(), if !pending.is_empty() => {
                 match checked {
                     Ok(admission) => ready.push_back((req, caller, admission)),
@@ -349,14 +564,14 @@ async fn serve_stream_loop(
             }
         };
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        match super::provider_enforcement::check(&agent_ctx, &req, true, super::provider_enforcement::Door::SdkServe).await {
+        match super::provider_enforcement::check(&agent_ctx, &req, true, super::provider_enforcement::Door::SdkServe { stops: cancel.stops_on_cancel }).await {
             super::provider_enforcement::Checked::Done(Ok(admission)) => ready.push_back((req, caller, admission)),
             super::provider_enforcement::Checked::Done(Err(refusal)) => refuse_served(&agent_ctx, &req, &refusal),
             super::provider_enforcement::Checked::Waiting(waiting) => pending.spawn(waiting, (req, caller)),
         }
         #[cfg(not(all(feature = "gateway", feature = "tls")))]
         {
-            let event = serve_event(&ctx, &req, caller, &principal);
+            let event = serve_event(&ctx, &req, caller, &principal, stream);
             if want.take().map(|w| w.send(event)).is_none_or(|r| r.is_err()) {
                 break;
             }
@@ -365,7 +580,18 @@ async fn serve_stream_loop(
     // A request this loop took and did not stream is answered: checked and waiting for an ask, or still settling.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     {
-        for (req, _, _) in ready.drain(..) {
+        if window.is_some() {
+            ctx.serve_streams.pin().remove(&stream);
+        }
+        for (req, _, admission) in ready.drain(..) {
+            // Cancelled while it waited, and never handed out: answered `cancelled`, the node's own confirmed stop —
+            // by what happened, as in the queue (#806's confirm round, on L7).
+            if admission.is_lapsed() {
+                super::rpc::rpc_respond_ctx(&agent_ctx, &req, super::served_call::cancelled_body("sdk_serve"));
+                super::provider_enforcement::count_door_stop(&agent_ctx, "sdk_serve");
+                admission.release_confirmed_by_node();
+                continue;
+            }
             refuse_served(&agent_ctx, &req, &super::provider_enforcement::withdrawn());
         }
         for (req, _) in pending.abandon() {
@@ -388,16 +614,46 @@ fn refuse_served(
 
 /// `POST /gateway/rpc/respond` — send a reply to an in-flight RPC request.
 ///
-/// Body: `{"nonce_hex": "…", "sender": "IP:PORT", "result_b64": "…"}`.
+/// Body: `{"nonce_hex": "…", "sender": "IP:PORT", "result_b64": "…"}`, or — identity-and-lifecycle I4, PR 3b — `{"nonce_hex",
+/// "sender", "stopped": true}`: the subscriber's confirmation that it stopped a call the node cancelled (`served_call`),
+/// answered `{"ok": true, "stopped": true}`, and refused `409 not_cancelled` for any other request. An answer to a call
+/// the node cancelled is discarded and answered `{"ok": true, "cancelled": true}`.
 /// Returns `{"ok": true}`. Only a request that `rpc/serve` streamed to **this principal** and
 /// that is not yet answered is accepted; anything else — another principal's request, a nonce never
 /// streamed, a second answer, one past the gateway's RPC ceiling — is `403 unserved_request` and
 /// nothing is emitted or released.
+///
+/// **The window's one release rule** (identity-and-lifecycle I4, PR 3b; #806's third confirm round, N1): *every
+/// answer of this route in the 2xx class, to a respond that names a stream its own principal opened, ends that
+/// `(sender, nonce)` on that stream; any other answer ends nothing.* It is applied here, in one place, after the
+/// status is decided — whatever the 2xx says (`ok`, `duplicate`, `cancelled`, `stopped`).
 pub(super) async fn gw_rpc_respond(
     State(ctx): State<Arc<HttpCtx>>,
     caller: Option<Extension<ResolvedPrincipal>>,
     Json(body):  Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let principal = caller.map(|Extension(c)| c.principal).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    let names = (
+        body["stream"].as_str().and_then(stream_from_name),
+        body["sender"].as_str().and_then(|s| s.parse::<crate::node_id::NodeId>().ok()),
+        body["nonce_hex"].as_str().and_then(|n| u64::from_str_radix(n, 16).ok()),
+    );
+    let response = respond(&ctx, &principal, body);
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    if response.status().is_success()
+        && let (Some(stream), Some(sender), Some(nonce)) = names
+        && let Some((opened_by, tx)) = ctx.serve_streams.pin().get(&stream)
+        && opened_by.as_ref() == principal
+    {
+        let _ = tx.send((sender, nonce));
+    }
+    response
+}
+
+/// `rpc/respond`, judged: the answer, with nothing done to any stream's window ([`gw_rpc_respond`] does that, by the
+/// answer's status).
+fn respond(ctx: &Arc<HttpCtx>, principal: &str, body: serde_json::Value) -> axum::response::Response {
     use base64::Engine as _;
     use crate::signal::SignalScope;
 
@@ -425,10 +681,54 @@ pub(super) async fn gw_rpc_respond(
     // The request must have been handed to this principal on its own serve stream. Before this
     // check, `mesh:serve` bound to neither a kind nor a request: any holder could answer — and
     // pre-empt — any in-flight call whose nonce it learned, and release its parked admission.
-    let principal = caller.map(|Extension(c)| c.principal)
-        .unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
+    let principal = principal.to_string();
+    let ctx = Arc::clone(ctx);
+
+    // Identity-and-lifecycle I4, PR 3b: the subscriber's own word that it stopped a call the node cancelled
+    // (`"stopped": true`) — the only thing a confirmed stop is recorded on. Accepted only for a call streamed to this
+    // principal that the node stopped waiting for; anything else is refused `not_cancelled` and nothing moves.
+    // The stream the answer comes from (the maintainer's decision of 2026-11-17): a confirmation speaks only for that
+    // stream's work, never a sibling's. Absent: a client before streams were named.
+    #[cfg_attr(not(all(feature = "gateway", feature = "tls")), allow(unused_variables))]
+    let stream: Option<u128> = body["stream"].as_str().and_then(stream_from_name);
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    let served = super::served_call::find(&ctx, &sender, nonce);
+    if body["stopped"].as_bool() == Some(true) {
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        let refused = match (served.as_ref(), served_rpc_answered(&ctx, &sender, nonce, &principal)) {
+            // Never streamed to this principal (#806's review, M5): not its call to confirm.
+            (_, None) => super::served_call::NotConfirmed::NotYourStream,
+            (Some(s), Some(true)) => match s.confirm(stream, &principal) {
+                Ok(()) => {
+                    s.assess(&ctx.agent_ctx);
+                    return Json(json!({ "ok": true, "stopped": true })).into_response();
+                }
+                Err(why) => why,
+            },
+            _ => super::served_call::NotConfirmed::NotCancelled,
+        };
+        #[cfg(not(all(feature = "gateway", feature = "tls")))]
+        let refused = "not_cancelled";
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        let refused = refused.label();
+        return (StatusCode::CONFLICT, Json(json!({
+            "ok": false,
+            "error": refused,
+            "message": "\"stopped\" confirms a stop of a call this node cancelled and streamed to you, on the stream it names (\"stream\", the one the call went out on); this request is not one",
+        }))).into_response();
+    }
     match answer_served_rpc(&ctx, &sender, nonce, &principal) {
         ServedAnswer::First => {}
+        // I4, PR 3b: the node stopped waiting for this call (its authority lapsed) and answered the requester
+        // `cancelled`: a later answer is discarded, never sent — and assessed, if the subscriber declared it stops.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        ServedAnswer::Duplicate if served.as_ref().is_some_and(|s| s.cancelled()) => {
+            if let Some(s) = &served {
+                s.assess(&ctx.agent_ctx);
+                s.answered(stream, &principal);
+            }
+            return Json(json!({ "ok": true, "cancelled": true })).into_response();
+        }
         // A replicated serve loop: every replica of this principal received the request and the
         // first answer was delivered. The repeat is accepted and dropped — never a second
         // `rpc.result` — so the losing replica's loop is not killed by an error (#587 F1).
@@ -446,9 +746,12 @@ pub(super) async fn gw_rpc_respond(
         }
     }
 
-    // Closure plan C4: the SDK agent has replied, so the call is no longer in flight.
+    // Closure plan C4: the SDK agent has replied, so the call is no longer in flight — its watcher releases what it
+    // holds (I4, PR 3b: `served_call`).
     #[cfg(all(feature = "gateway", feature = "tls"))]
-    super::provider_enforcement::release_parked(&ctx.agent_ctx, &sender, nonce);
+    if let Some(s) = &served {
+        s.answered(stream, &principal);
+    }
 
     let mut buf = BytesMut::with_capacity(8 + result.len());
     buf.put_u64_le(nonce);
@@ -811,5 +1114,45 @@ pub(super) async fn gw_shard_emit(
             pass.finish(crate::agent::door::DoorOutcome::Nothing).await;
             (StatusCode::NOT_FOUND, Json(json!({ "ok": false, "error": "no providers" }))).into_response()
         }
+    }
+}
+
+/// Test hooks for the serve loop.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) mod test_hooks {
+    /// Nodes whose serve loops hold what they have checked instead of streaming it (#806's review, L7: a call that
+    /// lapses while it waits in the queue).
+    #[cfg(test)]
+    pub(crate) static HOLD_STREAMING: std::sync::LazyLock<papaya::HashSet<String>> = std::sync::LazyLock::new(papaya::HashSet::new);
+
+    #[cfg(test)]
+    pub(super) fn streaming_held(ctx: &crate::agent::TaskCtx) -> bool {
+        HOLD_STREAMING.pin().contains(&ctx.node_id.to_string())
+    }
+
+    #[cfg(not(test))]
+    pub(super) fn streaming_held(_: &crate::agent::TaskCtx) -> bool {
+        false
+    }
+}
+
+#[cfg(test)]
+mod queue_pass_tests {
+    use super::take_lapsed;
+    use std::collections::VecDeque;
+
+    /// **The serve loop's queue pass takes the lapsed calls out, in order, and leaves the rest.** Of three queued
+    /// calls the first and last have lapsed: both are taken, in order, and the live one stays; nothing is taken while
+    /// a test holds the queue. A test of the pass itself — not of where the loop calls it (whatever the stream's
+    /// window: established by reading). Seen failing first with the pass taking nothing.
+    #[test]
+    fn the_queue_pass_takes_the_lapsed_calls_and_leaves_the_rest() {
+        let queue = || VecDeque::from([("a", true), ("b", false), ("c", true)]);
+        let mut q = queue();
+        assert_eq!(take_lapsed(&mut q, false, |(_, lapsed)| *lapsed), vec![("a", true), ("c", true)]);
+        assert_eq!(q, VecDeque::from([("b", false)]));
+        let mut q = queue();
+        assert!(take_lapsed(&mut q, true, |(_, lapsed)| *lapsed).is_empty());
+        assert_eq!(q, queue());
     }
 }

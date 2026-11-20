@@ -12,7 +12,7 @@
  *   MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=8300 npm test
  */
 
-import { MyceliumAgent, ProtectedSlotError, ProtectedStreamError } from "../../src/agent";
+import { CancelNotReceivedError, MyceliumAgent, ProtectedSlotError, ProtectedStreamError } from "../../src/agent";
 
 const TEST_HOST = process.env.MYCELIUM_TEST_HOST;
 const TEST_PORT = parseInt(process.env.MYCELIUM_TEST_PORT ?? "0", 10);
@@ -175,6 +175,34 @@ describe_("MyceliumAgent — live node tests", () => {
     expect(replies).toHaveLength(1);
     expect(replies[0].sender).toBe(self);
     expect(replies[0].result.toString()).toBe("echo:ping");
+  });
+
+  // Identity-and-lifecycle I4, PR 3b: the node takes a declaring stream (`stops_on_cancel`) and serves it as any
+  // other on a node that cancels nothing; a `stopped` for a call it did not cancel is refused `409 not_cancelled`.
+  it_("a declaring serve stream is served, and a confirmation for a call never cancelled is refused", async () => {
+    const self = await a.nodeId;
+    const kind = `ts-test.declared-echo.${Date.now()}`;
+    const server = agent();
+    const serve = server.rpcServe(kind, { stopsOnCancel: true });
+    const confirmed: boolean[] = [];
+    const served = (async () => {
+      for await (const req of serve) {
+        expect(req.stream).toBeTruthy();
+        // Never cancelled: the SDK itself refuses, and sends nothing.
+        confirmed.push(await server.rpcConfirmStopped(req).then(() => true, (e) => (e instanceof CancelNotReceivedError ? false : Promise.reject(e))));
+        await server.rpcRespond(req, Buffer.concat([Buffer.from("echo:"), req.payload]));
+        break;
+      }
+    })();
+    await new Promise((r) => setTimeout(r, 300)); // the serve stream registers on connect
+    let reply: Buffer;
+    try {
+      reply = await a.rpcCall(self, kind, Buffer.from("ping"), { timeoutSecs: 5 });
+    } finally {
+      await Promise.race([served, new Promise((r) => setTimeout(r, 6000))]);
+    }
+    expect(confirmed).toEqual([false]);
+    expect(reply.toString()).toBe("echo:ping");
   });
 
   it_("onSignal receives a signal emitted after it subscribed, with its kind", async () => {

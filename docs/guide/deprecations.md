@@ -4768,6 +4768,119 @@ and count; served once it arrives; a tombstoned marker restored by its provider 
 `the_grant_door_passes_over_a_provider_whose_marker_is_not_held` (`src/agent/client_grant_tests.rs`), `a_client_route_passes_over_a_provider_whose_marker_is_not_held` (`mycelium-reason/tests/gateway.rs`),
 `secure_profile_refuses_a_provider_without_the_marker_and_legacy_does_not` (the named target still `412`).
 
+## 116. The bridged MCP loop and the SDK serve stream stop waiting for a cancelled call; an SDK subscriber can declare it stops on a `cancel` event and is then served a cancellable call (unreleased, identity-and-lifecycle I4, PR 3b)
+
+*Numbered 116: §115 is #804's, §117 #805's and §118 #810's, all merged.*
+
+§114 left the two doors where another agent does the work refusing a cancellable call and waiting out a cancelled
+one. The maintainer's decision (C) of 2026-11-16: each agent promises only its own behaviour. **Nothing changes for a
+call whose authority does not lapse**, and nothing changes on a provider without enforcement or a cohort budget.
+
+- **Changed: the node's own stop at both doors.** When a call's authority lapses while it runs — its caller's mandate,
+  or the gateway cancelled it — the node stops waiting for it, answers the requester **`cancelled`** (`data.reason`
+  `cancelled`, `data.door` `bridged_mcp` or `sdk_serve`), tells the other agent, and discards that agent's late reply.
+  At the bridged loop the forward's request is dropped and the server is sent **`notifications/cancelled`** for the
+  id the bridge forwarded under (on a task of its own, 5 s timeout, the answer unread). **Changed, the bridged
+  loop's ids** (#806's review, M1): the bridge now forwards each call under an id of its own
+  (`mycelium-bridge-{node}-{token}-{n}`: this node, a random token drawn when the bridge task starts, a count — so
+  two nodes bridging one server, or a restarted bridge, never share one) and answers the requester under the
+  requester's id; it forwarded the requester's id, which
+  two requesters numbering from 1 share — and once the node stops waiting, the server can hold both, so a notice
+  naming that id could cancel the other requester's work. At the SDK stream the requester's answer is the
+  node's, and a later `rpc/respond` for the call is answered **`{"ok": true, "cancelled": true}`** and sent nowhere.
+  Before, both waited for the other agent and answered whatever it said. Counted: `GET /stats` `door_stops`, by door;
+  `mycelium_provider_door_stops_total{door}`. **The node promises nothing about the work in the other agent**: unless
+  that agent confirms (below) the stop is recorded unconfirmed and a cancel's receipt says `Unbounded`.
+- **Unchanged: the bridged MCP loop refuses a call under a cancellable rule** (`door_cannot_stop`, `bridged_mcp`). A
+  bridged server cannot promise through the node, and a configuration flag would be the operator promising for it.
+- **New, additive: `GET /gateway/rpc/serve/{kind}?stops_on_cancel=true`** — the subscriber's declaration that it
+  stops a call on its `cancel` event. A declaring subscriber is **served a call under a cancellable rule**; an
+  undeclared one is refused it, as before (`door_cannot_stop`, `sdk_serve`). **`?cancel_events=true`** says only that
+  the subscriber reads `cancel` events. A stream opened with neither — any SDK before this change — is **sent no
+  `cancel` event**, since an older client reads every event as a request; its calls still get the node's own stop.
+- **New: the `cancel` event**, `event: cancel`, data `{"cancel": true, "nonce_hex", "sender", "reason":
+  "cancelled", "message"}`, naming the request the node stopped waiting for. A kind literally named `cancel` is told
+  apart by the `cancel: true` field, as `evicted` is by its `error`.
+- **New, additive: each serve stream is named** (the maintainer's decision of 2026-11-17): the `Mycelium-Serve-Stream`
+  response header, and `"stream"` in every request and `cancel` event the stream carries — **128 random bits, 32 hex
+  digits** (from the operating system), so a process holding the same token cannot name a sibling's stream. **An
+  answer ends only its own stream's registration**: one naming a stream its principal did not open ends none, and one
+  naming no stream — an SDK before this change — ends the streams its own principal opened (it cannot say which) and
+  no other principal's. `rpc/respond` takes it back
+  (`"stream"`, additive): an answer or a confirmation speaks **only for its own stream's work**, never a sibling
+  replica's. Both SDKs send it.
+- **New, additive: `POST /gateway/rpc/respond` with `{"nonce_hex", "sender", "stopped": true, "stream"}`** — the subscriber's
+  confirmation that it stopped a call the node cancelled and streamed to it. It is **the only thing the node records a
+  confirmed stop on** (a cancel's receipt `Stopped`): any other end of a cancelled call — a result, nothing before
+  300 s, an undeclared subscriber — is a release the node cannot confirm. Answered `{"ok": true, "stopped": true}`;
+  refused `409` by name, nothing recorded or sent: **`not_cancelled`** (the node did not cancel the call),
+  **`stream_required`** (no `stream`), **`not_your_stream`** (a stream that was not handed the call, another
+  principal's, or a call never streamed to the caller's principal), **`not_declared`** (a stream that did not declare
+  `stops_on_cancel`: it made no promise to stop, so nothing of its is confirmed). It ends only the named stream's registration; a sibling stream's stands until it speaks for itself. **Assessment, not enforcement:** a
+  declaring subscriber's answer or confirmation more than `LAPSE_ANSWER_GRACE_MS` (1 s) after the stop was asked is
+  counted, `GET /stats` `rpc_serve_answered_after_lapse` by kind, `mycelium_rpc_serve_answered_after_lapse_total{kind}`;
+  nothing is refused for it.
+- **Today an enveloped call reaches one stream at a node.** The envelope replay window (`gateway_caller::verify_received`,
+  node-wide) drops a second stream's copy of the same envelope, and every call that carries a registration (any
+  cancellable call) is enveloped; `an_enveloped_call_reaches_one_stream_and_only_its_word_confirms` pins it. The
+  per-stream keying does not rely on it.
+- **Changed: a streamed call's admission is held whether or not a cohort budget is attached**, by a watcher task per
+  stream a call that holds a cohort place or a running-work registration was handed to, until that stream answers or
+  confirms, or 300 s after it was streamed. **A call holds one cohort place, however many streams it reaches** (the maintainer's decision of
+  2026-11-17, #806's M4: a caller's budget is the caller's, and how many streams a server opens must not multiply
+  what a caller is charged): a call without an envelope (a member's direct call) reaches every stream of the kind,
+  the place is kept with the call, a later stream's is given back as it is handed the call, and the one place is
+  released when the call's last stream registration ends — so after a cancel, a slow sibling stream keeps the
+  caller's one place until it ends or expires. As before this change, one place per call; each stream still answers
+  only for its own stop. **The excess, stated:** a stream that stops reading keeps one checked call, and that call's
+  cohort place, waiting until it reads or closes — at most one place per stream, never one per call. Before, it was held only under a cohort budget (in `ProviderBudget::parked`, lock-order
+  row 46, now retired) and was otherwise dropped when streamed, so nothing could see its lapse. A gateway holds at most
+  65 536 such calls (`SERVED_RPC_CAP`); past it a call that needs one is refused before it is streamed, `-32004`
+  `at_capacity`, `data.detail` `served_calls_full`.
+- **Changed, the receipt: a registration whose agent promised to stop is read from its stop record once it ends.**
+  `Stopped` now needs the stop record's confirmation; a declared subscriber that answered with a result inside the
+  receipt's wait reads `Unbounded`.
+- **A declaring stream is handed at most 256 requests it has not ended** (`?read_ahead=N`, 1–256, default 256;
+  `read_ahead` / `readAhead` in the SDKs; #806's review M2 and its confirm round, C1). **The bound is the node's
+  own**: it counts what it handed the stream and the stream has not ended, and past the window hands it nothing more and takes nothing more off the
+  stream's channel, so a busy worker's backlog fills that channel and `SignalHandlers::fill_ratio`, which admission
+  reads, sees it. **The SDKs read a declaring stream without pause**, so a `cancel` event is never stuck behind
+  requests. A declaring worker that takes requests and never answers them stalls at its window until they expire:
+  answer or confirm every request. An undeclared stream is unchanged. **What the window means for a declaring
+  stream:**
+  - it works on **at most its window of calls at once** (256 at most); an undeclared stream has no such ceiling;
+  - a request dropped **without any respond** holds a window slot for 300 s — as does one whose confirmation the SDK
+    refused (`CancelNotReceivedError`) and that was not then answered;
+  - **the one rule for what ends a request on a stream:** every `rpc/respond` the node answers in the 2xx class
+    (`ok`, `duplicate`, `cancelled`, `stopped`), naming a stream its own principal opened, ends that request on that
+    stream; any other answer (`409`, `403`, `400`) ends nothing, and so does a respond naming another principal's
+    stream. Failing that, a request ends 300 s after it was handed out;
+  - a raw client that declares but does not send `stream` back on `rpc/respond` **never opens its window**;
+  - the channel a stream's releases arrive on is **not bounded**: a subscriber that replays a respond the node already
+    took adds one entry per replay to its own stream's channel, at its own request rate, and to no other stream's;
+  - `read_ahead` must be a whole number from 1 to 256: a declaring stream's 0, a larger value or a non-number is
+    refused **`400 invalid_read_ahead`** (JSON), never clamped; on a stream that does not declare it is ignored.
+- **A call cancelled while it still waits in the stream's queue** is answered `cancelled`, never streamed, and recorded
+  as the node's own confirmed stop, whatever the stream declared: it was never handed out (#806's review, L7) — also
+  when the stream closes with it still queued (before, `withdrawn`). **When it is answered:** on the serve loop's next
+  turn — within a second while the stream's window is full; while the window has room and the stream is not asking
+  for an event, only when the stream next asks or closes.
+- **SDKs** (`mycelium-py` and `mycelium-ts` bump at release): `rpc_serve(kind, stops_on_cancel=True)` /
+  `rpcServe(kind, { stopsOnCancel: true })` declare; every stream sends `cancel_events=true`; each request carries
+  `cancelled` (an `asyncio.Event`) / `signal` (an `AbortSignal`), set by its `cancel` event; `rpc_confirm_stopped(req)` /
+  `rpcConfirmStopped(req)` confirm, `False`/`false` for `409` — and **refuse on the client side**
+  (`CancelNotReceivedError`, nothing sent) unless the request's own stream received a `cancel` event for it: the SDK
+  never claims a stop it was not asked for (the maintainer's decision of 2026-11-17). `RpcRequest.stream` names the
+  request's stream and is sent on `rpc_respond` / `rpcRespond`. A **declaring** stream is read beside the caller, so a
+  cancel reaches a request still being worked on, and requests the caller has not taken wait in its memory.
+- **Upgrade.** Upgrade the provider before an SDK declares: an older node ignores the parameters, so a declared
+  subscriber is still refused a cancellable call there. An older node would read `"stopped": true` as an empty answer
+  and deliver it — **closed by the SDKs**: they confirm only after a `cancel` event, which an older node never sends,
+  so it is never sent one. ***Check:*** on an enforcing provider behind a minting gateway,
+  open `rpc/serve` with `stops_on_cancel=true` for a kind under a cancellable rule, cancel a call it holds with
+  `GossipAgent::cancel_call`, and answer the `cancel` event with `"stopped": true` inside a second: the receipt is
+  `Stopped`.
+
 ## 117. Standing under changed roots: kept anchors, no legacy class on a node trusting only successor roots, client marks with their certificate, sessions re-judged, and a CA's generation (unreleased, identity-and-lifecycle I2, PR 2a)
 
 *Numbered 117 because an open pull request holds §116 (#806) at the time of writing; the sections are in order once it

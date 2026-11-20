@@ -65,9 +65,13 @@
 //! tool loop and the bridged MCP loop (`mcp.rs`), the SDK serve stream (`http/mesh.rs`), and the built-in
 //! `llm.invoke` provider (`llm.rs` — until #781's review found it, F1, it verified the caller and ran). Each names
 //! itself ([`Door`]); a call under a **cancellable** rule is refused (`door_cannot_stop`) at a door that cannot stop
-//! it once it runs — the bridged MCP loop, the SDK serve stream, a tool registered with
-//! `register_mcp_tool_unstoppable` (the wasm host's bridge), and a hosted capability's kind through `rpc_rx` — until
-//! identity-and-lifecycle I4's PR 3 builds their stop (the maintainer's decision of 2026-11-15).
+//! it once it runs — the bridged MCP loop, the SDK serve stream to a subscriber that has not declared `stops_on_cancel`,
+//! a tool registered with `register_mcp_tool_unstoppable` (the wasm host's bridge), and a hosted capability's kind
+//! through `rpc_rx` (the maintainer's decision of 2026-11-15). At the bridged loop and the SDK stream the node makes
+//! its **own** stop of a call admitted under any rule (I4's PR 3b, the maintainer's decision (C) of 2026-11-16): it
+//! stops waiting, answers `cancelled`, tells the other agent and discards its late reply ([`Admission::stop_asked`];
+//! `mcp::forward_bridged`, `http::served_call`) — and records the stop confirmed only on a declared SDK subscriber's
+//! own confirmation.
 //!
 //! **That is not every receiver** (#785's review; each a *not built* row on `docs/operations/what-is-proven.md`):
 //!
@@ -90,7 +94,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use base64::Engine as _;
 use serde_json::{json, Value};
@@ -104,7 +108,6 @@ use crate::knowledge::issuer::{MemberKeySource, SharedExternalIssuers};
 #[cfg(test)]
 use crate::knowledge::issuer::TrustedExternalIssuers;
 use crate::knowledge::IssuerId;
-use crate::node_id::NodeId;
 
 /// What an admitted protected call holds while it is in flight: its cohort-budget places, if a
 /// budget is attached. Dropping it releases them.
@@ -118,16 +121,66 @@ pub(crate) struct Admission {
     /// what a cancel stops. A call under a client's grant and a `call:` mandate holds both; when the handler's
     /// future drops, both drop, and only a cancelled one writes a stop record.
     call_work: Option<super::gateway_authority::WorkGuard>,
-    /// The `rpc_rx` receiver this call was handed to declared that it stops on a lapse
-    /// (`RpcRequestRx::stops_when_authority_lapses`): its answers are assessed ([`assess_answer`]).
+    /// The receiver this call was handed to declared that it stops on a lapse — an `rpc_rx` receiver
+    /// (`RpcRequestRx::stops_when_authority_lapses`) or an SDK subscriber on `rpc/serve` (`stops_on_cancel`): its
+    /// answers are assessed ([`assess_answer`], [`answered_late`]).
     pub(crate) promised_stop: bool,
 }
 
 impl Admission {
     /// When the authority first asked this call's work to stop, under either registration — `None` while it has
     /// not (`WorkGuard::stop_requested_ms`).
-    fn stop_requested_ms(&self) -> Option<u64> {
+    pub(crate) fn stop_requested_ms(&self) -> Option<u64> {
         [&self.work, &self.call_work].into_iter().flatten().filter_map(|g| g.stop_requested_ms()).min()
+    }
+
+    /// Does this admission hold anything a later answer must release — a cohort place or a running-work registration?
+    pub(crate) fn holds_anything(&self) -> bool {
+        self._slot.is_some() || self.work.is_some() || self.call_work.is_some()
+    }
+
+    /// **Take this call's cohort place out of the admission** (the maintainer's decision of 2026-11-17, M4): a call
+    /// holds one place however many serve streams it reaches, so the place is kept with the call
+    /// (`http::served_call`), not with each stream's admission.
+    pub(crate) fn take_place(&mut self) -> Option<CohortSlot> {
+        self._slot.take()
+    }
+
+    /// Has the authority already asked this call's work to stop, under either registration?
+    pub(crate) fn is_lapsed(&self) -> bool {
+        [&self.work, &self.call_work].into_iter().flatten().any(|g| g.is_cancelled())
+    }
+
+    /// **Resolves when the authority asks this call's work to stop**, as [`lapsed`](Self::lapsed) does, but records
+    /// no acknowledgement: for the node's own stop at a door where another agent does the work (identity-and-lifecycle
+    /// I4, PR 3b — the bridged MCP loop, the SDK serve stream). The node stops waiting; that is not the work's
+    /// acknowledgement. Never resolves for a call registered under neither.
+    pub(crate) async fn stop_asked(&self) {
+        match (&self.work, &self.call_work) {
+            (Some(a), Some(b)) => tokio::select! { _ = a.stop_asked() => {}, _ = b.stop_asked() => {} },
+            (Some(g), None) | (None, Some(g)) => g.stop_asked().await,
+            (None, None) => std::future::pending().await,
+        }
+    }
+
+    /// **Release this admission as a stop the node saw complete** (#806's review, L7): the call was never handed to the
+    /// agent that would have done it — cancelled while it waited in the SDK stream's queue — so the end is the node's
+    /// own, confirmed, whether or not that agent declared it stops.
+    pub(crate) fn release_confirmed_by_node(self) {
+        let Admission { _slot, work, call_work, .. } = self;
+        drop(work.map(super::gateway_authority::WorkGuard::confirmed_by_node));
+        drop(call_work.map(super::gateway_authority::WorkGuard::confirmed_by_node));
+        drop(_slot);
+    }
+
+    /// **Release this admission as a stop the node cannot confirm** (identity-and-lifecycle I4, PR 3b): whatever its
+    /// door promised, the registration's end is recorded with no confirmation — the agent doing the work did not say
+    /// it stopped. A guard that was never cancelled writes no stop record either way.
+    pub(crate) fn release_unconfirmed(self) {
+        let Admission { _slot, work, call_work, .. } = self;
+        drop(work.map(super::gateway_authority::WorkGuard::unconfirmed));
+        drop(call_work.map(super::gateway_authority::WorkGuard::unconfirmed));
+        drop(_slot);
     }
 
     /// **Resolves when the authority cancels this call's work** — under either registration: the caller's mandate
@@ -155,8 +208,9 @@ where
     }
 }
 
-/// Longest an SDK-served call may hold its places without a reply: the gateway's own RPC ceiling.
-const PARKED_TTL_MS: u64 = 300_000;
+/// Longest an SDK-served call may hold its places without a reply: the gateway's own RPC ceiling. Past it the node
+/// releases what the call holds (`http::served_call`), as a stop it cannot confirm if the call was cancelled.
+pub(crate) const PARKED_TTL_MS: u64 = 300_000;
 
 /// H6's cohort budget at this provider (closure plan C4), attached with `with_cohort_budget`.
 pub(crate) struct ProviderBudget {
@@ -167,9 +221,6 @@ pub(crate) struct ProviderBudget {
     /// Shared (identity-and-lifecycle I1). Not fed client keys: a cohort's authorities are the operator's.
     external: SharedExternalIssuers,
     refusals: AtomicU64,
-    /// Lock-order row 46: admissions for requests streamed to an SDK agent, released by
-    /// `/gateway/rpc/respond` or after `PARKED_TTL_MS`. Leaf.
-    parked: Mutex<HashMap<(NodeId, u64), (u64, Admission)>>,
 }
 
 impl ProviderBudget {
@@ -179,7 +230,6 @@ impl ProviderBudget {
             view: RwLock::new(view),
             external: external.into(),
             refusals: AtomicU64::new(0),
-            parked: Mutex::new(HashMap::new()),
         }
     }
 
@@ -214,19 +264,15 @@ impl ProviderBudget {
     }
 }
 
-/// Hold `admission` for a request streamed to an SDK agent until it replies (or `PARKED_TTL_MS`).
-pub(crate) fn park(ctx: &TaskCtx, sender: &NodeId, nonce: u64, admission: Admission) {
-    let Some(b) = ctx.cohort_budget.get() else { return };
-    let now = ctx.hlc.decision_now_ms();
-    let mut parked = b.parked.lock().unwrap_or_else(|e| e.into_inner());
-    parked.retain(|_, (at, _)| now.saturating_sub(*at) <= PARKED_TTL_MS);
-    parked.insert((sender.clone(), nonce), (now, admission));
-}
-
-/// Release what [`park`] held for this request: the SDK agent has replied.
-pub(crate) fn release_parked(ctx: &TaskCtx, sender: &NodeId, nonce: u64) {
-    if let Some(b) = ctx.cohort_budget.get() {
-        b.parked.lock().unwrap_or_else(|e| e.into_inner()).remove(&(sender.clone(), nonce));
+/// The refusal of a call the SDK serve stream would have to watch while the gateway already watches as many as it
+/// keeps (`http::served_call`, identity-and-lifecycle I4, PR 3b): answered before streaming, so no call is streamed
+/// that its cancel could not reach.
+pub(crate) fn served_calls_full() -> ProviderRefusal {
+    ProviderRefusal {
+        reason: "at_capacity".into(),
+        message: "at capacity: this gateway holds as many streamed calls as it keeps; nothing was streamed (served_calls_full)".into(),
+        code: -32004,
+        data: json!({ "reason": "at_capacity", "detail": "served_calls_full" }),
     }
 }
 
@@ -436,8 +482,10 @@ pub(crate) enum Door {
     McpTool { stops: bool },
     /// The bridged MCP loop: the call is forwarded to an external MCP server, and nothing races the forward.
     BridgedMcp,
-    /// The SDK serve stream (`rpc/serve`): the call is streamed to an SDK agent, and its admission only parked.
-    SdkServe,
+    /// The SDK serve stream (`rpc/serve`): the call is streamed to an SDK agent. `stops: true` when the subscriber
+    /// declared that it stops on a `cancel` event (`stops_on_cancel`) — its own promise, as `rpc_rx`'s declaration
+    /// is the receiver's (identity-and-lifecycle I4, PR 3b; the maintainer's decision (C) of 2026-11-16).
+    SdkServe { stops: bool },
     /// The built-in `llm.invoke` provider, which races the backend call against the admission's lapse.
     #[cfg_attr(not(feature = "llm"), allow(dead_code))]
     LlmInvoke,
@@ -448,13 +496,13 @@ impl Door {
     pub(crate) fn cannot_stop(self, kind: &str) -> Option<&'static str> {
         match self {
             Door::BridgedMcp => Some("bridged_mcp"),
-            Door::SdkServe => Some("sdk_serve"),
+            Door::SdkServe { stops: false } => Some("sdk_serve"),
             Door::McpTool { stops: false } => Some("unstoppable_mcp_tool"),
             // A receiver's own promise decides, and only the receiver can make it: the wasm host's serve loop makes
             // none (a begun guest call is never interrupted), so a hosted capability's kind keeps its own name.
             Door::RpcRx { stops: false } if kind.starts_with(super::HOSTED_CAPABILITY_KIND_PREFIX) => Some("hosted_capability"),
             Door::RpcRx { stops: false } => Some("rpc_rx"),
-            Door::RpcRx { stops: true } | Door::McpTool { stops: true } | Door::LlmInvoke => None,
+            Door::RpcRx { stops: true } | Door::McpTool { stops: true } | Door::SdkServe { stops: true } | Door::LlmInvoke => None,
         }
     }
 }
@@ -562,7 +610,7 @@ async fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&Admitted
         }
         let found = match door {
             "bridged_mcp" => "the call would be forwarded to an external MCP server, and nothing here stops a forwarded call",
-            "sdk_serve" => "the call would be streamed to an SDK agent, and nothing here stops a served call",
+            "sdk_serve" => "the call would be streamed to an SDK subscriber that has not declared it stops on a cancel event (stops_on_cancel)",
             "hosted_capability" | "unstoppable_mcp_tool" => "the call would run in a hosted component, and a begun guest call is never interrupted",
             "rpc_rx" => "the receiver of this kind has not declared that it stops when a call's authority lapses (stops_when_authority_lapses)",
             _ => "this door cannot stop a running call",
@@ -760,17 +808,36 @@ pub const LAPSE_ANSWER_GRACE_MS: u64 = 1_000;
 /// a broken promise and is not counted. Nothing is refused because of it.
 pub(crate) fn assess_answer(ctx: &TaskCtx, request: &RpcRequest) {
     let Some(admission) = request.admission() else { return };
-    if !admission.promised_stop {
-        return;
-    }
-    let Some(asked) = admission.stop_requested_ms() else { return };
-    if ctx.hlc.decision_now_ms().saturating_sub(asked) <= LAPSE_ANSWER_GRACE_MS {
+    if !answered_late(ctx, admission.promised_stop, admission.stop_requested_ms()) {
         return;
     }
     let kind = request.kind().to_string();
     #[cfg(feature = "metrics")]
     metrics::counter!("mycelium_rpc_rx_answered_after_lapse_total", "kind" => kind.clone()).increment(1);
     ctx.rpc_rx_late_answers.pin().update_or_insert(kind, |n| n + 1, 1);
+}
+
+/// **Was this answer late for a receiver that promised to stop?** `promised`: the receiver declared it stops on a
+/// lapse; `asked`: when the authority asked the call's work to stop. Late is more than [`LAPSE_ANSWER_GRACE_MS`]
+/// after that request — the one measure both doors that assess a declared receiver use (`rpc_rx` here, the SDK serve
+/// stream in `http::served_call`).
+pub(crate) fn answered_late(ctx: &TaskCtx, promised: bool, asked: Option<u64>) -> bool {
+    promised && asked.is_some_and(|asked| ctx.hlc.decision_now_ms().saturating_sub(asked) > LAPSE_ANSWER_GRACE_MS)
+}
+
+/// **Count one of the node's own stops at `door`** (identity-and-lifecycle I4, PR 3b; `GET /stats` `door_stops`): at a
+/// door where another agent does the work — the bridged MCP loop, the SDK serve stream — the node stopped waiting,
+/// answered the requester `cancelled` and told the other agent. What that agent then did is not counted here.
+pub(crate) fn count_door_stop(ctx: &TaskCtx, door: &'static str) {
+    #[cfg(feature = "metrics")]
+    metrics::counter!("mycelium_provider_door_stops_total", "door" => door).increment(1);
+    ctx.door_stops.pin().update_or_insert(door, |n| n + 1, 1);
+}
+
+/// Test hook: the places held in the undeclared pool now.
+#[cfg(all(test, feature = "compliance"))]
+pub(crate) fn test_undeclared_in_flight(ctx: &TaskCtx) -> Option<usize> {
+    Some(ctx.cohort_budget.get()?.budget.in_flight(&crate::knowledge::cohort_budget::BudgetPool::Undeclared))
 }
 
 /// Test hook: take one place in the cohort budget for `principal`, as an in-flight call would (`grant_tests`).
@@ -1085,6 +1152,8 @@ fn advertises(ctx: &TaskCtx, ns: &str, name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::config::TlsConfig;
+    use crate::node_id::NodeId;
+    use std::sync::Mutex;
     use crate::knowledge::cohort::CohortDeclaration;
     use crate::{GossipAgent, GossipConfig};
     use bytes::Bytes;

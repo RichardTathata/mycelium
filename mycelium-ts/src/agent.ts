@@ -74,6 +74,7 @@ function commitResult(data: {
  * `protected_rpc_kinds`) are work with a door of their own, where authority is checked: use `/mcp`,
  * `A2aClient` or the LLM client instead.
  */
+
 export class ProtectedKindError extends Error {
   constructor(public readonly kind: string, message: string) {
     super(message);
@@ -86,6 +87,18 @@ export class ProtectedKindError extends Error {
  * the node now serves it, so no client stream may hold it (0.2.6; substrate post-360 row R). A
  * `ProtectedKindError`, so a handler for the refusal at open catches this too.
  */
+/**
+ * `rpcConfirmStopped` was called for a request whose stream never received a `cancel` event for it
+ * (identity-and-lifecycle I4; the maintainer's decision of 2026-11-17): the SDK never claims a stop it was not asked
+ * for. Thrown before anything is sent.
+ */
+export class CancelNotReceivedError extends Error {
+  constructor(public readonly nonceHex: string) {
+    super(`no cancel event was received for request ${nonceHex} on its stream; a stop is confirmed only when asked`);
+    this.name = "CancelNotReceivedError";
+  }
+}
+
 export class ServeEvictedError extends ProtectedKindError {
   constructor(kind: string, message: string) {
     super(kind, message);
@@ -840,9 +853,42 @@ export class MyceliumAgent {
    *
    * On a scoped gateway, serving needs the `mesh:serve` scope (for this stream and for
    * `rpcRespond`). A serving agent should not hold `mesh:write`, which also opens `rpcCall`.
+   *
+   * **Cancellation** (identity-and-lifecycle I4). When a call's authority lapses — its caller's mandate, or the
+   * gateway cancelled it — the node stops waiting: it answers the caller `cancelled`, aborts the request's `signal`,
+   * and discards a later `rpcRespond`. That is the node's promise, not yours.
+   *
+   * `stopsOnCancel: true` is **your** promise: you declare that you stop a call's work when its `signal` aborts, and
+   * confirm with `rpcConfirmStopped` once it has stopped. Only a declaring subscriber is served a call under a rule
+   * declared cancellable (an undeclared one is refused it, `door_cannot_stop`); the node records a stop it can
+   * confirm only on your confirmation, and counts an answer you send more than a second after the stop was asked
+   * (`rpc_serve_answered_after_lapse`). A declaring stream reads ahead of you, so a cancel reaches a request you are
+   * still working on, whatever else is waiting: the stream is read without pause. What bounds it is the node: it
+   * hands a declaring stream at most `readAhead` requests the stream has not yet ended (256 by default and at most;
+   * an answer or a confirmation ends one, as does 300 s), and keeps the rest in its own channel, where its admission
+   * sees a busy worker. So answer, or confirm, every request you take.
+   *
+   * ```ts
+   * for await (const req of agent.rpcServe("my.method", { stopsOnCancel: true })) {
+   *   try {
+   *     await agent.rpcRespond(req, await process(req.payload, req.signal));
+   *   } catch (e) {
+   *     if (req.signal?.aborted) await agent.rpcConfirmStopped(req); else throw e;
+   *   }
+   * }
+   * ```
    */
-  async *rpcServe(kind: string): AsyncGenerator<RpcRequest> {
-    const url = this._sseUrl(`/gateway/rpc/serve/${pathSegment(kind)}`);
+  async *rpcServe(kind: string, options: { stopsOnCancel?: boolean; readAhead?: number } = {}): AsyncGenerator<RpcRequest> {
+    const declared = options.stopsOnCancel === true;
+    const readAhead = Math.max(1, Math.min(Math.trunc(options.readAhead ?? READ_AHEAD), READ_AHEAD));
+    // Every stream says it reads `cancel` events (a node sends none to a stream that does not, since an older client
+    // would read one as a request); a declaring one makes its promise.
+    const url = this._sseUrl(`/gateway/rpc/serve/${pathSegment(kind)}`, declared ? { cancel_events: "true", stops_on_cancel: "true", read_ahead: String(readAhead) } : { cancel_events: "true" });
+    // The requests handed out and not yet cancelled, so a `cancel` event finds its request. Bounded: the oldest go
+    // first — a request that old has long been answered.
+    const handed = new Map<string, { abort: AbortController; req: RpcRequest }>();
+    // Ends a declaring stream's reader, which is suspended in a read the generator's `return` would wait behind.
+    const stop = new AbortController();
     // A kind the node serves itself (`protected_kind`: mcp.invoke, skill.invoke, llm.invoke; `served_in_process`:
     // any kind with a receiver on that node) is refused 403 with a JSON body: thrown as ProtectedKindError.
     const refusal = (status: number, body: unknown): Error | undefined => {
@@ -856,26 +902,113 @@ export class MyceliumAgent {
     const items = sseStream<Item>({ url, headers: this.auth }, (data, event) => {
       const raw = JSON.parse(data) as {
         kind?: string; nonce_hex: string; sender: string; payload_b64: string; error?: string; message?: string;
-        caller?: { principal: string; via: string; scopes: string[]; attested: boolean };
+        caller?: { principal: string; via: string; scopes: string[]; attested: boolean }; cancel?: boolean; stream?: string;
       };
       // The node took the kind: a terminal `evicted` event, thrown below — never a quiet end of the stream.
       if (event === "evicted" && raw.error === "evicted") {
         return { evicted: { kind: String(raw.kind ?? kind), message: String(raw.message ?? "evicted") } };
       }
+      // The node stopped waiting for a call it handed us: its request's signal aborts. Never a request.
+      if (event === "cancel" && raw.cancel === true) {
+        const key = `${raw.sender} ${raw.nonce_hex}`;
+        const held = handed.get(key);
+        // This stream's own cancel of a request it handed out: the one ground for a confirmation.
+        if (held && raw.stream === held.req.stream) {
+          CANCEL_RECEIVED.add(held.req);
+          held.abort.abort();
+        }
+        handed.delete(key);
+        return {};
+      }
+      const abort = new AbortController();
       const req: RpcRequest = {
         // The serve stream's data has no `kind`: it is the SSE event name (sweep 2026-10-06).
         kind: raw.kind ?? event ?? kind,
         nonceHex: raw.nonce_hex,
         sender: raw.sender,
         payload: fromb64(raw.payload_b64),
+        signal: abort.signal,
       };
       if (raw.caller) req.caller = raw.caller;
+      if (typeof raw.stream === "string") req.stream = raw.stream;
+      handed.set(`${req.sender} ${req.nonceHex}`, { abort, req });
+      while (handed.size > HANDED_KEPT) handed.delete(handed.keys().next().value as string);
       return { req };
-    }, { refusal });
-    for await (const item of items) {
-      if (item.evicted) throw new ServeEvictedError(item.evicted.kind, item.evicted.message);
-      if (item.req) yield item.req;
+    }, { refusal, signal: stop.signal });
+    if (!declared) {
+      // Read as you ask: a `cancel` event is seen when you next ask for a request.
+      for await (const item of items) {
+        if (item.evicted) throw new ServeEvictedError(item.evicted.kind, item.evicted.message);
+        if (item.req) yield item.req;
+      }
+      return;
     }
+    // Declared: the stream is read beside you, so a cancel reaches the request you are working on.
+    const queue: Array<{ req?: RpcRequest; error?: unknown; end?: true }> = [];
+    let wake: (() => void) | undefined;
+    const put = (x: { req?: RpcRequest; error?: unknown; end?: true }) => {
+      queue.push(x);
+      wake?.();
+      wake = undefined;
+    };
+    const pump = (async () => {
+      try {
+        for await (const item of items) {
+          if (item.evicted) {
+            put({ error: new ServeEvictedError(item.evicted.kind, item.evicted.message) });
+            return;
+          }
+          if (stop.signal.aborted) return;
+          // Never paused (#806's confirm round, C1): a cancel is applied as it arrives, whatever is queued. The node
+          // bounds the queue: it hands this stream at most `readAhead` requests it has not ended.
+          if (item.req) put({ req: item.req });
+        }
+        put({ end: true });
+      } catch (error) {
+        put({ error });
+      }
+    })();
+    try {
+      while (true) {
+        if (queue.length === 0) await new Promise<void>((resolve) => { wake = resolve; });
+        const next = queue.shift()!;
+        if (next.end) return;
+        if (next.error !== undefined) throw next.error;
+        if (next.req) yield next.req;
+      }
+    } finally {
+      stop.abort();
+      await pump.catch(() => {});
+    }
+  }
+
+  /**
+   * Confirm that you stopped the work of a request the node cancelled (identity-and-lifecycle I4). Your own word,
+   * sent once the work has stopped: it is the only thing the node records a confirmed stop on — a cancel's receipt
+   * then reads `Stopped` — and it speaks only for the stream the request came on (`stream`). Resolves `true` when the
+   * node took it, `false` when the node refused it (`409`: `not_cancelled`, `stream_required`, `not_your_stream`;
+   * nothing is recorded or sent).
+   *
+   * Throws `CancelNotReceivedError`, sending nothing, unless this request's stream received a `cancel` event for it:
+   * the SDK never claims a stop it was not asked for. (An older node, which sends no `cancel` event, would deliver a
+   * `"stopped": true` as an empty answer; it is never sent one.)
+   */
+  async rpcConfirmStopped(request: RpcRequest): Promise<boolean> {
+    if (!CANCEL_RECEIVED.has(request)) throw new CancelNotReceivedError(request.nonceHex);
+    const path = "/gateway/rpc/respond";
+    const resp = await fetch(`${this.base}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...this.auth },
+      body: JSON.stringify({ nonce_hex: request.nonceHex, sender: request.sender, stopped: true, stream: request.stream }),
+      signal: AbortSignal.timeout(this.timeout),
+    });
+    if (resp.status === 409) {
+      await resp.text().catch(() => "");
+      return false;
+    }
+    if (!resp.ok) await this._fail("POST", path, resp, {});
+    await resp.text().catch(() => "");
+    return true;
   }
 
   /** Sends a reply to an in-flight RPC request. */
@@ -884,6 +1017,8 @@ export class MyceliumAgent {
       nonce_hex: request.nonceHex,
       sender: request.sender,
       result_b64: b64(result),
+      // The stream it came on (I4): an answer speaks only for its own stream's work.
+      ...(request.stream !== undefined ? { stream: request.stream } : {}),
     });
   }
 
@@ -1296,3 +1431,15 @@ export class MyceliumAgent {
     return data.owner!;
   }
 }
+
+/**
+ * The most requests the node hands a declaring serve stream before the stream ends one (`readAhead`): the depth of
+ * the node's own channel for the stream. The node enforces it; the SDK only asks for it.
+ */
+const READ_AHEAD = 256;
+
+/** How many handed-out requests a serve stream remembers so a `cancel` event finds its request. */
+const HANDED_KEPT = 4096;
+
+/** The requests whose own stream received a `cancel` event for them: the only ones `rpcConfirmStopped` confirms. */
+const CANCEL_RECEIVED = new WeakSet<RpcRequest>();

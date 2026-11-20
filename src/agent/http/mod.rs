@@ -137,6 +137,8 @@ pub(crate) use mcp_bridge::{TEST_DISPATCH_TIMEOUT_MS, TEST_LAST_TIMEOUT};
 #[cfg(feature = "a2a")]
 pub(crate) use mcp_bridge::note_misplaced_causal_headers;
 mod mesh;
+#[cfg(all(feature = "gateway", feature = "tls"))]
+mod served_call;
 mod node;
 mod overlay;
 /// The schedule run stream (adopter-surface Y12): the gateway's node stands in a schedule's holder band for a client.
@@ -166,12 +168,19 @@ pub use authz::{GatewayPreflight, GatewayRefusal};
 pub(crate) use authz::{ae_decide, ae_preflight, ae_preflight_door, ae_record_execution, observed_execution, release_grant_claim_after, release_unspent_grant_claim, Decided, Preflight};
 #[cfg(all(test, feature = "gateway", feature = "tls"))]
 pub(crate) use authz::TEST_HISTORY_REFUSES_ADMIT;
+#[cfg(all(test, feature = "gateway", feature = "tls", feature = "compliance"))]
+pub(crate) use mesh::test_hooks as mesh_test_hooks;
 #[cfg(all(test, feature = "compliance"))]
 pub(crate) use authz::pre_execution_refusal;
 #[cfg(all(test, feature = "gateway", feature = "tls", feature = "consensus"))]
 pub(crate) use authz::{ae_preflight_routed, TEST_RECORD_PAUSE_MS};
 #[cfg(all(feature = "gateway", feature = "tls", feature = "a2a"))]
 pub(crate) use authz::ENFORCEMENT_POINT_A2A;
+
+/// A declaring serve stream as `rpc/respond` finds it: the principal that opened it, and where its loop is told that
+/// a `(sender, nonce)` it was handed has ended (the window's one release rule, `mesh::gw_rpc_respond`).
+#[cfg(all(feature = "gateway", feature = "tls"))]
+type ServeStreamEnds = (Arc<str>, tokio::sync::mpsc::UnboundedSender<(crate::node_id::NodeId, u64)>);
 
 /// Every door this build serves that asks the action evaluator, with the operation it asks under: `(enforcement
 /// point, operation)` (identity-and-lifecycle I0). `[authority]` maps each operation, so none of this node's doors
@@ -235,6 +244,16 @@ struct HttpCtx {
     /// Repeat answers to an already-answered request, accepted and dropped (`/stats`
     /// `rpc_respond_duplicates`): a replicated serve loop's losing replica.
     rpc_respond_duplicates: std::sync::atomic::AtomicU64,
+    /// The declaring `rpc/serve` streams open now, by id (I4, PR 3b; #806's confirm round, C1): where `rpc/respond`
+    /// tells a stream's loop that the stream ended a request, for its window. Lock-free (papaya); each loop inserts
+    /// and removes only its own id.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    serve_streams: papaya::HashMap<u128, ServeStreamEnds>,
+    /// Identity-and-lifecycle I4, PR 3b: the calls `rpc/serve` streamed that hold something — a cohort place, a
+    /// running-work registration — each owned by its watcher task until the subscriber ends it (`served_call`).
+    /// Lock-free (papaya): no lock-order row; each watcher removes only its own entry.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    served_calls:    papaya::HashMap<(crate::node_id::NodeId, u64), Arc<served_call::ServedCall>>,
     /// Schedule runs handed to clients on `schedules/run` and not yet acknowledged (adopter-surface Y12), by run id;
     /// each removed when its run ends. Lock-free (papaya): no lock-order row.
     schedule_runs:   Arc<PendingRuns>,
@@ -334,6 +353,10 @@ pub(super) async fn run_http_server(
         oidc,
         served_rpcs:  Mutex::new(ServedRpcs::default()),
         rpc_respond_duplicates: std::sync::atomic::AtomicU64::new(0),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        serve_streams: papaya::HashMap::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        served_calls: papaya::HashMap::new(),
         schedule_runs: Arc::new(papaya::HashMap::new()),
     });
 

@@ -30,6 +30,15 @@ export interface RpcRequest {
    * `sender` *is* the principal. A request whose context failed verification is never delivered.
    */
   caller?: GatewayCaller;
+  /**
+   * Aborted when the node stops waiting for this call — its authority lapsed: the caller's mandate, or the gateway
+   * cancelled the call (identity-and-lifecycle I4). The node has then answered the caller `cancelled` and discards a
+   * later `rpcRespond`. A subscriber that declared `stopsOnCancel` promised to stop the work when it aborts, and
+   * confirms with `rpcConfirmStopped`. Set on every request `rpcServe` yields.
+   */
+  signal?: AbortSignal;
+  /** The serve stream this request went out on, as the node named it; sent back on `rpcRespond` and `rpcConfirmStopped`. */
+  stream?: string;
 }
 
 /**

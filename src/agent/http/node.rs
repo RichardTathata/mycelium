@@ -325,6 +325,11 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         // …and answers a receiver that declared it stops on a lapse sent more than `LAPSE_ANSWER_GRACE_MS` after its
         // call's authority lapsed, by kind: an assessment of the receiver's promise, never a refusal.
         body["rpc_rx_answered_after_lapse"] = json!(ctx.agent_ctx.rpc_rx_late_answers.pin().iter().map(|(k, v)| (k.clone(), *v)).collect::<std::collections::BTreeMap<_, _>>());
+        // …the same for an SDK subscriber on `rpc/serve` that declared it stops on a `cancel` event (I4, PR 3b)…
+        body["rpc_serve_answered_after_lapse"] = json!(ctx.agent_ctx.rpc_serve_late_answers.pin().iter().map(|(k, v)| (k.clone(), *v)).collect::<std::collections::BTreeMap<_, _>>());
+        // …and the node's own stops where another agent does the work, by door: it stopped waiting, answered the
+        // requester `cancelled` and told the other agent; what that agent did is not counted here.
+        body["door_stops"] = json!(ctx.agent_ctx.door_stops.pin().iter().map(|(k, v)| (k.to_string(), *v)).collect::<std::collections::BTreeMap<_, _>>());
     }
     // Identity-and-lifecycle I5: exchanged OIDC tokens refused at this provider's replay window, by reason — `replayed`
     // (presented twice, by any gateway), `provider_window_full` (the provider's 262 144), `window_full` (a gateway's

@@ -73,11 +73,15 @@ struct Opts {
     legacy: bool,
     /// Attach the execution authority.
     authority: bool,
+    /// Attach a cohort budget (exit 17: each serve path runs with and without one).
+    budget: bool,
+    /// Turn provider enforcement on.
+    enforce: bool,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Self { tls: true, legacy: false, authority: true }
+        Self { tls: true, legacy: false, authority: true, budget: false, enforce: true }
     }
 }
 
@@ -110,6 +114,8 @@ async fn node_with(opts: Opts) -> Node {
     cfg.gateway_named_tokens = vec![
         crate::config::GatewayNamedToken { name: "alice".into(), token: "alice-secret".into(), scopes: vec!["mcp:invoke".into()] },
         crate::config::GatewayNamedToken { name: "sdk".into(), token: "sdk-secret".into(), scopes: vec!["mesh:serve".into()] },
+        // A second serving principal (#806's review, M5: another principal's `stopped`).
+        crate::config::GatewayNamedToken { name: "sdk2".into(), token: "sdk2-secret".into(), scopes: vec!["mesh:serve".into()] },
     ];
     // An operator's protected kind, served to an SDK agent over `rpc/serve` (the doors that cannot stop a call).
     cfg.protected_rpc_kinds = vec![CUSTOM.into(), PLAIN_RPC.into()];
@@ -129,6 +135,7 @@ async fn node_with(opts: Opts) -> Node {
             // server's tool, a tool registered as unstoppable, a hosted capability's kind, an SDK-served kind — each
             // cancellable, and the unstoppable tool's twin not.
             .allow(Rule::new("*", "tools/call", format!("tool:remote@{me}")).cancellable())
+            .allow(Rule::new("*", "tools/call", format!("tool:remote_plain@{me}")))
             .allow(Rule::new("*", "tools/call", format!("tool:hosted@{me}")).cancellable())
             .allow(Rule::new("*", "tools/call", format!("tool:hosted_plain@{me}")))
             .map_action("cap.invoke", "*")
@@ -146,7 +153,12 @@ async fn node_with(opts: Opts) -> Node {
     if opts.authority {
         a.with_execution_authority(Arc::clone(&authority));
     }
-    a.with_provider_enforcement();
+    if opts.enforce {
+        a.with_provider_enforcement();
+    }
+    if opts.budget {
+        a.with_cohort_budget(crate::knowledge::cohort_budget::CohortBudget::new(8, 4), crate::knowledge::cohort::CohortView::trusting([]), TrustedExternalIssuers::new());
+    }
     a.start().await.unwrap();
     let (started, finished) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
     for (tool, secs) in [("slow", 30u64), ("both", 30), ("plain", 0)] {
@@ -905,5 +917,631 @@ async fn an_undeclared_receivers_stop_is_a_release_and_a_declared_ones_is_confir
     n.running(0).await;
     let stop = n.authority.named_stop_records().into_iter().rev().find(|s| s.term.as_deref() == Some(&format!("c{id}"))).expect("a stop record");
     assert!(stop.record.acknowledged_ms.is_some() && stop.record.confirmed_ms.is_some(), "{stop:?}");
+    n.a.shutdown().await;
+}
+
+// ── I4, PR 3b: the node's own stop at the bridged MCP loop and the SDK serve stream ───────────────────────────────
+
+/// The bound on every HTTP exchange these tests make (#806's third round: a failure is a named failure, never a
+/// hang — a `read_ahead` plant once opened a stream whose body a test then read without one, for 16 hours).
+const HTTP_BOUND: Duration = Duration::from_secs(30);
+
+/// A client whose every request ends within [`HTTP_BOUND`]. Not for a serve stream, which is meant to stay open.
+fn http() -> reqwest::Client {
+    reqwest::Client::builder().timeout(HTTP_BOUND).build().expect("a client")
+}
+
+/// The provider's receipt for a cancel of `c{n}`: the gateway's revoking checkpoint sent to this node as the
+/// cancel-forward (`sys.call-cancel.v1`) — one node is the gateway and the provider here — and the class answered.
+async fn forward_cancel(n: &Node, id: u64) -> String {
+    let term = format!("c{id}");
+    let cp = call_mint::checkpoint(&n.key(), &n.gateway(), &format!("call:{term}"), 2, n.now(), &[term.as_str()]);
+    let payload = serde_json::to_vec(&serde_json::json!({ "v": 1, "checkpoint": cp })).unwrap();
+    let reply = super::rpc::rpc_call_ctx(&n.a.task_ctx, n.a.node_id().clone(), Arc::from(super::call_cancel::CANCEL_RPC_KIND), Bytes::from(payload), Duration::from_secs(10)).await.expect("the provider answers");
+    let v: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+    v["class"].as_str().unwrap_or_default().to_string()
+}
+
+/// A mock MCP server whose one tool, `remote_plain`, answers its **first** call only after `hold` (or never, within a
+/// test) and any later one at once: it records the id of each `tools/call` it was sent and each
+/// `notifications/cancelled`.
+struct SlowServer {
+    port: u16,
+    calls: Arc<AtomicUsize>,
+    ids: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    cancelled: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+}
+
+async fn slow_mcp_server(hold: Duration) -> SlowServer {
+    use axum::{extract::Json as AJson, routing::post, Router};
+    let (calls, cancelled) = (Arc::new(AtomicUsize::new(0)), Arc::new(std::sync::Mutex::new(Vec::new())));
+    let ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (c, x, i) = (Arc::clone(&calls), Arc::clone(&cancelled), Arc::clone(&ids));
+    let app = Router::new().route("/", post(move |AJson(req): AJson<serde_json::Value>| {
+        let (c, x, i) = (Arc::clone(&c), Arc::clone(&x), Arc::clone(&i));
+        async move {
+            let id = req["id"].clone();
+            match req["method"].as_str().unwrap_or("") {
+                "initialize" => AJson(serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "slow", "version": "0"}}})),
+                "tools/list" => AJson(serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"tools": [{"name": "remote_plain", "inputSchema": {"type": "object"}}]}})),
+                "tools/call" => {
+                    i.lock().unwrap().push(id.clone());
+                    if c.fetch_add(1, Ordering::SeqCst) == 0 {
+                        tokio::time::sleep(hold).await;
+                    }
+                    AJson(serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"content": [{"type": "text", "text": "late:remote_plain"}]}}))
+                }
+                "notifications/cancelled" => {
+                    x.lock().unwrap().push(req["params"].clone());
+                    AJson(serde_json::json!({}))
+                }
+                _ => AJson(serde_json::json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method not found"}})),
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    SlowServer { port, calls, ids, cancelled }
+}
+
+fn door_stops(n: &Node, door: &'static str) -> u64 {
+    n.a.task_ctx.door_stops.pin().get(door).copied().unwrap_or(0)
+}
+
+/// **The bridged MCP loop's own stop** (I4, PR 3b; the maintainer's decision (C) of 2026-11-16). A call under a rule
+/// that is **not** cancellable is forwarded to a bridged server whose tool answers only after 20 s. The gateway
+/// cancels the call (the cancel-forward): the node stops waiting at once — the requester is answered `cancelled`,
+/// `data.door` `bridged_mcp`, well before the server would answer, and never with the server's late reply — and
+/// sends the server `notifications/cancelled` for the request's id. It promises nothing about the work in the server:
+/// the receipt is `Unbounded` and the stop record has no confirmation. Seen failing first with `forward_bridged`'s
+/// `stop` arm taken out: the requester waited on the server's reply and the cancel stopped nothing the client saw.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_bridged_loop_stops_waiting_tells_the_server_and_promises_nothing_about_its_work() {
+    let n = Arc::new(node().await);
+    let server = slow_mcp_server(Duration::from_secs(20)).await;
+    let _bridge = n.a.mcp().connect_mcp_server(format!("http://127.0.0.1:{}/", server.port)).await.expect("bridged");
+    let (framed, id, _) = n.frame(&n.tool("remote_plain"), None, Cm::Honest);
+    let (n2, call) = (Arc::clone(&n), n.tool("remote_plain"));
+    let mut answered = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut answered).await;
+    assert!(until(|| server.calls.load(Ordering::SeqCst) == 1, Duration::from_secs(10)).await, "the call was forwarded");
+    let asked = std::time::Instant::now();
+    assert_eq!(forward_cancel(&n, id).await, "unbounded", "the bridged server made no promise the node can confirm");
+    let reply = tokio::time::timeout(Duration::from_secs(5), answered).await.expect("answered before the server would be").unwrap();
+    let v = json(&reply);
+    assert_eq!((v["error"]["data"]["reason"].as_str(), v["error"]["data"]["door"].as_str()), (Some("cancelled"), Some("bridged_mcp")), "{v}");
+    assert!(!String::from_utf8_lossy(&reply).contains("late:"), "the server's reply is not the answer");
+    assert!(asked.elapsed() < Duration::from_secs(5), "{:?}", asked.elapsed());
+    assert!(until(|| server.cancelled.lock().unwrap().len() == 1, Duration::from_secs(5)).await, "the server was told");
+    assert_eq!(door_stops(&n, "bridged_mcp"), 1);
+    n.running(0).await;
+    let stop = n.authority.named_stop_records().into_iter().rev().find(|s| s.term.as_deref() == Some(&format!("c{id}"))).expect("a stop record");
+    assert_eq!((stop.record.confirmed_ms, stop.record.acknowledged_ms), (None, None), "a release, neither confirmed nor acknowledged: {stop:?}");
+    // A second requester also numbering from 1 (#806's review, M1), while the server still holds the first call: the
+    // bridge forwards each under an id of its own, the notice names only the first's, and the second requester is
+    // answered under its own id 1.
+    let reply = n.send(&n.tool("remote_plain"), n.frame(&n.tool("remote_plain"), None, Cm::Honest).0).await;
+    let v = json(&reply);
+    assert_eq!((v["id"].clone(), v["result"]["content"][0]["text"].as_str()), (serde_json::json!(1), Some("late:remote_plain")), "{v}");
+    let ids = server.ids.lock().unwrap().clone();
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1], "two forwards, two ids: {ids:?}");
+    // …and this bridge task's alone (#806's confirm round, C2): the node's id and a token drawn for the task, so
+    // another node bridging the same server, or this bridge restarted, forwards under other ids.
+    let prefix = format!("mycelium-bridge-{}-", n.a.node_id());
+    assert!(ids.iter().all(|i| i.as_str().is_some_and(|i| i.starts_with(&prefix))), "{ids:?}");
+    let (mut a, mut b) = (0u64, 0u64);
+    let draw = || mycelium_core::sim_seam::rng_u64_from("nonce", 0);
+    assert_ne!(
+        super::mcp::mint_forward_id(&super::mcp::bridge_token("127.0.0.1:1", draw()), &mut a),
+        super::mcp::mint_forward_id(&super::mcp::bridge_token("127.0.0.1:1", draw()), &mut b),
+        "two bridge tasks of one node, each at its first forward"
+    );
+    assert_eq!(server.cancelled.lock().unwrap()[0]["requestId"], ids[0], "the notice names the cancelled forward's id, and no other call's");
+    n.a.shutdown().await;
+}
+
+/// One SDK subscriber's `rpc/serve` stream, read as an SDK reads it: each event's name and data, in order.
+struct Subscriber {
+    events: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
+    reader: tokio::task::JoinHandle<()>,
+    http_port: u16,
+    /// The stream's name, from the `Mycelium-Serve-Stream` header.
+    stream: String,
+    token: &'static str,
+}
+
+impl Subscriber {
+    async fn open(n: &Node, kind: &str, query: &str) -> Self {
+        Self::open_as(n, kind, query, "sdk-secret").await
+    }
+    /// As [`open`](Self::open), under another serving principal's token.
+    async fn open_as(n: &Node, kind: &str, query: &str, token: &'static str) -> Self {
+        // No total timeout on the stream itself; its opening is bounded.
+        let opening = reqwest::Client::new().get(format!("http://127.0.0.1:{}/gateway/rpc/serve/{kind}{query}", n.http_port)).bearer_auth(token).send();
+        let mut stream = tokio::time::timeout(HTTP_BOUND, opening).await.expect("the serve stream opens within its bound").expect("the serve stream opens");
+        assert_eq!(stream.status(), 200);
+        let name = stream.headers().get("mycelium-serve-stream").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let into = Arc::clone(&events);
+        let reader = tokio::spawn(async move {
+            let mut buf = String::new();
+            while let Ok(Some(c)) = stream.chunk().await {
+                buf.push_str(&String::from_utf8_lossy(&c));
+                while let Some(at) = buf.find("\n\n") {
+                    let block: String = buf.drain(..at + 2).collect();
+                    let (mut name, mut data) = (String::new(), String::new());
+                    for line in block.lines() {
+                        if let Some(v) = line.strip_prefix("event:") {
+                            name = v.trim().to_string();
+                        } else if let Some(v) = line.strip_prefix("data:") {
+                            data.push_str(v.trim());
+                        }
+                    }
+                    if !data.is_empty() {
+                        into.lock().unwrap().push((name, serde_json::from_str(&data).unwrap_or_default()));
+                    }
+                }
+            }
+        });
+        // The stream's serve loop is registered when the response starts; give its first ask a moment.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        Self { events, reader, http_port: n.http_port, stream: name, token }
+    }
+    /// Wait for the `i`-th event named `name`.
+    async fn next(&self, name: &str) -> serde_json::Value {
+        let found = || self.events.lock().unwrap().iter().find(|(e, _)| e == name).map(|(_, d)| d.clone());
+        assert!(until(|| found().is_some(), Duration::from_secs(10)).await, "no `{name}` event: {:?}", self.events.lock().unwrap());
+        found().unwrap()
+    }
+    fn count(&self, name: &str) -> usize {
+        self.events.lock().unwrap().iter().filter(|(e, _)| e == name).count()
+    }
+    fn saw(&self, name: &str) -> bool {
+        self.events.lock().unwrap().iter().any(|(e, _)| e == name)
+    }
+    /// `POST /gateway/rpc/respond` for the request `req` (its event's data) with `body`'s extra fields.
+    async fn respond(&self, req: &serde_json::Value, extra: serde_json::Value) -> (u16, serde_json::Value) {
+        // The stream the request went out on, as an SDK names it; `extra` may override it (`null`: none).
+        let mut body = serde_json::json!({ "nonce_hex": req["nonce_hex"], "sender": req["sender"], "stream": req["stream"] });
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let r = http().post(format!("http://127.0.0.1:{}/gateway/rpc/respond", self.http_port)).bearer_auth(self.token).json(&body).send().await.unwrap();
+        (r.status().as_u16(), r.json().await.unwrap_or_default())
+    }
+}
+
+impl Drop for Subscriber {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
+fn late_serve_answers(n: &Node) -> u64 {
+    n.a.task_ctx.rpc_serve_late_answers.pin().get(CUSTOM).copied().unwrap_or(0)
+}
+
+/// **A subscriber that declares it stops on a `cancel` event is served a cancellable call, and only its own word
+/// records a confirmed stop** (I4, PR 3b; exit 17's SDK half), with and without a cohort budget. The stream is opened
+/// with `stops_on_cancel=true`; the cancellable kind is streamed to it (an undeclared subscriber is refused it:
+/// `the_doors_that_cannot_stop_a_call_refuse_one_under_a_cancellable_rule_by_name`). The gateway cancels: the
+/// requester is answered `cancelled` (`data.door` `sdk_serve`) while the subscriber still holds the call, the stream
+/// carries the `cancel` event naming the request, and the subscriber's `"stopped": true` is accepted — the receipt is
+/// `Stopped`, the stop record confirmed. Its confirmation came inside the grace, so nothing is counted. Seen failing
+/// first with `Door::SdkServe { stops: true }` answering as an undeclared stream: the call was refused
+/// `door_cannot_stop` and never streamed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_declared_subscriber_is_served_a_cancellable_call_and_its_confirmation_is_the_stop() {
+    for budget in [false, true] {
+        let n = Arc::new(node_with(Opts { budget, ..Opts::default() }).await);
+        let sub = Subscriber::open(&n, CUSTOM, "?stops_on_cancel=true").await;
+        let (framed, id, _) = n.frame(&n.custom(), None, Cm::Honest);
+        let (n2, call) = (Arc::clone(&n), n.custom());
+        let mut answered = tokio::spawn(async move { n2.send(&call, framed).await });
+        n.running_or_answered(1, &mut answered).await;
+        let req = sub.next(CUSTOM).await;
+        let n3 = Arc::clone(&n);
+        let receipt = tokio::spawn(async move { forward_cancel(&n3, id).await });
+        let cancel = sub.next("cancel").await;
+        assert_eq!((cancel["cancel"].as_bool(), &cancel["nonce_hex"], &cancel["sender"]), (Some(true), &req["nonce_hex"], &req["sender"]), "the event names the request: {cancel}");
+        let reply = tokio::time::timeout(Duration::from_secs(5), &mut answered).await.expect("the requester is answered").unwrap();
+        let v = json(&reply);
+        assert_eq!((v["reason"].as_str(), v["data"]["door"].as_str()), (Some("cancelled"), Some("sdk_serve")), "budget {budget}: {v}");
+        assert_eq!(n.authority.running_count(), 1, "the node's stop is not the subscriber's: its registration stands until it says it stopped");
+        assert_eq!(sub.respond(&req, serde_json::json!({ "stopped": true })).await, (200, serde_json::json!({ "ok": true, "stopped": true })));
+        assert_eq!(receipt.await.unwrap(), "stopped", "budget {budget}: the subscriber's own confirmation");
+        n.running(0).await;
+        let stop = n.authority.named_stop_records().into_iter().rev().find(|s| s.term.as_deref() == Some(&format!("c{id}"))).expect("a stop record");
+        assert!(stop.record.confirmed_ms.is_some(), "{stop:?}");
+        assert_eq!((late_serve_answers(&n), door_stops(&n, "sdk_serve")), (0, 1));
+        n.a.shutdown().await;
+    }
+}
+
+/// **A declared subscriber that answers with a result instead of confirming is not a confirmed stop**, and its answer
+/// is discarded (I4, PR 3b). The cancel's receipt waits for the work to end; the subscriber answers `done` inside the
+/// wait, so the work has ended — but the subscriber did not say it stopped (it may have finished), so the receipt is
+/// `Unbounded`, not `Stopped`, and the record has no confirmation. `rpc/respond` answers `{"ok": true, "cancelled":
+/// true}` and the requester keeps the `cancelled` answer. Inside the grace, so not counted. Seen failing first with
+/// the receipt's wait reading the count alone (PR 3a's loop): `stopped`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_declared_subscribers_result_after_the_cancel_is_discarded_and_not_a_confirmed_stop() {
+    let n = Arc::new(node().await);
+    let sub = Subscriber::open(&n, CUSTOM, "?stops_on_cancel=true").await;
+    let (framed, id, _) = n.frame(&n.custom(), None, Cm::Honest);
+    let (n2, call) = (Arc::clone(&n), n.custom());
+    let mut answered = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut answered).await;
+    let req = sub.next(CUSTOM).await;
+    let n3 = Arc::clone(&n);
+    let receipt = tokio::spawn(async move { forward_cancel(&n3, id).await });
+    sub.next("cancel").await;
+    let reply = tokio::time::timeout(Duration::from_secs(5), &mut answered).await.expect("answered").unwrap();
+    assert_eq!(json(&reply)["reason"], "cancelled");
+    let late = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"done");
+    assert_eq!(sub.respond(&req, serde_json::json!({ "result_b64": late })).await, (200, serde_json::json!({ "ok": true, "cancelled": true })), "discarded");
+    assert_eq!(receipt.await.unwrap(), "unbounded");
+    n.running(0).await;
+    let stop = n.authority.named_stop_records().into_iter().rev().find(|s| s.term.as_deref() == Some(&format!("c{id}"))).expect("a stop record");
+    assert_eq!(stop.record.confirmed_ms, None, "{stop:?}");
+    assert_eq!(late_serve_answers(&n), 0, "inside the grace");
+    n.a.shutdown().await;
+}
+
+/// **A declared subscriber's answer past the grace is counted, not refused** (I4, PR 3b: assessment, not
+/// enforcement). The call is cancelled through the KV; the subscriber answers 1.6 s after the `cancel` event, past
+/// `LAPSE_ANSWER_GRACE_MS`: the answer is discarded as any late answer is (`cancelled: true`, 200, nothing refused),
+/// and `rpc_serve_answered_after_lapse` counts it once under its kind, in `GET /stats` too. Seen failing first with
+/// `ServedCall::assess` returning at once: nothing was counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_declared_subscribers_answer_past_the_grace_is_counted_and_nothing_is_refused() {
+    let n = Arc::new(node().await);
+    let sub = Subscriber::open(&n, CUSTOM, "?stops_on_cancel=true").await;
+    let (framed, id, _) = n.frame(&n.custom(), None, Cm::Honest);
+    let (n2, call) = (Arc::clone(&n), n.custom());
+    let mut answered = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut answered).await;
+    let req = sub.next(CUSTOM).await;
+    n.cancel(id);
+    sub.next("cancel").await;
+    let reply = tokio::time::timeout(Duration::from_secs(10), &mut answered).await.expect("answered").unwrap();
+    assert_eq!(json(&reply)["reason"], "cancelled");
+    tokio::time::sleep(Duration::from_millis(super::provider_enforcement::LAPSE_ANSWER_GRACE_MS + 600)).await;
+    let late = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"done");
+    assert_eq!(sub.respond(&req, serde_json::json!({ "result_b64": late })).await, (200, serde_json::json!({ "ok": true, "cancelled": true })));
+    assert_eq!(late_serve_answers(&n), 1);
+    let stats: serde_json::Value = http().get(format!("http://127.0.0.1:{}/stats", n.http_port)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(stats["rpc_serve_answered_after_lapse"][CUSTOM].as_u64(), Some(1), "{}", stats["rpc_serve_answered_after_lapse"]);
+    assert_eq!(stats["door_stops"]["sdk_serve"].as_u64(), Some(1), "{}", stats["door_stops"]);
+    n.running(0).await;
+    n.a.shutdown().await;
+}
+
+/// **An undeclared subscriber's plain-rule call: the node's own stop, recorded unconfirmed** (I4, PR 3b), with and
+/// without `cancel_events`. Under a rule that is not cancellable the call is streamed to a subscriber that made no
+/// promise. The gateway cancels: the requester is answered `cancelled`, the receipt is `Unbounded`, and a later answer
+/// is discarded and not counted (no promise to assess). A stream opened with no parameter — an older SDK, which would
+/// read any event as a request — is sent no `cancel` event; one opened with `cancel_events=true` is. A subscriber's
+/// `"stopped": true` for a call the node did not cancel is refused `409 not_cancelled`, and its result is still taken.
+/// Seen failing first with `served_call::run`'s stop arm taken out (the requester waited on the subscriber), and with
+/// `hears_cancel` set for every stream (an older client was sent a `cancel` event).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_undeclared_subscribers_plain_call_is_stopped_by_the_node_and_recorded_unconfirmed() {
+    for (query, hears) in [("", false), ("?cancel_events=true", true)] {
+        let n = Arc::new(node().await);
+        let sub = Subscriber::open(&n, PLAIN_RPC, query).await;
+        // Not cancelled: a `stopped` is refused and nothing moves; the result is then delivered.
+        let (framed, _, _) = n.frame(&n.plain_kind(), None, Cm::Honest);
+        let (n2, call) = (Arc::clone(&n), n.plain_kind());
+        let first = tokio::spawn(async move { n2.send(&call, framed).await });
+        let req = sub.next(PLAIN_RPC).await;
+        let (status, body) = sub.respond(&req, serde_json::json!({ "stopped": true })).await;
+        assert_eq!((status, body["error"].as_str()), (409, Some("not_cancelled")), "{body}");
+        let done = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"done");
+        assert_eq!(sub.respond(&req, serde_json::json!({ "result_b64": done })).await.0, 200);
+        assert_eq!(tokio::time::timeout(Duration::from_secs(5), first).await.expect("answered").unwrap(), b"done".to_vec());
+        // Cancelled while the subscriber holds it.
+        sub.events.lock().unwrap().clear();
+        let (framed, id, _) = n.frame(&n.plain_kind(), None, Cm::Honest);
+        let (n2, call) = (Arc::clone(&n), n.plain_kind());
+        let mut answered = tokio::spawn(async move { n2.send(&call, framed).await });
+        n.running_or_answered(1, &mut answered).await;
+        let req = sub.next(PLAIN_RPC).await;
+        assert_eq!(forward_cancel(&n, id).await, "unbounded", "{query}: the subscriber made no promise");
+        let reply = tokio::time::timeout(Duration::from_secs(5), &mut answered).await.expect("answered").unwrap();
+        assert_eq!(json(&reply)["reason"], "cancelled", "{query}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(sub.saw("cancel"), hears, "{query}: {:?}", sub.events.lock().unwrap());
+        // An undeclared stream made no promise to stop: its `stopped` is refused by name (#806's review, L2).
+        let (status, body) = sub.respond(&req, serde_json::json!({ "stopped": true })).await;
+        assert_eq!((status, body["error"].as_str()), (409, Some("not_declared")), "{query}: {body}");
+        tokio::time::sleep(Duration::from_millis(super::provider_enforcement::LAPSE_ANSWER_GRACE_MS + 200)).await;
+        assert_eq!(sub.respond(&req, serde_json::json!({ "result_b64": done })).await, (200, serde_json::json!({ "ok": true, "cancelled": true })), "{query}");
+        n.running(0).await;
+        assert_eq!(n.a.task_ctx.rpc_serve_late_answers.pin().get(PLAIN_RPC).copied(), None, "{query}: no promise, nothing assessed");
+        n.a.shutdown().await;
+    }
+}
+
+/// **An enveloped call reaches one serve stream at a node, and only that stream's own word confirms its stop** (#806's
+/// review, M3 and M5; the maintainer's decision of 2026-11-17). Two declaring streams of one principal are open on the
+/// kind: the envelope replay window hands the call to exactly one of them — the reliance the per-stream keying no
+/// longer depends on, pinned here — and every `cancel` names that stream. A `stopped` naming no stream is refused
+/// `stream_required`, one naming the other stream `not_your_stream`, and **another principal's** `not_your_stream`
+/// (it was never streamed the call); the registration stands through all three. The stream's own confirmation is
+/// `Stopped`. Seen failing first with both principal checks taken out — `rpc/respond`'s and the watcher's; either alone
+/// refuses it (the other principal's `stopped` was taken).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_enveloped_call_reaches_one_stream_and_only_its_word_confirms() {
+    let n = Arc::new(node().await);
+    let one = Subscriber::open(&n, CUSTOM, "?stops_on_cancel=true").await;
+    let two = Subscriber::open(&n, CUSTOM, "?stops_on_cancel=true").await;
+    let (framed, id, _) = n.frame(&n.custom(), None, Cm::Honest);
+    let (n2, call) = (Arc::clone(&n), n.custom());
+    let mut answered = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut answered).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (handed, other) = match (one.saw(CUSTOM), two.saw(CUSTOM)) {
+        (true, false) => (&one, &two),
+        (false, true) => (&two, &one),
+        seen => panic!("exactly one stream is handed an enveloped call: {seen:?}"),
+    };
+    assert_eq!(n.authority.running_count(), 1);
+    let req = handed.next(CUSTOM).await;
+    let n3 = Arc::clone(&n);
+    let receipt = tokio::spawn(async move { forward_cancel(&n3, id).await });
+    let cancel = handed.next("cancel").await;
+    assert_eq!(cancel["stream"], req["stream"]);
+    assert!(!other.saw("cancel"), "a stream that was not handed the call is not told of it");
+    let reply = tokio::time::timeout(Duration::from_secs(5), &mut answered).await.expect("answered").unwrap();
+    assert_eq!(json(&reply)["reason"], "cancelled");
+    let (status, body) = handed.respond(&req, serde_json::json!({ "stopped": true, "stream": null })).await;
+    assert_eq!((status, body["error"].as_str()), (409, Some("stream_required")), "{body}");
+    // Stream names are 128 random bits (#806's confirm round, C3): the header's, the events', never a counter's.
+    assert_eq!(req["stream"].as_str(), Some(handed.stream.as_str()));
+    let id = |s: &Subscriber| u128::from_str_radix(&s.stream, 16).expect("32 hex digits");
+    assert!(one.stream.len() == 32 && two.stream.len() == 32 && id(&one).abs_diff(id(&two)) > 1_000_000, "{} {}", one.stream, two.stream);
+    // The sibling's real stream, named by a process that somehow learned it: it was not handed the call.
+    let (status, body) = handed.respond(&req, serde_json::json!({ "stopped": true, "stream": other.stream })).await;
+    assert_eq!((status, body["error"].as_str()), (409, Some("not_your_stream")), "{body}");
+    let r = http().post(format!("http://127.0.0.1:{}/gateway/rpc/respond", n.http_port)).bearer_auth("sdk2-secret")
+        .json(&serde_json::json!({ "nonce_hex": req["nonce_hex"], "sender": req["sender"], "stream": req["stream"], "stopped": true })).send().await.unwrap();
+    let (status, body): (u16, serde_json::Value) = (r.status().as_u16(), r.json().await.unwrap_or_default());
+    assert_eq!((status, body["error"].as_str()), (409, Some("not_your_stream")), "another principal's stopped: {body}");
+    assert_eq!(n.authority.running_count(), 1, "nothing moved");
+    assert_eq!(handed.respond(&req, serde_json::json!({ "stopped": true })).await.0, 200);
+    assert_eq!(receipt.await.unwrap(), "stopped");
+    n.running(0).await;
+    n.a.shutdown().await;
+}
+
+/// **A call cancelled while it waits in the stream's queue is a stop the node saw complete** (#806's review, L7): it
+/// was never handed out, so its record is confirmed whether or not the stream declared. With the stream's loop holding
+/// what it has checked (a test hook), a plain-rule call for an undeclared stream is admitted and registered, then
+/// cancelled through the KV; released, the loop answers it `cancelled`, streams nothing, and the stop record is
+/// confirmed. Seen failing first with the queue's lapse dropping the admission as it was (the undeclared guard's
+/// release: no confirmation).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_call_cancelled_in_the_streams_queue_is_the_nodes_confirmed_stop() {
+    let n = Arc::new(node().await);
+    let sub = Subscriber::open(&n, PLAIN_RPC, "?cancel_events=true").await;
+    let me = n.a.node_id().to_string();
+    super::http::mesh_test_hooks::HOLD_STREAMING.pin().insert(me.clone());
+    let (framed, id, _) = n.frame(&n.plain_kind(), None, Cm::Honest);
+    let (n2, call) = (Arc::clone(&n), n.plain_kind());
+    let mut answered = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut answered).await;
+    n.cancel(id);
+    // The sweep asks the queued call's work to stop while the loop still holds it.
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    assert!(!answered.is_finished(), "still held in the queue");
+    super::http::mesh_test_hooks::HOLD_STREAMING.pin().remove(&me);
+    let reply = tokio::time::timeout(Duration::from_secs(5), &mut answered).await.expect("answered").unwrap();
+    assert_eq!(json(&reply)["reason"], "cancelled");
+    n.running(0).await;
+    assert!(!sub.saw(PLAIN_RPC), "never streamed: {:?}", sub.events.lock().unwrap());
+    let stop = n.authority.named_stop_records().into_iter().rev().find(|s| s.term.as_deref() == Some(&format!("c{id}"))).expect("a stop record");
+    assert!(stop.record.confirmed_ms.is_some(), "the node's own stop, confirmed: {stop:?}");
+    n.a.shutdown().await;
+}
+
+/// **A declaring stream is handed no more than its window, and a `cancel` is never held behind requests** (#806's
+/// confirm round, C1). A declaring SDK reads its stream without pause, so the bound on what it holds is the node's
+/// own: with `read_ahead=1` the stream is handed the first call and not the second, which waits at the node — where
+/// admission sees it — until the stream ends the first. Cancelling the first reaches the stream at once, though a
+/// request is waiting; its `stopped` (naming the stream) makes room, and the second call is then handed out. Seen
+/// failing first with the window never full: both calls were handed out at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_declaring_stream_holds_no_more_than_its_window_and_a_cancel_is_not_held_back() {
+    let n = Arc::new(node().await);
+    let sub = Subscriber::open(&n, CUSTOM, "?stops_on_cancel=true&read_ahead=1").await;
+    let (framed, id, _) = n.frame(&n.custom(), None, Cm::Honest);
+    let (n2, call) = (Arc::clone(&n), n.custom());
+    let mut first = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut first).await;
+    let req = sub.next(CUSTOM).await;
+    let (framed, _, _) = n.frame(&n.custom(), None, Cm::Honest);
+    let (n2, call) = (Arc::clone(&n), n.custom());
+    let second = tokio::spawn(async move { n2.send(&call, framed).await });
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!((sub.count(CUSTOM), n.authority.running_count()), (1, 1), "the second call waits at the node");
+    n.cancel(id);
+    sub.next("cancel").await;
+    assert_eq!(sub.count(CUSTOM), 1, "the cancel came while the second call still waited");
+    let reply = tokio::time::timeout(Duration::from_secs(5), &mut first).await.expect("answered").unwrap();
+    assert_eq!(json(&reply)["reason"], "cancelled");
+    assert_eq!(sub.respond(&req, serde_json::json!({ "stopped": true })).await.0, 200);
+    assert!(until(|| sub.count(CUSTOM) == 2, Duration::from_secs(5)).await, "room in the window: the second call is handed out");
+    let req2 = sub.events.lock().unwrap().iter().filter(|(e, _)| e == CUSTOM).nth(1).map(|(_, d)| d.clone()).unwrap();
+    let done = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"done");
+    assert_eq!(sub.respond(&req2, serde_json::json!({ "result_b64": done })).await.0, 200);
+    assert_eq!(tokio::time::timeout(Duration::from_secs(5), second).await.expect("answered").unwrap(), b"done".to_vec());
+    n.a.shutdown().await;
+}
+
+/// **A call cancelled in the queue of a stream that then closes is still the node's confirmed stop** (#806's confirm
+/// round, on L7): recorded by what happened, as when the queue is drained while the stream lives. The loop holds the
+/// checked call, it is cancelled, and the subscriber goes away: the requester is answered `cancelled` — not
+/// `withdrawn` — and the stop record is confirmed. Seen failing first with the closing drain answering every queued
+/// call `withdrawn` and dropping its admission as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_call_cancelled_in_the_queue_of_a_stream_that_closes_is_the_nodes_confirmed_stop() {
+    let n = Arc::new(node().await);
+    let sub = Subscriber::open(&n, PLAIN_RPC, "?cancel_events=true").await;
+    let me = n.a.node_id().to_string();
+    super::http::mesh_test_hooks::HOLD_STREAMING.pin().insert(me.clone());
+    let (framed, id, _) = n.frame(&n.plain_kind(), None, Cm::Honest);
+    let (n2, call) = (Arc::clone(&n), n.plain_kind());
+    let mut answered = tokio::spawn(async move { n2.send(&call, framed).await });
+    n.running_or_answered(1, &mut answered).await;
+    n.cancel(id);
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    assert!(!answered.is_finished(), "still held in the queue");
+    drop(sub);
+    let reply = tokio::time::timeout(Duration::from_secs(10), &mut answered).await.expect("answered when the stream closes").unwrap();
+    super::http::mesh_test_hooks::HOLD_STREAMING.pin().remove(&me);
+    assert_eq!(json(&reply)["reason"], "cancelled", "{}", String::from_utf8_lossy(&reply));
+    n.running(0).await;
+    let stop = n.authority.named_stop_records().into_iter().rev().find(|s| s.term.as_deref() == Some(&format!("c{id}"))).expect("a stop record");
+    assert!(stop.record.confirmed_ms.is_some(), "{stop:?}");
+    n.a.shutdown().await;
+}
+
+/// **A call holds one cohort place, however many serve streams it reaches** (the maintainer's decision of 2026-11-17,
+/// M4: a caller's budget is the caller's, and how many streams a server opens must not multiply what a caller is
+/// charged). A member's call without an envelope reaches both streams a server opened on the kind; the caller's pool
+/// holds **one** place while both hold the call, and none once the call is answered and both registrations have
+/// ended. Seen failing first with each stream's watcher keeping its own admission's place: two.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_call_holds_one_cohort_place_however_many_streams_it_reaches() {
+    let n = Arc::new(node_with(Opts { budget: true, legacy: true, enforce: false, ..Opts::default() }).await);
+    let held = |n: &Node| super::provider_enforcement::test_undeclared_in_flight(&n.a.task_ctx).expect("a budget");
+    let (one, two) = (Subscriber::open(&n, PLAIN_RPC, "").await, Subscriber::open(&n, PLAIN_RPC, "").await);
+    let n2 = Arc::clone(&n);
+    let answered = tokio::spawn(async move {
+        super::rpc::rpc_call_framed(&n2.a.task_ctx, n2.a.node_id().clone(), Arc::from(PLAIN_RPC), Bytes::from_static(b"work"), Duration::from_secs(20)).await.expect("a reply").to_vec()
+    });
+    let (r1, _r2) = (one.next(PLAIN_RPC).await, two.next(PLAIN_RPC).await);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(held(&n), 1, "one call, two streams: one place");
+    let done = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"done");
+    assert_eq!(one.respond(&r1, serde_json::json!({ "result_b64": done })).await.0, 200);
+    assert_eq!(tokio::time::timeout(Duration::from_secs(5), answered).await.expect("answered").unwrap(), b"done".to_vec());
+    assert!(until(|| held(&n) == 0, Duration::from_secs(5)).await, "released once both streams' registrations ended: {}", held(&n));
+    n.a.shutdown().await;
+}
+
+/// **A refused `rpc/respond` does not open the window, and a bad `read_ahead` is refused by name** (#806's second
+/// confirm round, D1 and D2). At `read_ahead=1` the stream holds the first call and the second waits at the node. A
+/// `"stopped": true` for the call in hand — which the node has not cancelled — is refused `409 not_cancelled` and
+/// ends nothing: the second call still waits. The first call's answer, which is taken, makes room. And a declaring
+/// stream's `read_ahead` of 0, 257 or `abc` is refused `400 invalid_read_ahead` in the route's JSON shape, while an
+/// undeclared stream, which has no window, is opened whatever it says. Seen failing first with the window released
+/// before the respond is judged (the second call was handed out on the refusal), and with the value clamped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_respond_does_not_open_the_window_and_a_bad_read_ahead_is_refused() {
+    let n = Arc::new(node().await);
+    let open = |query: &'static str| {
+        let port = n.http_port;
+        // A stream that opens never ends, so only its head is awaited here, and that within a bound.
+        async move {
+            let opening = reqwest::Client::new().get(format!("http://127.0.0.1:{port}/gateway/rpc/serve/{PLAIN_RPC}{query}")).bearer_auth("sdk-secret").send();
+            tokio::time::timeout(HTTP_BOUND, opening).await.expect("answered within its bound").unwrap()
+        }
+    };
+    for bad in ["?stops_on_cancel=true&read_ahead=0", "?stops_on_cancel=true&read_ahead=257", "?stops_on_cancel=true&read_ahead=abc"] {
+        let r = open(bad).await;
+        // The status first: a stream that was opened (200) has no body to wait for — a named failure, not a hang.
+        assert_eq!(r.status().as_u16(), 400, "{bad}: refused, never opened");
+        let body: serde_json::Value = tokio::time::timeout(HTTP_BOUND, r.json()).await.expect("the refusal's body within its bound").expect("a JSON refusal");
+        assert_eq!(body["error"].as_str(), Some("invalid_read_ahead"), "{bad}: {body}");
+    }
+    assert_eq!(open("?read_ahead=abc").await.status(), 200, "an undeclared stream has no window: the parameter is ignored");
+
+    let sub = Subscriber::open(&n, CUSTOM, "?stops_on_cancel=true&read_ahead=1").await;
+    let send = |n: &Arc<Node>| {
+        let (framed, _, _) = n.frame(&n.custom(), None, Cm::Honest);
+        let (n2, call) = (Arc::clone(n), n.custom());
+        tokio::spawn(async move { n2.send(&call, framed).await })
+    };
+    let mut first = send(&n);
+    n.running_or_answered(1, &mut first).await;
+    let req = sub.next(CUSTOM).await;
+    let second = send(&n);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(sub.count(CUSTOM), 1);
+    let (status, body) = sub.respond(&req, serde_json::json!({ "stopped": true })).await;
+    assert_eq!((status, body["error"].as_str()), (409, Some("not_cancelled")), "{body}");
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(sub.count(CUSTOM), 1, "a refused respond ends nothing: the second call still waits");
+    let done = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"done");
+    assert_eq!(sub.respond(&req, serde_json::json!({ "result_b64": done })).await.0, 200);
+    assert_eq!(tokio::time::timeout(Duration::from_secs(5), first).await.expect("answered").unwrap(), b"done".to_vec());
+    assert!(until(|| sub.count(CUSTOM) == 2, Duration::from_secs(5)).await, "the taken answer made room");
+    let req2 = sub.events.lock().unwrap().iter().filter(|(e, _)| e == CUSTOM).nth(1).map(|(_, d)| d.clone()).unwrap();
+    assert_eq!(sub.respond(&req2, serde_json::json!({ "result_b64": done })).await.0, 200);
+    let _ = tokio::time::timeout(Duration::from_secs(5), second).await.expect("answered");
+    n.a.shutdown().await;
+}
+
+/// A member's call without an envelope to the plain kind, which reaches every stream open on it.
+fn bare_call(n: &Arc<Node>) -> tokio::task::JoinHandle<Vec<u8>> {
+    let n = Arc::clone(n);
+    tokio::spawn(async move {
+        super::rpc::rpc_call_framed(&n.a.task_ctx, n.a.node_id().clone(), Arc::from(PLAIN_RPC), Bytes::from_static(b"work"), Duration::from_secs(20)).await.expect("a reply").to_vec()
+    })
+}
+
+/// **One release rule: every `rpc/respond` the node answers 2xx, naming a stream, ends that request on that stream —
+/// and a refusal ends nothing** (#806's third confirm round, N1). Two declaring streams of one principal at
+/// `read_ahead=1`; a call without an envelope reaches both. The first answers and is told `ok`; the second answers
+/// too and is told `duplicate` — a 2xx: its request has ended on its stream as well. A second call is then handed to
+/// **both**. Seen failing first with the release sent from the taken-answer branches only: the losing replica's
+/// duplicate freed nothing, and it was not handed the second call (its slot held for 300 s).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_losing_replicas_duplicate_answer_frees_its_window_slot_too() {
+    let n = Arc::new(node_with(Opts { legacy: true, enforce: false, ..Opts::default() }).await);
+    let a = Subscriber::open(&n, PLAIN_RPC, "?stops_on_cancel=true&read_ahead=1").await;
+    let b = Subscriber::open(&n, PLAIN_RPC, "?stops_on_cancel=true&read_ahead=1").await;
+    let first = bare_call(&n);
+    let (ra, rb) = (a.next(PLAIN_RPC).await, b.next(PLAIN_RPC).await);
+    let done = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"done");
+    assert_eq!(a.respond(&ra, serde_json::json!({ "result_b64": done })).await, (200, serde_json::json!({ "ok": true })));
+    assert_eq!(b.respond(&rb, serde_json::json!({ "result_b64": done })).await, (200, serde_json::json!({ "ok": true, "duplicate": true })));
+    assert_eq!(tokio::time::timeout(Duration::from_secs(5), first).await.expect("answered").unwrap(), b"done".to_vec());
+    let second = bare_call(&n);
+    assert!(until(|| a.count(PLAIN_RPC) == 2 && b.count(PLAIN_RPC) == 2, Duration::from_secs(5)).await, "both streams are handed the second call: a {} b {}", a.count(PLAIN_RPC), b.count(PLAIN_RPC));
+    let ra2 = a.events.lock().unwrap().iter().filter(|(e, _)| e == PLAIN_RPC).nth(1).map(|(_, d)| d.clone()).unwrap();
+    assert_eq!(a.respond(&ra2, serde_json::json!({ "result_b64": done })).await.0, 200);
+    let _ = tokio::time::timeout(Duration::from_secs(5), second).await.expect("answered");
+    n.a.shutdown().await;
+}
+
+/// **A window slot is released only by its own stream's principal** (#806's third confirm round, N1's promise check:
+/// the window bounds a stream's own backlog, and ending a request on it is the subscriber's own word about its own
+/// stream). Two principals each hold a declaring stream at `read_ahead=1`, and a call without an envelope reaches
+/// both. The first principal answers **naming the other's stream** — a name it should not know, given to it here:
+/// the answer is taken (2xx), and it ends nothing on the other principal's stream, which is not handed the next call
+/// until its own principal answers. Seen failing first with the release not checking who opened the stream: the other
+/// principal's slot was freed, and it was handed the second call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_respond_naming_another_principals_stream_frees_nothing_there() {
+    let n = Arc::new(node_with(Opts { legacy: true, enforce: false, ..Opts::default() }).await);
+    let mine = Subscriber::open(&n, PLAIN_RPC, "?stops_on_cancel=true&read_ahead=1").await;
+    let theirs = Subscriber::open_as(&n, PLAIN_RPC, "?stops_on_cancel=true&read_ahead=1", "sdk2-secret").await;
+    let first = bare_call(&n);
+    let (rm, rt) = (mine.next(PLAIN_RPC).await, theirs.next(PLAIN_RPC).await);
+    let done = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"done");
+    assert_eq!(mine.respond(&rm, serde_json::json!({ "result_b64": done, "stream": theirs.stream })).await.0, 200);
+    let _ = tokio::time::timeout(Duration::from_secs(5), first).await.expect("answered");
+    let second = bare_call(&n);
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert_eq!(theirs.count(PLAIN_RPC), 1, "another principal's word frees nothing on this stream");
+    // Its own principal's answer does.
+    assert_eq!(theirs.respond(&rt, serde_json::json!({ "result_b64": done })).await.0, 200);
+    assert!(until(|| theirs.count(PLAIN_RPC) == 2, Duration::from_secs(5)).await, "its own answer frees its slot");
+    let rt2 = theirs.events.lock().unwrap().iter().filter(|(e, _)| e == PLAIN_RPC).nth(1).map(|(_, d)| d.clone()).unwrap();
+    assert_eq!(theirs.respond(&rt2, serde_json::json!({ "result_b64": done })).await.0, 200);
+    let _ = tokio::time::timeout(Duration::from_secs(5), second).await.expect("answered");
     n.a.shutdown().await;
 }

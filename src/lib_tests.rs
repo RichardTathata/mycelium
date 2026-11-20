@@ -283,6 +283,10 @@ fn spawn_handler_with(
         #[cfg(all(feature = "gateway", feature = "tls"))]
         rpc_rx_late_answers: papaya::HashMap::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
+        rpc_serve_late_answers: papaya::HashMap::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        door_stops: papaya::HashMap::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "compliance")]
         declared_authority: std::sync::OnceLock::new(),
@@ -4521,6 +4525,10 @@ async fn test_subscribe_notified_via_gossip() {
         call_issuer: crate::agent::call_issuer::CallIssuer::default(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         rpc_rx_late_answers: papaya::HashMap::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        rpc_serve_late_answers: papaya::HashMap::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        door_stops: papaya::HashMap::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "compliance")]

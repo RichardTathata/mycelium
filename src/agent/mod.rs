@@ -1121,6 +1121,15 @@ pub(crate) struct TaskCtx {
     /// lapsed, by kind (`provider_enforcement::assess_answer`). One entry per kind a declared receiver serves.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) rpc_rx_late_answers: papaya::HashMap<String, u64>,
+    /// Identity-and-lifecycle I4, PR 3b: answers and stop confirmations an SDK subscriber that declared it stops on a
+    /// `cancel` event sent past the grace after its call's authority lapsed, by kind (`http::served_call`).
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) rpc_serve_late_answers: papaya::HashMap<String, u64>,
+    /// Identity-and-lifecycle I4, PR 3b: the node's own stops at the doors where another agent does the work — it
+    /// stopped waiting, answered the requester `cancelled` and told the other agent — by door (`bridged_mcp`,
+    /// `sdk_serve`).
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) door_stops: papaya::HashMap<&'static str, u64>,
     /// Closure plan C3: whether this node, as a **provider**, runs the action preflight on protected
     /// work it receives, set via `with_provider_enforcement`. Off = today's behaviour.
     #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1787,6 +1796,10 @@ impl GossipAgent {
             call_issuer: call_issuer::CallIssuer::default(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             rpc_rx_late_answers: papaya::HashMap::new(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            rpc_serve_late_answers: papaya::HashMap::new(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            door_stops: papaya::HashMap::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             provider_enforcement: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "compliance")]
