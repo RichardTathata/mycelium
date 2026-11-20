@@ -507,6 +507,36 @@ pub(crate) fn grant_checkpoint_key(grant: &crate::mandate::Mandate) -> String {
     format!("grant/{}/{}/checkpoint", grant_holder_segment(grant.holder.as_str()), grant.term.as_str())
 }
 
+/// Does the grant read at `{base}/issued` — `base` is `grant/{holder segment}/{request}` — answer that request? It is a
+/// grant, its term is the key's request, its scope is `grant:{request}` and its holder's segment is the key's. Every grant is signed for the request it answers, so a genuine grant copied under another request's key
+/// fails here: the owner-signed rule's (b), the body against the key, which a signature alone does not give. Read by
+/// the revoke route, the agent's wait and the status route; I4's collector makes the same comparison
+/// (`call_issuer::verified_grant`).
+pub(crate) fn grant_answers_key(grant: &crate::mandate::Mandate, base: &str) -> bool {
+    grant.is_grant()
+        && grant.scope == format!("{}{}", crate::mandate::grant::GRANT_SCOPE_PREFIX, grant.term.as_str())
+        && base == format!("grant/{}/{}", grant_holder_segment(grant.holder.as_str()), grant.term.as_str())
+}
+
+/// The `…/issued` records a reader treated as absent because they did not answer the key they were read at, or (at
+/// the revoke route) did not verify — counted where an operator reads them (`grant_issued_refused` on `/stats`). In
+/// memory, so zero again after a restart.
+#[derive(Default)]
+pub(crate) struct IssuedRefused {
+    /// The revoke route: not this node's signature, another holder, or another request's grant.
+    pub(crate) revoke: std::sync::atomic::AtomicU64,
+    /// The agent's wait: another request's grant, read as no answer yet.
+    pub(crate) agent_wait: std::sync::atomic::AtomicU64,
+    /// `GET /gateway/grants/request/{request}`: another request's grant, read as no answer.
+    pub(crate) status: std::sync::atomic::AtomicU64,
+}
+
+impl IssuedRefused {
+    pub(crate) fn note(counter: &std::sync::atomic::AtomicU64) {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// A grant holder as one `grant/` key segment (identity-and-lifecycle I1): a node principal (`node:{ip}:{port}`) is
 /// written as it is, as every grant before I1 was; any other principal — a client's `token:{issuer}/{name}`, which
 /// holds a `/` — as the lowercase hex of its bytes. The two never collide: hex has no `:`.

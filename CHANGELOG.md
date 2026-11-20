@@ -180,6 +180,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **A revoke revokes the grant its path names, never another one copied there** (the owner-signed rule's (b), the
+  body against the key). `POST /gateway/grants/{agent}/{request}/revoke` checked that the record at
+  `grant/{agent}/{request}/issued` was signed by this node and held by the path's agent, and never that it was the
+  grant issued for `{request}`. Any admitted member could copy another genuine grant of the same issuing node and
+  holder there: a supervisor's revoke of the request then revoked **the other grant's term**, left the request's own
+  grant live, and wrote `…/revoked`, so the status route reported it `revoked` while every door still admitted it.
+  The same copy was taken by the agent's wait as the answer to a request nobody had answered, and handed to a client by
+  `GET /gateway/grants/request/{request}`. **Released in 2.38.0, 2.39.0 and 2.40.0**; in 2.38.0 and 2.39.0 the revoke
+  route checked neither the signature nor the holder, so any record naming this node as issuer was revoked on.
+
+  Now the revoke route, the agent's wait and the status route read the record only as a grant whose term is the
+  path's request, whose scope is `grant:{request}` and whose holder is the path's agent. Anything else is absent: the
+  revoke is refused `409 unreadable_grant`, naming the term the record carries, and nothing is written; the wait waits
+  on and its expiry names what it saw; the status route answers `pending`. **Counted:** `GET /stats`
+  `grant_issued_refused` — `revoke` (this mismatch, and the route's existing signature and holder refusals),
+  `agent_wait`, `status`. An honest caller sees no change: a genuine grant always answers the key it was written at.
+  No wire-frame change (v12), no on-disk change, no public API change. Tests, each seen failing first:
+  `a_revoke_refuses_a_genuine_grant_copied_under_another_request` (two nodes, the copy written by the second member
+  and gossiped), `the_agents_wait_reads_a_grant_copied_from_another_request_as_absent`,
+  `the_status_route_reads_a_grant_copied_from_another_request_as_no_answer`.
+
+  **Check:** `curl -s http://NODE:PORT/stats | jq .grant_issued_refused` shows the three counts; a non-zero `revoke`
+  or `status` on an upgraded node means a record under `grant/` did not answer its key. A revoke made before the
+  upgrade can be re-sent to the issuing node once it is upgraded: `409 already_revoked` means it revoked its own
+  grant; `409 unreadable_grant` means the record at its key is not that request's grant, so the request's own grant
+  may still be live until its window ends (`ttl_secs`, at most 3 600 s from its issue).
+
 - **A member can no longer re-arm a used grant** (critique plan row CR2, first PR; the owner-signed rule;
   `deprecations.md` §106). A grant admits one call at each enforcement point, and the only durable record of that
   use was the marker `grant/{holder}/{term}/used/{door}` in the gossip KV: an unsigned timestamp, read for

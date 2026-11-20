@@ -1263,3 +1263,111 @@ async fn the_agents_wait_reuses_a_request_asked_before_i3() {
         "AGENT: counted at the agent's wait and the provider"
     );
 }
+
+/// **A revoke revokes the grant its path names, never a genuine one copied under it** (the owner-signed rule's (b):
+/// the body against the key). Node A issues two grants for B's agent, `r1` and `r2` — same issuer, same holder.
+/// Node B, a member, copies `r2`'s genuine issued record over `r1`'s; the copy reaches A by gossip. The supervisor
+/// revokes `r1` at A: the record at `r1`'s key verifies under A's key and names B as holder, but its term is `r2`.
+/// It is refused `unreadable_grant` by name and counted, nothing is written under `r1` (no `…/revoked`, no
+/// checkpoint), both grants still run at B, and the honest revoke of `r2` at its own key is answered `200`. Seen
+/// failing first with the term and scope check removed: the revoke answered `200`, `r1`'s `…/revoked` was written,
+/// and `r2` — the grant nobody revoked — was refused `revoked` at B while `r1` ran.
+#[tokio::test]
+async fn a_revoke_refuses_a_genuine_grant_copied_under_another_request() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let (http_a, http_b) = (alloc_port(), alloc_port());
+        let cert_dir = std::env::temp_dir().join(format!("x3-grant-copied-{http_a}"));
+        let _ = std::fs::remove_dir_all(&cert_dir);
+        let (a, _ja, _ran_a) = node_with(http_a, Opts { cert_dir: Some(cert_dir.clone()), ..Opts::default() }).await;
+        let (b, _jb, ran_b) = node_with(http_b, Opts { cert_dir: Some(cert_dir.clone()), bootstrap: vec![a.node_id().clone()], fleet_grants: true, ..Opts::default() }).await;
+        let knows = |x: &GossipAgent, n: &NodeId| x.task_ctx.peer_keys.pin().get(n).is_some_and(|k| !k.is_empty());
+        assert!(until(|| knows(&a, b.node_id()) && knows(&b, a.node_id()), Duration::from_secs(15)).await, "the two nodes learned each other's keys");
+        let sm = b.agent_state_machine(policy(15_000));
+        let agent_b = crate::agent::gateway_caller::node_principal(b.node_id());
+        let mut grants = Vec::new();
+        for replicas in [1, 2] {
+            sm.transition(ExecutionState::Planning).await.ok();
+            let args = serde_json::json!({"env": "prod", "replicas": replicas});
+            let (sm2, args2) = (Arc::clone(&sm), args.clone());
+            let waiting = tokio::spawn(async move { sm2.transition_invoking("deploy", &args2).await });
+            let request = issue_pending(Arc::clone(&a), http_a, agent_b.clone()).await;
+            let mandate = waiting.await.unwrap().expect("B's agent verified A's grant").expect("a grant");
+            grants.push((request, mandate, args));
+        }
+        let [(r1, m1, args1), (r2, m2, args2)] = <[_; 2]>::try_from(grants).unwrap();
+        let get = |x: &GossipAgent, k: &str| mycelium_core::ops::kv_get(&x.task_ctx, k);
+        let (issued1, issued2) = (format!("grant/{agent_b}/{r1}/issued"), format!("grant/{agent_b}/{r2}/issued"));
+        let (cp1, revoked1) = (format!("grant/{agent_b}/{r1}/checkpoint"), format!("grant/{agent_b}/{r1}/revoked"));
+        assert!(until(|| get(&b, &issued2).is_some(), Duration::from_secs(10)).await);
+        // B, a member, copies r2's genuine record over r1's; the copy reaches A by gossip.
+        let genuine2 = get(&b, &issued2).unwrap();
+        assert!(b.kv().set(issued1.clone(), genuine2.clone()));
+        assert!(until(|| get(&a, &issued1).as_deref() == Some(&genuine2[..]), Duration::from_secs(10)).await, "the copy reached A");
+        let (status, body) = supervisor(http_a, "alice-secret", reqwest::Method::POST, &format!("/gateway/grants/{agent_b}/{r1}/revoke"), Some(serde_json::json!({"reason": "freeze"}))).await;
+        // Whatever A now holds at r1's checkpoint key has reached B before the grants are presented there.
+        assert!(until(|| get(&a, &cp1).is_some() && get(&b, &cp1) == get(&a, &cp1), Duration::from_secs(10)).await, "A's checkpoint at r1 reached B");
+        let r1_revoked_at_a = get(&a, &revoked1).is_some();
+        let counted = a.task_ctx.grant_issued_refused.revoke.load(Ordering::Relaxed);
+        let (_, stats) = supervisor(http_a, "alice-secret", reqwest::Method::GET, "/stats", None).await;
+        let ran1 = call_deploy(&b, None, &m1, &args1).await;
+        let ran2 = call_deploy(&b, None, &m2, &args2).await;
+        let (honest, honest_body) = supervisor(http_a, "alice-secret", reqwest::Method::POST, &format!("/gateway/grants/{agent_b}/{r2}/revoke"), None).await;
+        a.shutdown().await;
+        b.shutdown().await;
+        let _ = std::fs::remove_dir_all(&cert_dir);
+        assert_eq!((status, body["error"].as_str()), (409, Some("unreadable_grant")), "COPIED: a revoke of r1 acted on r2's grant: {body}");
+        assert!(body["detail"].as_str().is_some_and(|m| m.contains(&r2)), "the refusal names the term the record carries: {body}");
+        assert!(!r1_revoked_at_a, "COPIED: r1 was recorded revoked on the strength of r2's grant");
+        assert_eq!(counted, 1, "the refusal is counted");
+        assert_eq!(stats["grant_issued_refused"]["revoke"], 1, "and on /stats: {}", stats["grant_issued_refused"]);
+        assert!(ran2.is_ok(), "COPIED: r2 — revoked by nobody — was refused: {ran2:?}");
+        assert!(ran1.is_ok(), "r1 still runs: nothing revoked it: {ran1:?}");
+        assert_eq!(ran_b.load(Ordering::SeqCst), 2);
+        assert_eq!(honest, 200, "the honest revoke of r2 at its own key: {honest_body}");
+    })
+    .await
+    .expect("bounded");
+}
+
+/// **The agent's wait takes only a grant that names its request** (the owner-signed rule's (b) at the wait). The
+/// agent's first request is issued and consumed; it asks again with the same tool and arguments, and the second
+/// request is left unanswered. A member copies the first grant — genuine, the same holder, the same binding — under
+/// the second request's `…/issued`. The wait reads it as absent, counts it, and runs out: no call is admitted on a
+/// request nobody answered. Seen failing first with the check removed: the wait returned the first grant as the
+/// second request's, and the second request was consumed.
+#[tokio::test]
+async fn the_agents_wait_reads_a_grant_copied_from_another_request_as_absent() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let http_port = alloc_port();
+        let (a, _journal, _ran) = node(http_port).await;
+        let agent_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+        let sm = a.agent_state_machine(policy(3_000));
+        sm.transition(ExecutionState::Planning).await.unwrap();
+        let args = serde_json::json!({"env": "prod", "replicas": 3});
+        let (_m1, r1) = granted(&a, http_port, &sm, &args).await;
+        let genuine1 = mycelium_core::ops::kv_get(&a.task_ctx, &format!("grant/{agent_principal}/{r1}/issued")).unwrap();
+        sm.transition(ExecutionState::Planning).await.ok();
+        let (sm2, args2) = (Arc::clone(&sm), args.clone());
+        let waiting = tokio::spawn(async move { sm2.transition_invoking("deploy", &args2).await });
+        let prefix = format!("grant/{agent_principal}/");
+        let second = || {
+            crate::store::scan_kv_prefix(&a.task_ctx.kv_state, &prefix).iter().find_map(|(k, _)| {
+                let rest = k.strip_prefix(prefix.as_str())?;
+                (!rest.contains('/') && rest != r1).then(|| rest.to_string())
+            })
+        };
+        assert!(until(|| second().is_some(), Duration::from_secs(5)).await, "a second request is written");
+        let r2 = second().unwrap();
+        assert!(a.kv().set(format!("{prefix}{r2}/issued"), genuine1));
+        let waited = waiting.await.unwrap();
+        let consumed = mycelium_core::ops::kv_get(&a.task_ctx, &format!("{prefix}{r2}/consumed")).is_some();
+        let counted = a.task_ctx.grant_issued_refused.agent_wait.load(Ordering::Relaxed);
+        a.shutdown().await;
+        assert!(matches!(&waited, Err(PolicyViolation::GrantNotPresented(_))), "COPIED: the wait took r1's grant as r2's: {waited:?}");
+        assert!(!consumed, "COPIED: r2 was consumed on r1's grant");
+        assert!(counted >= 1, "the copy is counted where the wait read it");
+        assert!(format!("{waited:?}").contains("not for request"), "the expiry names what was seen: {waited:?}");
+    })
+    .await
+    .expect("bounded");
+}

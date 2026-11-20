@@ -1198,6 +1198,9 @@ pub(crate) struct TaskCtx {
     /// lock (no lock-order row).
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) grant_decisions_in_flight: papaya::HashSet<String>,
+    /// `…/issued` records a reader treated as absent: another request's grant, or (revoke) one that does not verify.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) grant_issued_refused: gateway_authority::IssuedRefused,
     /// Identity-and-lifecycle I5: the node's one OIDC verifier, set at `start()` from `[oidc]` — its issuer, JWKS cache
     /// and fetcher, shared by the gateway (bearers) and, when `[oidc]` names an `exchange_audience`, the provider
     /// (exchanged tokens; #759's review, M2). Without an `exchange_audience`, an envelope's `ot` is not read.
@@ -1848,6 +1851,8 @@ impl GossipAgent {
             unsigned_actions: Default::default(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             grant_decisions_in_flight: papaya::HashSet::new(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            grant_issued_refused: Default::default(),
             #[cfg(feature = "compliance")]
             oidc_verifier: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]

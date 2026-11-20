@@ -311,6 +311,8 @@ fn spawn_handler_with(
         unsigned_actions: Default::default(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         grant_decisions_in_flight: papaya::HashSet::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        grant_issued_refused: Default::default(),
         #[cfg(feature = "compliance")]
         oidc_verifier: std::sync::OnceLock::new(),
         #[cfg(feature = "compliance")]
@@ -4556,6 +4558,8 @@ async fn test_subscribe_notified_via_gossip() {
         unsigned_actions: Default::default(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         grant_decisions_in_flight: papaya::HashSet::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        grant_issued_refused: Default::default(),
         #[cfg(feature = "compliance")]
         oidc_verifier: std::sync::OnceLock::new(),
         #[cfg(feature = "compliance")]
