@@ -5235,7 +5235,7 @@ commitment keeps it, and the operator's file beside a pin is assessed before it 
   reported on `GET /stats` as `ca_commitment_file_untrusted_ca` (the operator's file's own signal, apart from the
   KV's `ca_commitment_unverified`), and read again at the next start — so pushing the successor's commitment to a
   whole fleet does not stop the nodes that have not cut over from restarting. The difference is one constant
-  (`EARLY_COMMITMENT_BESIDE_A_PIN_STARTS`); whether it stays is with the maintainer.
+  (`EARLY_COMMITMENT_BESIDE_A_PIN_STARTS`), and it stays as built (the maintainer's decision of 2026-11-20).
 
 **Removing a pin, and what it takes with it.** A pin stands when its committing CA is a root the node trusts, or its
 successor is, or its successor committed in another pin that stands. So removing a pin leaves the pins of **later**

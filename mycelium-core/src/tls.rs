@@ -1512,8 +1512,9 @@ impl OfferedCommitment {
 /// ([`pin_ca_commitment`]; #812's confirm round C1): a commitment from a CA the node does not trust (yet) lets the
 /// start go on beside a pin — reported and counted, nothing pinned — because a fleet-wide copy of the successor's
 /// commitment must not stop the nodes that have not cut over from restarting. With no pin the same file refuses the
-/// start. `false` here makes it refuse in both cases; nothing else changes. Every other file a node cannot assess —
-/// malformed, empty, carrying a key, a signature a trusted CA did not make — refuses the start in both cases.
+/// start. **Decided by the maintainer on 2026-11-20: the difference stays as built, and this stays `true`** (`false`
+/// would make the early file refuse in both cases; nothing else would change). Every other file a node cannot assess
+/// — malformed, empty, carrying a key, a signature a trusted CA did not make — refuses the start in both cases.
 pub const EARLY_COMMITMENT_BESIDE_A_PIN_STARTS: bool = true;
 
 #[cfg(feature = "tls")]
