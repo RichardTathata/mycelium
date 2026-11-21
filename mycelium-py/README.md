@@ -291,7 +291,7 @@ raises `httpx.HTTPStatusError` — a companion's kind (`blackboard.*`, `tuple.*`
 on the signal streams from mycelium v2.39.0 (`mycelium-py` 0.2.14) — and a protected kind raises `ProtectedKindError`. Earlier
 versions surfaced any `403` there as httpx-sse's content-type `SSEError`. `mailbox` checks the same way from 0.2.16.
 
-From the mycelium release after v2.40.0 the gateway also answers `403 protected_kind` — `ProtectedKindError` here —
+From the next mycelium MINOR (after v2.40.1) the gateway also answers `403 protected_kind` — `ProtectedKindError` here —
 for **the substrate's own kinds** at every door that takes a kind (`on_signal`, `mailbox`, `rpc_serve`, `emit`,
 `rpc_call`, `deliver_event`, …): `consensus.propose`, `consensus.vote`, `consensus.commit`, `consensus.nack`,
 `sys.explain`, `sys.replica-sync.v1`, `invoke.bulk` and anything starting `consensus.` or `sys.`; for the reply
