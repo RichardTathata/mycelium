@@ -19,9 +19,11 @@
 //! read: it is asserted as **registrations**, one per call and a second for each both-slots call. Then the odd calls
 //! are cancelled and the even ones released. What the soak asserts is in [`soak`]'s doc comment.
 //!
-//! **The gateway's `[persistence]`.** The soak passes over a gateway without it and **fails** over one with it under
-//! `SyncMode::Flush` (what `Soak::persist` sets), at the collector's minute pass: a cancel waits its turn at the WAL,
-//! one sync per synced append. The finding, pinned at the end of this file by a test that fails today
+//! **The gateway's `[persistence]`** (`Soak::persist`, its `sync_mode`). Since §9 O10's fix (2026-11-21) a cancel's
+//! forward no longer waits for the disk, and the 10⁵ soak passes over a durable gateway under the default `async`.
+//! Under `SyncMode::Flush` it still **fails**, at the collector's minute pass, on what §9 O11 owns: the mints wait
+//! their turn at the WAL, and the gateway's connection reader waits on it for each inbound record, so a batch outlives
+//! its windows (bound 1 holds). The finding, pinned at the end of this file by a test that fails today
 //! (`a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog`). The CI run and the dated run are
 //! therefore of a gateway with no `[persistence]`, and say so.
 //!
@@ -823,10 +825,10 @@ async fn a_thousand_cancellable_calls_half_cancelled_while_running_all_reconcile
 /// once, in release, and dated on `docs/operations/what-is-proven.md`; not run in CI. Bounded: the soak fails past
 /// two hours, and each batch has its own deadlines.
 ///
-/// **The dated run is of a gateway with no `[persistence]`.** With it under `SyncMode::Flush` (`I4_SOAK_PERSIST=1`) the soak **fails** at
-/// one of the gateway's collection passes with a backlog — it first stalled 60 to 130 s in, between calls 1 100 and
-/// 2 600, in every run made: the finding pinned by [`a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog`]. Exit 14 as the
-/// plan states it — over a fleet whose gateway keeps the promise of exit 11 — is therefore **not met**.
+/// **The first dated run is of a gateway with no `[persistence]`.** After §9 O10's fix (2026-11-21) it was re-run over a
+/// durable gateway: with `I4_SOAK_PERSIST=async` (the default `sync_mode`) it **passes**; with `I4_SOAK_PERSIST=flush`
+/// it **fails** at batch 4 000, the batch outliving its windows behind the WAL (§9 O11's, not the cancel's: bound 1
+/// held). Exit 14 is therefore met under the default and not under `flush` (`docs/operations/what-is-proven.md#call-soak`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "the 10^5 soak, run once and dated: cargo test --release --lib --features compliance,a2a a_hundred_thousand_cancellable_calls -- --ignored --nocapture"]
 async fn a_hundred_thousand_cancellable_calls_half_cancelled_while_running_all_reconcile() {

@@ -295,6 +295,7 @@ impl CallSink {
     }
 
     /// Has a door's cancel begun for this call? (Its forward may already have stopped the call.)
+    #[cfg_attr(not(feature = "a2a"), allow(dead_code))] // read by the `/a2a` door's `TaskReservation::complete`
     pub(crate) fn cancel_asked(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
