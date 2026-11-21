@@ -765,6 +765,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A gateway's cancel is forwarded to the provider at once; only the caller's acknowledgement waits for the disk**
+  (identity-and-lifecycle §9 O10, the maintainer's decision of 2026-11-20; `deprecations.md` §124). A cancel —
+  `GossipAgent::cancel_call`, A2A `tasks/cancel`, MCP `notifications/cancelled` — signed its revocation, wrote it
+  durably and only then forwarded it, so under any burst of synced appends at the gateway's WAL the provider's stop
+  waited too (5.5 s behind the collector's 1 000 deletes under `sync_mode = "flush"`, 1.25 s behind 300 concurrent
+  mints under the default). The forward now goes out beside the durable write (`call_issuer::begin_revoke`, then
+  `finish_revoke`), and the acknowledgement still waits for the write. **A reversal:** a revocation the disk refuses
+  (`CancelRefusal::NotDurable`, A2A `-32603`) has still been forwarded — the call may have been stopped, and the stop
+  is held in memory only; it used to stand in the gateway's process only, unforwarded. A gateway that crashes between
+  the forward and the sync answers nothing and leaves no record of the revocation; after a provider restart the call,
+  presented again inside its window, is admitted (the bound, stated and tested). A revocation reaches disk no sooner:
+  the WAL is unchanged (that is §9 O11, group commit). *Check:* read `NotDurable` as *perhaps stopped, not on disk*,
+  and cancel again.
+
 - **Standing under a change of roots** (identity-and-lifecycle I2, PR 2a of 4; `deprecations.md` §117; the split and
   each promise's evidence are in the plan's §8 row). A node that changes its roots judges again everything it judged
   under the old ones: an anchored key keeps its certificates (journaled under `[persistence]`) and leaves only when they

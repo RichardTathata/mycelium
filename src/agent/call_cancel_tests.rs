@@ -513,3 +513,379 @@ async fn the_mcp_tables_eviction_leaves_a_fresh_call_registered_at_a_stale_key()
     std::mem::forget(held);
     n.a.shutdown().await;
 }
+
+// ── §9 O10: the cancel is forwarded at once; only the caller's acknowledgement waits for the disk ───────────────
+
+/// What a burst queued at the gateway's WAL ahead of a cancel is made of.
+#[derive(Clone, Copy, Debug)]
+enum Burst {
+    /// Plain owned writes (`kv_set`, an `append_try` each): under `sync_mode = "flush"` the writer syncs each one.
+    PlainWrites,
+    /// Concurrent mints (`call_issuer::record`): two required-sync writes each, synced under any mode.
+    Mints,
+}
+
+/// Queue `n` units of `burst` at `g`'s WAL, ahead of whatever is asked next; the mints' tasks, still writing.
+async fn queue_burst(g: &Arc<super::call_mint_tests::N>, target: &NodeId, burst: Burst, n: usize, tag: &str) -> Vec<tokio::task::JoinHandle<()>> {
+    match burst {
+        Burst::PlainWrites => {
+            for i in 0..n {
+                assert!(mycelium_core::ops::kv_set(g.ctx(), Arc::from(format!("o10/{tag}/{i}")), Bytes::from_static(b"burst")), "a burst write is taken");
+            }
+            Vec::new()
+        }
+        Burst::Mints => {
+            // Each task's first write is handed to the WAL in the same poll that counts it begun.
+            let begun = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let tasks = (0..n)
+                .map(|_| {
+                    let (g, target, begun) = (Arc::clone(g), target.clone(), Arc::clone(&begun));
+                    tokio::spawn(async move {
+                        let payload = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "quick", "arguments": {"aisle": 4}}}).to_string();
+                        let (_, minted) = super::gateway_caller::frame_minting(g.ctx(), &target, &g.gateway(), &[], MCP, Bytes::from(payload), None, None, None, None, g.now());
+                        begun.fetch_add(1, Ordering::SeqCst);
+                        call_issuer::record(g.ctx(), minted.expect("minted")).await.expect("a mint's records are on disk");
+                    })
+                })
+                .collect();
+            assert!(until(|| begun.load(Ordering::SeqCst) == n, Duration::from_secs(30)).await, "every mint of the burst began");
+            tasks
+        }
+    }
+}
+
+/// How long `n` units of `burst` take to drain through `g`'s WAL with nothing else asked: the calibration that sizes
+/// a burst to this machine's disk, so a fast disk is given a longer burst rather than a pass.
+async fn drain_time(g: &Arc<super::call_mint_tests::N>, target: &NodeId, burst: Burst, n: usize) -> Duration {
+    let began = std::time::Instant::now();
+    let tasks = queue_burst(g, target, burst, n, "calibration").await;
+    for t in tasks {
+        t.await.expect("a mint of the calibration ran");
+    }
+    // Behind every append queued above: the WAL serves its queue in order.
+    let op = mycelium_core::receipt::OperationId::generate(g.a.node_id());
+    let attempt = mycelium_core::receipt::AttemptId::fresh(&op);
+    mycelium_core::ops::kv_set_requiring_sync(g.ctx(), op, attempt, Arc::from("o10/calibration/marker"), Bytes::from_static(b"m"), None).await.expect("the marker is on disk");
+    began.elapsed()
+}
+
+/// **§9 O10's test: during a burst of synced appends ahead of the cancel, the provider's stop arrives inside bound 1
+/// while the caller's acknowledgement still waits for the disk.** A gateway with `[persistence]` under `mode` and a
+/// provider; a client's call runs at the provider; `burst` is queued at the gateway's WAL, sized from a calibration
+/// to drain in about three times *F* on this machine's disk; then `cancel_call`. Asserted, by structure: the call stops at
+/// the provider inside *F* (bound 1) — the forward did not wait for the syncs ahead — **while `cancel_call` has not
+/// answered**; the answer then comes only once the revocation is on disk (the gateway's own record is the revoking
+/// checkpoint when it does), and it took several times longer than the stop.
+async fn the_stop_beats_the_acknowledgement_behind(mode: crate::config::SyncMode, burst: Burst) {
+    let (g, p, cert_dir) = pair(Opts { mint: true, persist: true, wal: Some((mode, 1_000_000)), ..Opts::default() }).await;
+    let g = Arc::new(g);
+    let target = p.a.node_id().clone();
+    // The disk's pace, then a burst sized to it: about 3·F of syncs, at least 400 and at most 50 000 units — long
+    // enough that a forward which waited for it would land outside bound 1 by a clear margin.
+    let calibration = 200;
+    let per = drain_time(&g, &target, burst, calibration).await / (calibration as u32 + 1);
+    let n = ((3 * F_MS) as u128 * 1_000_000 / per.as_nanos().max(1)).clamp(400, 50_000) as usize;
+
+    let g2 = Arc::clone(&g);
+    let answered = tokio::spawn(async move { g2.client_call("slow").await });
+    p.running(1).await;
+    p.began(1).await;
+    // The client's call is the newest mint: the calibration's came before it.
+    let term = g.ctx().call_issuer.issued_terms().into_iter().max_by_key(|t| t[1..].parse::<u64>().unwrap_or(0)).expect("minted");
+    let tasks = queue_burst(&g, &target, burst, n, "burst").await;
+    let asked = std::time::Instant::now();
+    let (g2, t2) = (Arc::clone(&g), term.clone());
+    let cancel = tokio::spawn(async move {
+        let r = g2.a.cancel_call(&t2).await;
+        (r, std::time::Instant::now())
+    });
+    let stopped = until(|| p.authority.running_count() == 0, Duration::from_secs(120)).await;
+    let stop_took = asked.elapsed();
+    let acknowledged_at_the_stop = cancel.is_finished();
+    let (receipt, acked) = tokio::time::timeout(Duration::from_secs(300), cancel).await.expect("the cancel is answered").unwrap();
+    let ack_took = acked.saturating_duration_since(asked);
+    for t in tasks {
+        t.await.expect("a mint of the burst ran");
+    }
+    eprintln!(
+        "§9 O10, {mode:?} behind {n} {burst:?} (one drains in {per:?} here): the provider's stop seen {stop_took:?} after the cancel; the cancel acknowledged {ack_took:?} after it; receipt {receipt:?}"
+    );
+    assert!(stopped, "the call stopped at the provider");
+    assert!(
+        stop_took < Duration::from_millis(F_MS),
+        "the provider's stop came {stop_took:?} after the cancel, outside bound 1 (F = {F_MS} ms): the forward waited for the {n} {burst:?} ahead of the revocation's sync (the cancel was acknowledged after {ack_took:?})"
+    );
+    assert!(!acknowledged_at_the_stop, "the cancel was acknowledged ({ack_took:?}) before the provider's stop was seen ({stop_took:?}): the burst did not hold the disk");
+    assert!(ack_took > stop_took * 3, "the acknowledgement waited for the disk behind the burst, the stop did not: stop {stop_took:?}, acknowledgement {ack_took:?}");
+    let receipt = receipt.expect("the revocation is on disk");
+    // The provider answers `stopped`; under `flush` the answer can reach the gateway's caller too late for the
+    // forward's 5 s — the gateway's connection reader awaits the WAL for each inbound record (`append_inbound`), so the
+    // answer's frame waits behind the same burst — and is then `DeliveryUnknown`: never a negative (§9 O11's family).
+    assert!(matches!(receipt.class, CancelClass::Stopped | CancelClass::DeliveryUnknown), "the provider's stop, or no answer in time: {receipt:?}");
+    let held = serde_json::from_slice::<SignedRevocationCheckpoint>(&g.kv(&call_checkpoint_key(&g.gateway(), &term)).unwrap()).unwrap();
+    assert!(held.checkpoint.seq == 2 && held.checkpoint.revoked.iter().any(|t| t.as_str() == term), "acknowledged with the revoking checkpoint in the gateway's own record: {:?}", held.checkpoint);
+    let reply = tokio::time::timeout(Duration::from_secs(10), answered).await.expect("the client is answered").unwrap();
+    assert!(reply.to_string().contains("cancelled"), "{reply}");
+    assert_eq!(p.finished.load(Ordering::SeqCst), 0, "the tool never finished");
+    assert_eq!(g.ctx().wal.get().expect("persists").dropped_appends(), 0, "every append of the burst reached the WAL");
+    g.a.shutdown().await;
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// §9 O10 under `sync_mode = "flush"`, behind plain owned writes — the shape of the collector's minute pass. Seen
+/// failing first on main at 7e9486f7 (the forward sent only after the revocation's sync).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn under_flush_the_providers_stop_beats_the_acknowledgement_behind_a_burst_of_writes() {
+    the_stop_beats_the_acknowledgement_behind(crate::config::SyncMode::Flush, Burst::PlainWrites).await;
+}
+
+/// §9 O10 under the default `sync_mode` (`async`), behind concurrent mints — required-sync writes queue behind each
+/// other under any mode. Seen failing first on main at 7e9486f7.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn under_the_default_mode_the_providers_stop_beats_the_acknowledgement_behind_concurrent_mints() {
+    the_stop_beats_the_acknowledgement_behind(crate::config::SyncMode::default(), Burst::Mints).await;
+}
+
+/// **A cancel the disk refuses still stops the call, and the caller is told it is not durable** (§9 O10, the
+/// maintainer's decision of 2026-11-20, reversing *"stands in this process only, and is not forwarded"*). A client's
+/// call runs at the provider; the gateway's WAL is poisoned; `cancel_call` answers `NotDurable` — and the forward was
+/// sent: the call stops at the provider, which answered `stopped` (counted, not returned), while the gateway's KV
+/// still holds the first checkpoint (a required-sync write applies nothing it could not sync). Seen failing first on
+/// main at 7e9486f7: nothing was forwarded, and the call ran on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancel_the_disk_refuses_still_stops_the_call_and_cancel_call_says_not_durable() {
+    let (g, p, cert_dir) = pair(Opts { mint: true, persist: true, ..Opts::default() }).await;
+    let g = Arc::new(g);
+    let g2 = Arc::clone(&g);
+    let answered = tokio::spawn(async move { g2.client_call("slow").await });
+    p.running(1).await;
+    p.began(1).await;
+    let term = g.ctx().call_issuer.issued_terms().pop().expect("minted");
+    g.ctx().wal.get().expect("persists").poison_for_test("the disk is gone").await.unwrap();
+    let refused = g.a.cancel_call(&term).await;
+    assert!(matches!(refused, Err(call_cancel::CancelRefusal::NotDurable(_))), "the caller is told the cancel is not on disk: {refused:?}");
+    let reply = tokio::time::timeout(Duration::from_secs(10), answered).await.expect("the call was stopped all the same").unwrap();
+    assert!(reply.to_string().contains("cancelled"), "{reply}");
+    p.running(0).await;
+    assert_eq!(p.finished.load(Ordering::SeqCst), 0, "the tool never finished");
+    assert_eq!(stat(&g, "receipts", "stopped"), 1, "the provider's answer is counted");
+    let held = serde_json::from_slice::<SignedRevocationCheckpoint>(&g.kv(&call_checkpoint_key(&g.gateway(), &term)).unwrap()).unwrap();
+    assert_eq!(held.checkpoint.seq, 1, "nothing applied to the gateway's KV: the revocation is in memory only");
+    g.a.shutdown().await;
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// §9 O10 at `/mcp`: a `notifications/cancelled` the disk refuses is answered `202` (a notification has no reply) and
+/// the call stops at the provider all the same. Seen failing first on main at 7e9486f7: the call ran on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_notifications_cancelled_the_disk_refuses_still_stops_the_call() {
+    let (g, p, cert_dir) = pair(Opts { mint: true, persist: true, ..Opts::default() }).await;
+    let g = Arc::new(g);
+    let g2 = Arc::clone(&g);
+    let answered = tokio::spawn(async move {
+        mcp(&g2, "alice-secret", serde_json::json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "slow", "arguments": {"aisle": 4}}})).await
+    });
+    p.running(1).await;
+    g.ctx().wal.get().expect("persists").poison_for_test("the disk is gone").await.unwrap();
+    let (status, _) = mcp(&g, "alice-secret", serde_json::json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 7, "reason": "user"}})).await;
+    assert_eq!(status, 202);
+    let (_, reply) = tokio::time::timeout(Duration::from_secs(10), answered).await.expect("the call was stopped all the same").unwrap();
+    assert!(reply.contains("cancelled"), "{reply}");
+    p.running(0).await;
+    assert_eq!(p.finished.load(Ordering::SeqCst), 0);
+    g.a.shutdown().await;
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// §9 O10 at `/a2a`: a `tasks/cancel` the disk refuses is answered `-32603` and the task is kept (so it can be
+/// cancelled again), and the skill is stopped at the provider all the same. Seen failing first on main at 7e9486f7:
+/// the skill ran on.
+#[cfg(feature = "a2a")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tasks_cancel_the_disk_refuses_is_refused_keeps_the_task_and_still_stops_the_skill() {
+    let (g, p, cert_dir) = pair(Opts { mint: true, persist: true, more_doors: true, ..Opts::default() }).await;
+    assert!(until(|| crate::store::scan_kv_prefix(&g.ctx().kv_state, "cap/").iter().any(|(k, _)| k.contains("depot")), Duration::from_secs(20)).await, "the gateway sees the skill");
+    let g = Arc::new(g);
+    let g2 = Arc::clone(&g);
+    let send = serde_json::json!({"id": "t-1", "skillId": "depot/dispatch", "message": {"role": "user", "parts": [{"type": "text", "text": "go"}]}});
+    let answered = tokio::spawn(async move { a2a(&g2, "alice-secret", "tasks/send", send).await });
+    let started = until(|| p.authority.running_count() == 1 || answered.is_finished(), Duration::from_secs(20)).await;
+    assert!(started && p.authority.running_count() == 1, "the skill runs under its call: mandate");
+    g.ctx().wal.get().expect("persists").poison_for_test("the disk is gone").await.unwrap();
+    let v = a2a(&g, "alice-secret", "tasks/cancel", serde_json::json!({"id": "t-1"})).await;
+    assert_eq!(v["error"]["code"], -32603, "not recorded, so not canceled here: {v}");
+    p.running(0).await;
+    assert_eq!(p.finished.load(Ordering::SeqCst), 0, "the skill was stopped all the same");
+    let _ = tokio::time::timeout(Duration::from_secs(10), answered).await.expect("the send is answered");
+    // Kept, and not as `completed`: the send's answer was the stop the cancel's forward caused.
+    let v = a2a(&g, "alice-secret", "tasks/get", serde_json::json!({"id": "t-1"})).await;
+    assert!(v.get("error").is_none() && v["result"]["status"]["state"] != "completed", "the task is kept for a second cancel: {v}");
+    g.a.shutdown().await;
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **§9 O10 at every door: the forward goes out while the revocation's durable write is held, and the door answers
+/// only once it returns.** The gateway's revoke writes are held at a gate (`hold_revoke_writes`) — the shape of a
+/// WAL that has not got to the write yet, under any burst. Through `cancel_call`, `/mcp` `notifications/cancelled`
+/// and (with `a2a`) `/a2a` `tasks/cancel` in turn: the call stops at the provider and its caller is answered
+/// `cancelled` **while the cancel is unanswered** and the gateway's KV still holds the first checkpoint; released, the
+/// cancel is answered and the record is the revoking checkpoint. Seen failing first with the old order planted back
+/// (`finish_revoke` awaited before the forward is sent, in `cancel` and `cancel_at_door`): the call ran on until the
+/// gate was released, *"running_count 1 (wanted 0)"*.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_forward_goes_out_while_the_durable_write_is_held_at_every_door() {
+    let (g, p, cert_dir) = pair(Opts { mint: true, persist: true, more_doors: cfg!(feature = "a2a"), ..Opts::default() }).await;
+    let g = Arc::new(g);
+    let checkpoint_seq = |term: &str| serde_json::from_slice::<SignedRevocationCheckpoint>(&g.kv(&call_checkpoint_key(&g.gateway(), term)).unwrap()).unwrap().checkpoint.seq;
+
+    // `cancel_call`.
+    let g2 = Arc::clone(&g);
+    let answered = tokio::spawn(async move { g2.client_call("slow").await });
+    p.running(1).await;
+    let term = g.ctx().call_issuer.issued_terms().pop().expect("minted");
+    let held = call_issuer::test_hooks::hold_revoke_writes(g.a.node_id());
+    let (g2, t2) = (Arc::clone(&g), term.clone());
+    let cancel = tokio::spawn(async move { g2.a.cancel_call(&t2).await });
+    assert!(until(|| held.reached() == 1, Duration::from_secs(10)).await, "the revoke reached its durable write");
+    p.running(0).await;
+    let reply = tokio::time::timeout(Duration::from_secs(10), answered).await.expect("the client is answered").unwrap();
+    assert!(reply.to_string().contains("cancelled"), "{reply}");
+    assert!(!cancel.is_finished(), "cancel_call answered before its revocation was on disk");
+    assert_eq!(checkpoint_seq(&term), 1, "nothing in the gateway's KV before the sync");
+    held.release(1);
+    let receipt = tokio::time::timeout(Duration::from_secs(10), cancel).await.expect("answered once on disk").unwrap().expect("on disk");
+    assert_eq!(receipt.class, CancelClass::Stopped, "{receipt:?}");
+    assert_eq!(checkpoint_seq(&term), 2, "the revoking checkpoint is the gateway's record once acknowledged");
+
+    // `/mcp` `notifications/cancelled`: its `202` waits for the disk.
+    let g2 = Arc::clone(&g);
+    let answered = tokio::spawn(async move {
+        mcp(&g2, "alice-secret", serde_json::json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "slow", "arguments": {"aisle": 4}}})).await
+    });
+    p.running(1).await;
+    let g2 = Arc::clone(&g);
+    let cancel = tokio::spawn(async move { mcp(&g2, "alice-secret", serde_json::json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 7, "reason": "user"}})).await });
+    assert!(until(|| held.reached() == 2, Duration::from_secs(10)).await, "the door's revoke reached its durable write");
+    p.running(0).await;
+    let (_, reply) = tokio::time::timeout(Duration::from_secs(10), answered).await.expect("the client is answered").unwrap();
+    assert!(reply.contains("cancelled"), "{reply}");
+    assert!(!cancel.is_finished(), "the notification was answered before its revocation was on disk");
+    held.release(1);
+    let (status, _) = tokio::time::timeout(Duration::from_secs(10), cancel).await.expect("answered once on disk").unwrap();
+    assert_eq!(status, 202);
+
+    // `/a2a` `tasks/cancel`: `canceled` waits for the disk.
+    #[cfg(feature = "a2a")]
+    {
+        assert!(until(|| crate::store::scan_kv_prefix(&g.ctx().kv_state, "cap/").iter().any(|(k, _)| k.contains("depot")), Duration::from_secs(20)).await, "the gateway sees the skill");
+        let g2 = Arc::clone(&g);
+        let send = serde_json::json!({"id": "t-1", "skillId": "depot/dispatch", "message": {"role": "user", "parts": [{"type": "text", "text": "go"}]}});
+        let answered = tokio::spawn(async move { a2a(&g2, "alice-secret", "tasks/send", send).await });
+        p.running(1).await;
+        let g2 = Arc::clone(&g);
+        let cancel = tokio::spawn(async move { a2a(&g2, "alice-secret", "tasks/cancel", serde_json::json!({"id": "t-1"})).await });
+        assert!(until(|| held.reached() == 3, Duration::from_secs(10)).await, "the door's revoke reached its durable write");
+        p.running(0).await;
+        let _ = tokio::time::timeout(Duration::from_secs(10), answered).await.expect("the send is answered");
+        assert!(!cancel.is_finished(), "tasks/cancel was answered before its revocation was on disk");
+        held.release(1);
+        let v = tokio::time::timeout(Duration::from_secs(10), cancel).await.expect("answered once on disk").unwrap();
+        assert_eq!(v["result"]["status"]["state"], "canceled", "{v}");
+    }
+    assert_eq!(p.finished.load(Ordering::SeqCst), 0, "no cancelled call finished");
+    drop(held);
+    g.a.shutdown().await;
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **§9 O10's crash bound, pinned.** The forward goes out before the revocation is on disk, and a required-sync write
+/// applies nothing to the KV until its sync returns — so a gateway that crashes between the forward and the sync
+/// leaves **no record** of the revocation, and its caller **no answer at all** (not a "not durable" one). The provider
+/// holds the revocation in memory only (D-4: the hold and the window are not persisted). Here: a call runs at the
+/// provider; `cancel_call` forwards and its write is held; the provider stops the call; the gateway "crashes" —
+/// the cancel's task dropped before the write, the gateway shut down with its exit snapshot sabotaged, so only its
+/// WAL carries its records into the restart. After the restart the gateway's KV holds the call's first checkpoint,
+/// not the revoking one. The provider restarts; the call's envelope, presented again inside its window, **is
+/// admitted and runs** — no record says otherwise. The bound: such a cancel lasts as long as the provider process
+/// that holds it, and at most to the call's window. A cancel asked again after the restart writes the revocation
+/// durably (`NotForwarded`: the restarted gateway does not know where the call went) and the KV then stops the
+/// re-presented call. Seen failing first with the forward planted after the write (the old order): the provider never
+/// stopped the call while the write was held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gateway_crash_between_the_forward_and_the_sync_leaves_no_record_and_a_restarted_provider_admits_the_call_again() {
+    use crate::test_util::{kv_dir_under, restore_start_snapshot, sabotage_exit_snapshot};
+    let port = crate::test_util::alloc_port;
+    let (gport, ghttp, pport, phttp) = (port(), port(), port(), port());
+    let cert_dir = std::env::temp_dir().join(format!("i4-mint-ca-{gport}"));
+    let gdir = std::env::temp_dir().join(format!("i4-mint-{gport}"));
+    let pdir = std::env::temp_dir().join(format!("i4-mint-{pport}"));
+    for d in [&cert_dir, &gdir, &pdir] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+    let gopts = Opts { mint: true, persist: true, cert_dir: Some(cert_dir.clone()), gossip_port: Some(gport), http_port: Some(ghttp), ..Opts::default() };
+    let gid = NodeId::new("127.0.0.1", gport).unwrap();
+    let popts = Opts { cert_dir: Some(cert_dir.clone()), bootstrap: vec![gid.clone()], tools: true, gossip_port: Some(pport), http_port: Some(phttp), ..Opts::default() };
+    let knows = |x: &crate::GossipAgent, n: &NodeId| x.task_ctx.peer_keys.pin().get(n).is_some_and(|k| !k.is_empty());
+    let g = node(gopts.clone()).await;
+    let p = node(popts.clone()).await;
+    assert!(until(|| knows(&g.a, p.a.node_id()) && knows(&p.a, &gid), Duration::from_secs(20)).await, "the nodes learned each other's keys");
+    let pid = p.a.node_id().clone();
+
+    let (framed, term) = g.framed(&pid, "slow").await;
+    let g = Arc::new(g);
+    let (g2, f2, pid2) = (Arc::clone(&g), framed.clone(), pid.clone());
+    let first = tokio::spawn(async move { g2.send(&pid2, f2).await });
+    p.running(1).await;
+    let held = call_issuer::test_hooks::hold_revoke_writes(&gid);
+    let (g2, t2) = (Arc::clone(&g), term.clone());
+    let cancel = tokio::spawn(async move { g2.a.cancel_call(&t2).await });
+    assert!(until(|| held.reached() == 1, Duration::from_secs(10)).await, "the revoke reached its durable write");
+    p.running(0).await;
+    let reply = tokio::time::timeout(Duration::from_secs(10), first).await.expect("the call stopped").unwrap();
+    assert!(reply.to_string().contains("cancelled"), "{reply}");
+
+    // The crash: the cancel never gets past its write, and its caller is never answered.
+    cancel.abort();
+    assert!(cancel.await.expect_err("dropped before its write").is_cancelled(), "the caller got no answer at all");
+    let kv_dir = kv_dir_under(&gdir.join("persist"));
+    sabotage_exit_snapshot(&kv_dir);
+    g.a.shutdown().await;
+    drop(held);
+    drop(g);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    restore_start_snapshot(&kv_dir);
+    let g = node(gopts).await;
+    let cp = call_checkpoint_key(&g.gateway(), &term);
+    let after = serde_json::from_slice::<SignedRevocationCheckpoint>(&g.kv(&cp).expect("the first checkpoint came back from the WAL")).unwrap();
+    assert!(after.checkpoint.seq == 1 && after.checkpoint.revoked.is_empty(), "no record of the revocation after the gateway's restart: {:?}", after.checkpoint);
+
+    // The provider restarts: the revocation it held in memory is gone, and the envelope, inside its window, runs.
+    p.a.shutdown().await;
+    drop(p);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let p = node(popts).await;
+    assert!(until(|| knows(&g.a, &pid) && knows(&p.a, &gid), Duration::from_secs(20)).await, "the nodes learned each other's keys again");
+    let g = Arc::new(g);
+    let (g2, pid2) = (Arc::clone(&g), pid.clone());
+    let again = tokio::spawn(async move { g2.send(&pid2, framed).await });
+    let ran = until(|| p.authority.running_count() == 1 || again.is_finished(), Duration::from_secs(20)).await && p.authority.running_count() == 1;
+    assert!(ran, "the call re-presented inside its window is admitted after the provider's restart: {:?}", if again.is_finished() { Some(again.await) } else { None });
+    p.began(1).await;
+
+    // The remedy: a cancel asked again is written durably, and the KV carries it to the provider.
+    let receipt = g.a.cancel_call(&term).await.expect("on disk now");
+    assert_eq!(receipt.class, CancelClass::NotForwarded, "the restarted gateway does not know where the call went (D-4)");
+    let reply = tokio::time::timeout(Duration::from_secs(10), again).await.expect("the KV stopped the re-presented call").unwrap();
+    assert!(reply.to_string().contains("cancelled"), "{reply}");
+    assert_eq!(p.finished.load(Ordering::SeqCst), 0);
+    g.a.shutdown().await;
+    p.a.shutdown().await;
+    for d in [&cert_dir, &gdir, &pdir] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}

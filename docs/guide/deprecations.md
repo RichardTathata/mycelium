@@ -4649,11 +4649,11 @@ gateway that does not mint** (`gateway_mint_call_mandates`, off by default) exce
   provider's windows are full), `Refused(reason)`, **`DeliveryUnknown`** (no answer within
   `CANCEL_FORWARD_TIMEOUT_MS` = 5 000 ms — never a negative: the KV still carries the revocation) and
   `NotForwarded` (this gateway restarted since the mint and does not know where the call went). A receipt exists
-  only once the gateway has recorded the revocation on disk; `CancelRefusal::NotDurable` forwards nothing. Counted by
+  only once the gateway has recorded the revocation on disk; `CancelRefusal::NotDurable` forwards nothing (*changed by §124: it has been forwarded*). Counted by
   class: `GET /stats` `call_cancel_receipts`, `mycelium_gateway_call_cancel_receipts_total{class}`.
 - **Changed: A2A `tasks/cancel` (and `CancelTask`) revokes the task's call before it removes the task.** On a
   minting gateway, cancelling a pending task revokes its call's term and **answers `canceled` only once the
-  revocation is on disk**; the forward then runs on its own task. A revoke the disk refuses is answered **`-32603`**
+  revocation is on disk**; the forward then runs on its own task (*changed by §124: sent before the write*). A revoke the disk refuses is answered **`-32603`**
   and the task is kept. A cancel that lands before the gateway has minted (the preflight still running) is caught by
   the dispatch, which revokes the term and sends nothing. **And a cancelled task stays cancelled**: its send's late
   answer no longer writes the task back (it did, before, as a completed task). **A pre-0.2 `tasks/send` re-sent
@@ -5625,3 +5625,50 @@ fence), not built; `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN` stays `true` 
 *Check:* `curl -s $GATEWAY/stats | jq '.grant_decisions_unnamed, .grant_decisions_naming_another'` — the first stays
 `0` once the deciders name the block (then leave `gateway_accept_unnamed_decisions` unset); the second rising is a
 member rewriting grant requests after they were read.
+
+## 124. A gateway's cancel is forwarded to the provider at once; only the caller's acknowledgement waits for the disk, and a cancel the disk refuses has still been forwarded (unreleased, identity-and-lifecycle §9 O10, the maintainer's decision of 2026-11-20)
+
+This applies to a gateway with `gateway_mint_call_mandates` on and `[persistence]`, and to every cancel of a call it
+minted: `GossipAgent::cancel_call`, A2A `tasks/cancel` and MCP `notifications/cancelled` at `/mcp` (§114). A gateway
+without `[persistence]` writes its records in memory, as before, and nothing below changes for it but the order.
+
+**Before.** A cancel signed the revoking checkpoint, applied it to the gateway's own authority, wrote it durably
+(`kv_set_requiring_sync`: synced, then applied to the KV, then gossiped) — and **only then** forwarded it to the
+provider. The WAL's writer syncs one record at a time in arrival order, so the provider's stop waited behind every
+synced append queued ahead of the revocation: 5.5 s behind the collector's 1 000 deletes under `sync_mode = "flush"`,
+1.25 s behind 300 concurrent mints under the default `async` (#816's review). A revocation the disk refused
+(`CancelRefusal::NotDurable`) *"stands in this process only, and is not forwarded"*: the call ran on, to its window.
+
+**Now.** The forward is sent at once, beside the durable write; the caller's acknowledgement still waits for the
+write. The revocation is the gateway's own signed act, true when signed — it already applied it to its own authority
+before the write — so the provider is told what the gateway has decided before the gateway can prove it kept the
+record. What the caller receives:
+
+| The durable write | The forward | `cancel_call` | `/a2a` `tasks/cancel` | `/mcp` `notifications/cancelled` |
+|---|---|---|---|---|
+| on disk | answered | `Ok(CancelReceipt)`, the provider's class | `canceled` | `202` |
+| on disk | no answer in 5 s, or no target known | `Ok`, `DeliveryUnknown` / `NotForwarded` (the KV carries it) | `canceled` | `202` |
+| **refused** | **sent all the same** — answered or not | **`Err(NotDurable)`**, the provider's class counted in `call_cancel_receipts` and not returned | `-32603`, the task kept (not recorded `completed` by the stop's own answer), so it can be cancelled again | `202` (a notification has no answer; logged) |
+| the gateway crashes before it returns | sent, perhaps answered | **no answer at all** | no answer | no answer |
+
+**A cancel that is not durable is bounded, and announced.** A required-sync write applies nothing until its sync
+returns, so a forwarded revocation whose write was refused, or whose gateway crashed before the sync, is **in no KV**:
+the provider holds it only in memory (D-4: the hold and the window are not persisted) and the gateway's own authority
+holds it until it restarts. After a **provider** restart a call presented again inside its window is admitted — no
+record says otherwise. Such a cancel lasts as long as the provider process that holds it, and at most to the call's
+window. Where the disk refused, the caller is told (`NotDurable`, `-32603`); where the gateway crashed, the caller is
+told nothing, which a caller must read as *not acknowledged*, never as a refusal.
+
+**At `/a2a`, a task whose cancel has begun is not recorded `completed`.** The forward can stop the skill, and the
+skill's answer reach the gateway, before the cancel's durable write returns; that answer no longer turns the task
+`completed` (which made the cancel answer *"task already completed"*). The send itself is answered as before.
+
+**What did not change.** A `CancelReceipt` is still returned only once the revocation is on disk. A revocation
+reaches disk no sooner than before: the WAL is untouched, and a cancel still waits its turn there behind the syncs
+ahead of it (that is §9 O11, WAL group commit). A mint's two records are still on disk before its call is sent. A
+cancel before the mint still sends nothing and revokes on disk.
+
+*Check:* a caller that read `CancelRefusal::NotDurable` (or `-32603` from `tasks/cancel`) as *the call keeps
+running* reads it now as *the call may have been stopped, and the stop is not on disk*: call the cancel again — the
+revoke is idempotent, writes the same checkpoint once the disk takes it, and forwards it again. A caller that got no
+answer retries the same way.

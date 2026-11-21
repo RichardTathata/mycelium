@@ -381,7 +381,17 @@ pub(crate) struct TaskReservation {
 impl TaskReservation {
     /// Store the completed task under the reserved id; the reservation is spent. A reservation a `tasks/cancel`
     /// removed stays removed (I4, PR 3): the task was cancelled, and its send's late answer does not bring it back.
+    /// **Nor does one a `tasks/cancel` has begun** (§9 O10): the cancel forwards the revocation before its durable
+    /// write returns, so the send's answer — the provider's stop — can arrive while the task is still in the table;
+    /// recorded as `completed`, it would turn the cancel's own answer into *"task already completed"*. The task stays
+    /// as it is, for the cancel to remove (or, if the disk refused it, to be cancelled again).
     fn complete(mut self, task: Task) {
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        if self.call.as_ref().is_some_and(|c| c.cancel_asked()) {
+            // Spent without touching the entry: the reservation's drop would remove it, and the cancel owns it now.
+            self.token = None;
+            return;
+        }
         let token = self.token.take();
         let done = A2aTask {
             task,
@@ -1118,12 +1128,13 @@ fn handle_tasks_get(
 /// and the same `asked`.
 ///
 /// **It revokes before it removes** (identity-and-lifecycle I4, PR 3). A pending task whose send this gateway minted
-/// a `call:` mandate for has that term revoked and the revocation recorded on disk — awaited, so `canceled` is
-/// answered only once the gateway has recorded it — and then forwarded to the provider on a task of its own; a cancel
-/// that arrives before the mint is caught by the dispatch, which sends nothing. The answer says what this gateway
-/// did (the task is `canceled` here, its call revoked) and never that the provider stopped: that is the provider's
-/// to say, in the cancel receipt (`GET /stats` `call_cancel_receipts`). A revoke the disk refuses is answered
-/// `-32603` and the task is kept.
+/// a `call:` mandate for has that term revoked: the revocation is forwarded to the provider on a task of its own at
+/// once (§9 O10) and recorded on disk — awaited, so `canceled` is answered only once the gateway has recorded it; a
+/// cancel that arrives before the mint is caught by the dispatch, which sends nothing. The answer says what this
+/// gateway did (the task is `canceled` here, its call revoked) and never that the provider stopped: that is the
+/// provider's to say, in the cancel receipt (`GET /stats` `call_cancel_receipts`). A revoke the disk refuses is
+/// answered `-32603` and the task is kept, so the caller can cancel again — **the forward was sent all the same**,
+/// so the call may already have stopped; the error says the cancel is held in memory only.
 async fn handle_tasks_cancel(
     state:  &A2aState,
     caller: Option<&ResolvedPrincipal>,
@@ -1147,7 +1158,7 @@ async fn handle_tasks_cancel(
             && let Err(e) = super::call_cancel::cancel_at_door(&state.task_ctx, &call).await
         {
             warn!("A2A tasks/cancel: the call's cancel was not recorded: {e}");
-            return jsonrpc_error(id, -32603, &format!("the cancel could not be recorded: {e}"));
+            return jsonrpc_error(id, -32603, &format!("the cancel could not be recorded; the task is kept, cancel it again: {e}"));
         }
     }
     // Removed unless its send completed meanwhile: a completed task is not cancelled.

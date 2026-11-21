@@ -38,6 +38,9 @@ pub(super) struct Opts {
     pub(super) http_port: Option<u16>,
     /// `[persistence]` under the node's directory.
     pub(super) persist: bool,
+    /// With `persist`: its `sync_mode` and `snapshot_wal_threshold`, when not `Flush` and 1 000 (§9 O10's tests: a
+    /// burst of appends that no inline snapshot interrupts and the WAL's queue, four times the threshold, holds).
+    pub(super) wal: Option<(crate::config::SyncMode, usize)>,
     /// This node serves the tools (`slow`, 30 s; `quick`, at once).
     pub(super) tools: bool,
     /// `collect_expired_records`.
@@ -87,7 +90,8 @@ pub(super) async fn node(opts: Opts) -> N {
     });
     if opts.persist {
         use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
-        cfg.persistence = Some(PersistenceConfig { base_path: dir.join("persist"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
+        let (sync_mode, snapshot_wal_threshold) = opts.wal.unwrap_or((SyncMode::Flush, 1_000));
+        cfg.persistence = Some(PersistenceConfig { base_path: dir.join("persist"), sync_mode, snapshot_wal_threshold, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
     }
     cfg.gateway_mint_call_mandates = opts.mint;
     cfg.collect_expired_records = opts.collect;

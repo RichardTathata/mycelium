@@ -70,9 +70,12 @@ work.
   its key, and collects the `call/` and `grant/` families past D-5's floor (`max_drain_secs`,
   `grant_retention_secs`). Tests: [`src/agent/call_mint_tests.rs`](../../src/agent/call_mint_tests.rs).
 - **Cancelling a call** ([§114](../guide/deprecations.md)): A2A `tasks/cancel`, MCP `notifications/cancelled` at
-  `/mcp`, and `GossipAgent::cancel_call` ([`call_cancel.rs`](../../src/agent/call_cancel.rs)) revoke a minted call's term, record the
-  revocation on disk, and **forward it to the provider the call went to** (the cancel-forward, `sys.call-cancel.v1`,
-  accepted only from the issuing gateway — `cancel_not_from_issuer` otherwise). `cancel_call` returns a
+  `/mcp`, and `GossipAgent::cancel_call` ([`call_cancel.rs`](../../src/agent/call_cancel.rs)) revoke a minted call's term,
+  **forward the revocation to the provider the call went to at once** (the cancel-forward, `sys.call-cancel.v1`,
+  accepted only from the issuing gateway — `cancel_not_from_issuer` otherwise) and record it on disk beside the
+  forward; the caller's acknowledgement waits for the disk, the provider's stop does not
+  ([§124](../guide/deprecations.md); identity-and-lifecycle §9 O10). A cancel the disk refuses has still been
+  forwarded: `cancel_call` answers `NotDurable` (A2A `-32603`, the task kept), the stop held in memory only. `cancel_call` returns a
   `CancelReceipt` whose class is the provider's own answer — `Stopped` only where the agent doing the work promised
   to stop and it ended, `Unbounded` where it made no such promise, `DeliveryUnknown` for no answer (never a
   negative). Tests: [`src/agent/call_cancel_tests.rs`](../../src/agent/call_cancel_tests.rs).
@@ -95,11 +98,19 @@ work.
   nodes, half cancelled while running, run once over a gateway with no `[persistence]`; 10³ on every merge,
   [`src/agent/call_soak_tests.rs`](../../src/agent/call_soak_tests.rs)), [its costs](../operations/what-is-proven.md#call-mandate-carried-checkpoint-cost)
   and [the memory a held window takes](../operations/what-is-proven.md#call-window-memory).
-- **A known defect, for the `call:` mandate** (found by the soak, 2026-11-20): a cancel waits its turn at the
-  gateway's WAL, and until its revocation is on disk it is neither gossiped nor forwarded, so the call runs on, at
-  most to its window. Under `sync_mode = "flush"` any burst of writes ahead of it holds it (the collector's minute
-  pass: seconds for a thousand records); under any mode it queues behind the mints in flight. Work on the gateway
-  node itself stops at once ([ledger](../operations/what-is-proven.md#call-cancel-behind-collector)).
+- **What a cancel's forward-first order costs — the crash bound** (§9 O10, stated and tested): the forwarded
+  revocation is in no KV until its sync returns, so a gateway that crashes between the forward and the sync answers
+  its caller **nothing** — no acknowledgement, not a "not durable" one — and has no record of the revocation after its
+  restart; the provider holds it in memory only (D-4), and after a provider restart the call, presented again inside
+  its window, is admitted. Such a cancel lasts as long as the provider process that holds it, at most to the call's
+  window. A cancel asked again writes it durably and the KV then stops the call
+  (`a_gateway_crash_between_the_forward_and_the_sync_leaves_no_record_and_a_restarted_provider_admits_the_call_again`)
+  ([ledger](../operations/what-is-proven.md#call-cancel-behind-collector)).
+- **Still open, for the `call:` mandate** (§9 O11): the revocation itself waits its turn at the gateway's WAL — one
+  sync per synced append, in arrival order — so the caller's acknowledgement, a mint, and (under `sync_mode =
+  "flush"`, where the gateway's connection reader waits on the WAL for each inbound record) the provider's answer to
+  the forward wait behind any burst; the receipt is then `DeliveryUnknown`, never a negative
+  ([ledger](../operations/what-is-proven.md#call-cancel-behind-collector)).
 
 ## Go deeper
 

@@ -39,8 +39,12 @@
 //! [`revoke_call`] writes the call's next checkpoint (sequence 2, its term revoked) durably and offers it to this node's
 //! own authority. A provider learns it from the KV (its feeder reads the key only for a window it holds) and its sweep
 //! stops the work — bound 1. The cancel doors (A2A `tasks/cancel`, MCP `notifications/cancelled`,
-//! `GossipAgent::cancel_call`) go through [`revoke`] and then forward the revoking checkpoint to the provider
-//! directly (`call_cancel`, the row's PR 3) — the primary path; the KV is the fallback.
+//! `GossipAgent::cancel_call`) take the revoke in its two steps: [`begin_revoke`] signs the revoking checkpoint and
+//! applies it to this node's own authority, the door **forwards it to the provider at once** (`call_cancel`, the row's
+//! PR 3 — the primary path; the KV is the fallback), and [`finish_revoke`] writes it durably, the caller's
+//! acknowledgement waiting for that alone (§9 O10, the maintainer's decision of 2026-11-20). The revocation is the
+//! gateway's own signed act, true when it is signed; only the gateway's promise that it is *on disk* waits for the
+//! disk.
 //!
 //! **The gateway re-asserts its checkpoint** (#775's review, H1): it watches its own `call/{self}/` keys, and when one
 //! holds anything but what it wrote — another member's value, a tombstone, its own first checkpoint written back over
@@ -369,7 +373,8 @@ pub(crate) enum RevokeRefusal {
     NoIdentity,
     /// This gateway holds no call of that term, in memory or as a verified window record of its own.
     UnknownTerm,
-    /// The revoking checkpoint is not on disk; it stands in this process only.
+    /// The revoking checkpoint is not on disk. It is signed and stands in this process — offered to its own
+    /// authority, and forwarded to the provider where a cancel door sent it (§9 O10) — but no restart keeps it.
     NotDurable(String),
 }
 
@@ -385,21 +390,36 @@ pub(crate) enum RevokeRefusal {
 /// own verified `window` record and checkpoint in the KV. Two revokes of one term at once make one checkpoint: the
 /// transition to revoked is one papaya `compute` (retry-safe: it reads only its input), and the loser writes the
 /// winner's.
-#[cfg_attr(not(all(test, feature = "compliance")), allow(dead_code))] // the tests' entry; the doors go through `revoke`
+#[cfg_attr(not(all(test, feature = "compliance")), allow(dead_code))] // the tests' entry; the doors go through `begin_revoke`
 pub(crate) async fn revoke_call(ctx: &TaskCtx, term: &str) -> Result<bool, RevokeRefusal> {
-    revoke(ctx, term).await.map(|r| r.written)
+    revoke(ctx, term).await
 }
 
-/// What a revoke did: whether this call wrote the revoking checkpoint to disk, the checkpoint itself (what the
-/// cancel-forward carries), and the provider the call was sent to, if this process knows it.
-pub(crate) struct Revoked {
-    pub(crate) written: bool,
+/// [`revoke_call`]: both steps, with nothing between them — for a call that was never sent, which has nothing to
+/// forward (`call_cancel::cancelled_before_sent`).
+pub(crate) async fn revoke(ctx: &TaskCtx, term: &str) -> Result<bool, RevokeRefusal> {
+    let pending = begin_revoke(ctx, term)?;
+    finish_revoke(ctx, &pending).await
+}
+
+/// **A revocation signed and applied here, not yet on disk** (§9 O10): what [`begin_revoke`] did, what a cancel door
+/// forwards, and what [`finish_revoke`] writes.
+pub(crate) struct PendingRevoke {
+    term: String,
+    /// The signed revoking checkpoint — what the cancel-forward carries.
     pub(crate) checkpoint: SignedRevocationCheckpoint,
+    /// The provider the call was sent to, if this process knows it.
     pub(crate) target: Option<NodeId>,
+    /// Its sequence, and whether this process has written it durably already (then [`finish_revoke`] writes nothing).
+    seq: u64,
+    on_disk: bool,
 }
 
-/// [`revoke_call`], with what the cancel-forward needs (I4, PR 3: `call_cancel::cancel`).
-pub(crate) async fn revoke(ctx: &TaskCtx, term: &str) -> Result<Revoked, RevokeRefusal> {
+/// **The revoke's first step** — no await in it: the call's next checkpoint, its term revoked, held as issued, signed,
+/// and offered to this node's own authority (its sweep run, so work admitted here stops now). Nothing is written to the
+/// KV or the disk: that is [`finish_revoke`]. A door may forward [`PendingRevoke::checkpoint`] in between — the
+/// gateway's revocation is its own signed act, true once signed (the maintainer's decision of 2026-11-20, §9 O10).
+pub(crate) fn begin_revoke(ctx: &TaskCtx, term: &str) -> Result<PendingRevoke, RevokeRefusal> {
     if ctx.tls.get().is_none() {
         return Err(RevokeRefusal::NoIdentity);
     }
@@ -449,20 +469,30 @@ pub(crate) async fn revoke(ctx: &TaskCtx, term: &str) -> Result<Revoked, RevokeR
         let _ = authority.offer_checkpoint(&signed, now, &super::gateway_member_keys(ctx));
         authority.sweep(now);
     }
-    let bytes = serde_json::to_vec(&signed).map_err(|e| RevokeRefusal::NotDurable(e.to_string()))?;
-    let target = revoking.target.clone();
     // Already on disk — written durably by this process at or past this sequence: nothing to write. Only this
     // process's own record of its durable writes decides it (#794's review, K1): the KV may hold the revoking
     // checkpoint because the re-assertion wrote it without an fsync.
-    if revoking.durable_seq >= revoking.seq {
-        return Ok(Revoked { written: false, checkpoint: signed, target });
+    let on_disk = revoking.durable_seq >= revoking.seq;
+    Ok(PendingRevoke { term: term.to_string(), checkpoint: signed, target: revoking.target, seq: revoking.seq, on_disk })
+}
+
+/// **The revoke's second step: the revoking checkpoint on disk** — the WAL's required-sync write, which applies it to
+/// the KV and gossips it only once its sync returns. `Ok(true)`: written now; `Ok(false)`: this process had written it
+/// durably already. `Err(NotDurable)`: not on disk — it stands in memory, here and wherever it was forwarded.
+pub(crate) async fn finish_revoke(ctx: &TaskCtx, pending: &PendingRevoke) -> Result<bool, RevokeRefusal> {
+    if pending.on_disk {
+        return Ok(false);
     }
+    #[cfg(test)]
+    test_hooks::before_revoke_write(&ctx.node_id).await;
+    let bytes = serde_json::to_vec(&pending.checkpoint).map_err(|e| RevokeRefusal::NotDurable(e.to_string()))?;
+    let cp_key = call_checkpoint_key(&node_principal(&ctx.node_id), &pending.term);
     write_durable(ctx, cp_key, bytes).await.map_err(RevokeRefusal::NotDurable)?;
-    let written = revoking.seq;
-    ctx.call_issuer.issued.pin().update(term.to_string(), move |i| Issued { durable_seq: i.durable_seq.max(written), ..i.clone() });
+    let written = pending.seq;
+    ctx.call_issuer.issued.pin().update(pending.term.clone(), move |i| Issued { durable_seq: i.durable_seq.max(written), ..i.clone() });
     #[cfg(feature = "metrics")]
     metrics::counter!("mycelium_gateway_calls_cancelled_total").increment(1);
-    Ok(Revoked { written: true, checkpoint: signed, target })
+    Ok(true)
 }
 
 /// **Write this gateway's newest checkpoint for `term` again if the KV holds anything else** (#775's H1): another
@@ -740,10 +770,62 @@ pub(crate) fn start_reassertion(ctx: &Arc<TaskCtx>) {
     });
 }
 
-/// Test hooks: the mint's durable writes, timed.
+/// Test hooks: the mint's durable writes, timed; a revoke's durable write held.
 #[cfg(test)]
 pub(crate) mod test_hooks {
     use std::sync::Mutex;
+    /// Per gateway node: a revoke's durable write waits at [`super::finish_revoke`]'s start until its gate lets it
+    /// through (§9 O10's tests: the forward goes out while the write is held; a crash between the two).
+    pub(crate) static HOLD_REVOKE_WRITE: std::sync::LazyLock<papaya::HashMap<String, std::sync::Arc<RevokeGate>>> = std::sync::LazyLock::new(papaya::HashMap::new);
+    /// One node's gate: the writes that reached it, and the permits that let them through.
+    pub(crate) struct RevokeGate {
+        permits: tokio::sync::Semaphore,
+        reached: std::sync::atomic::AtomicUsize,
+    }
+    #[cfg_attr(not(feature = "compliance"), allow(dead_code))] // read by `call_cancel_tests`
+    impl RevokeGate {
+        /// How many revoke writes have reached the gate.
+        pub(crate) fn reached(&self) -> usize {
+            self.reached.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        /// Let `n` writes through.
+        pub(crate) fn release(&self, n: usize) {
+            self.permits.add_permits(n);
+        }
+    }
+    /// `node`'s revoke writes held at a gate while this lives; dropped, the gate is removed and lets every write by.
+    pub(crate) struct HeldRevokeWrites {
+        node: String,
+        gate: std::sync::Arc<RevokeGate>,
+    }
+    impl std::ops::Deref for HeldRevokeWrites {
+        type Target = RevokeGate;
+        fn deref(&self) -> &RevokeGate {
+            &self.gate
+        }
+    }
+    impl Drop for HeldRevokeWrites {
+        fn drop(&mut self) {
+            HOLD_REVOKE_WRITE.pin().remove(&self.node);
+            self.gate.permits.close();
+        }
+    }
+    /// Hold `node`'s revoke writes at a gate until it is released or dropped.
+    #[cfg_attr(not(feature = "compliance"), allow(dead_code))] // read by `call_cancel_tests`
+    pub(crate) fn hold_revoke_writes(node: &crate::node_id::NodeId) -> HeldRevokeWrites {
+        let gate = std::sync::Arc::new(RevokeGate { permits: tokio::sync::Semaphore::new(0), reached: std::sync::atomic::AtomicUsize::new(0) });
+        HOLD_REVOKE_WRITE.pin().insert(node.to_string(), std::sync::Arc::clone(&gate));
+        HeldRevokeWrites { node: node.to_string(), gate }
+    }
+    pub(super) async fn before_revoke_write(node: &crate::node_id::NodeId) {
+        let gate = HOLD_REVOKE_WRITE.pin().get(&node.to_string()).cloned();
+        if let Some(gate) = gate {
+            gate.reached.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Ok(permit) = gate.permits.acquire().await {
+                permit.forget();
+            }
+        }
+    }
     /// Per node: how long each mint's two durable writes took.
     pub(crate) static RECORD_LATENCIES: Mutex<Vec<(String, std::time::Duration)>> = Mutex::new(Vec::new());
     pub(super) fn note_record_latency(node: &crate::node_id::NodeId, d: std::time::Duration) {
