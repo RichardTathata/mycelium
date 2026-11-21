@@ -22,6 +22,18 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.40.1 release — 2026-11-21 (tag `v2.40.1`) — a grant's issued record answers its own request; wasmtime 49.0.7
+
+A **security PATCH** cut from the v2.40.0 tag on `release/v2.40.1`, not from `main`, which carries unreleased wave 1b
+and critique-plan material (MINOR). Two fixes from `main`, nothing else. **#819:** the revoke route, the agent's wait
+and the status route read `grant/{agent}/{request}/issued` only as a grant whose term is the request, whose scope is
+`grant:{request}` and whose holder segment is the key's (`gateway_authority::grant_answers_key`); before it, any member
+could copy another genuine grant of the same issuer and holder under a request's key, and a revoke of that request
+revoked the other grant's term (2.38.0–2.40.0). Counted on `/stats` `grant_issued_refused`. Revoking can still be
+denied by a copy, garbage or a tombstone at the key, now by name, until I7-S's decision journal. **#815:** wasmtime
+49.0.5 → 49.0.7 for RUSTSEC-2026-0566 to -0573, none reachable through the host; a lockfile change only. Wire v12
+unchanged; no API change. Log: `.log/2026-11-21-release-v2.40.1.md`.
+
 ## v2.40.0 release — 2026-11-12 (tag `v2.40.0`) — identity and lifecycle wave 1a, and the external review's last rows
 
 A **MINOR** cut on `release-v2.40.0` (the maintainer approved the cut on 2026-11-11), for tagging after an independent

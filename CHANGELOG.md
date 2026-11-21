@@ -9,6 +9,131 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.40.1] — 2026-11-21
+
+A security PATCH cut from the v2.40.0 tag. Wire **v12** unchanged (`PREV = 11`); no on-disk change, no public API
+change. It carries #819 and #815 from `main` and nothing else.
+
+### Upgrade notes
+
+- **No `deprecations.md` section:** an honest caller sees no change. The revoke route refuses, with `409
+  unreadable_grant`, only a record that is not the request's own grant; `GET /stats` gains the object
+  `grant_issued_refused` (an added field).
+- **Which nodes to upgrade:** a grant's issuing node runs the revoke route and the status route, and the agent's node
+  runs the agent's wait. Each is fixed where it runs, so upgrade every node that issues grants or runs an agent that
+  waits for one. No upgrade order is needed.
+- **Companions are unchanged:** `mycelium-py` 0.2.15, `mycelium-ts` 0.2.9, `mycelium-reason` 0.11.1 and
+  `mycelium-guardrails` 1.1.1. The SDKs read the status route, which the node now fixes.
+
+### Security
+
+- **A revoke revokes the grant its path names, never another one copied there** (#819). This is the owner-signed rule's
+  (b): the body is checked against the key. `POST /gateway/grants/{agent}/{request}/revoke` checked that the record at
+  `grant/{agent}/{request}/issued` was signed by this node and held by the path's agent. It never checked that the
+  record was the grant issued for `{request}`. Any admitted member could copy there another genuine grant of the same
+  issuing node and holder. A supervisor's revoke of the request then revoked **the other grant's term** and left the
+  request's own grant live. It also wrote `…/revoked`, so the status route reported the request `revoked` while every
+  door still admitted its grant. The agent's wait took the same copy as the answer to a request nobody had answered,
+  and `GET /gateway/grants/request/{request}` handed it to a client. **Affected: 2.38.0, 2.39.0 and 2.40.0.** In 2.38.0
+  and 2.39.0 the revoke route checked neither the signature nor the holder, so it revoked on any record that named this
+  node as issuer.
+
+  Now the revoke route, the agent's wait and the status route read the record only as a grant whose term is the path's
+  request, whose scope is `grant:{request}` and whose holder is the path's agent
+  (`gateway_authority::grant_answers_key`). Anything else is read as absent:
+  - the revoke is refused `409 unreadable_grant`, naming the term the record carries, and nothing is written;
+  - the wait waits on, and its expiry names what it saw;
+  - the status route answers `pending`.
+
+  **Counted:** `GET /stats` `grant_issued_refused` has three counts. `revoke` covers this mismatch and the route's
+  existing signature and holder refusals; the others are `agent_wait` and `status`. An honest caller sees no change: a
+  genuine grant always answers the key it was written at. Tests, each seen failing first:
+  - `a_revoke_refuses_a_genuine_grant_copied_under_another_request` (two nodes; the second member writes the copy and
+    it reaches the first by gossip);
+  - `the_agents_wait_reads_a_grant_copied_from_another_request_as_absent`;
+  - `the_status_route_reads_a_grant_copied_from_another_request_as_no_answer`;
+  - `a_grant_answers_only_the_key_its_term_and_holder_name` (unit).
+
+  **Revoking can still be denied, now by name.** A member can write a copy, garbage or a tombstone to a request's
+  `…/issued`. That stops the issuing node revoking that request: the revoke is refused, and the grant stays live until
+  its `valid_until`. Refusing is the right answer, because the alternative was to revoke the wrong term. Closing the gap
+  needs the issuing node's own memory of what it issued: identity-and-lifecycle I7-S's decision journal, which is not in
+  this release.
+
+  **Check:** run `curl -s http://NODE:PORT/stats | jq .grant_issued_refused` to see the three counts. They count
+  **reads**, not records: the SDKs poll the status route every 0.5 s, and the wait re-reads on every wake. A non-zero
+  count on an upgraded node means a read under `grant/` found a record that did not answer its key.
+
+  **Check a revoke made under 2.38.0–2.40.0.** An `already_revoked` answer and the status route's `revoked` prove
+  nothing: the copied revoke wrote `…/revoked` at the request's own key too, and any member can plant that marker. The
+  only evidence that a request's own grant was revoked is the issuing node's signed checkpoint at
+  `grant/{agent}/{request}/checkpoint`, with scope `grant:{request}` and `{request}` in its `revoked` set. Without that
+  checkpoint, the grant stayed live until its `valid_until_ms`, at most 3 600 s after its issue. So only grants issued
+  in the last hour before the upgrade can still matter.
+
+  You can re-send such a revoke to the upgraded issuing node. Where the key holds the request's own grant and no
+  `…/revoked` marker, the re-send revokes it. Otherwise it is refused and nothing is written. A signed decision older
+  than 300 s plus drift is refused as stale, so it must be re-signed. In the attack, the grant whose record was copied
+  **was really revoked**, and revocation is monotonic.
+
+- **`wasmtime` / `wasmtime-wasi` 49.0.5 → 49.0.7**, with the cranelift family 0.136.5 → 0.136.7 and pulley and wiggle
+  49.0.5 → 49.0.7 (#815). These answer eight advisories published 2026-11-16, each fixed in 49.0.6; 49.0.7 is the
+  current 49.x.
+
+  **Check whether you are affected:** a node links wasmtime only if it hosts WASM components, that is if it runs
+  `mycelium-stem` or a binary that links `mycelium-wasm-host`. **None of the eight is reachable through the host as it
+  is configured**, so no hosted component can use them against a node. The bump is here because the vulnerable versions
+  were linked. After upgrading, `grep -A1 '^name = "wasmtime"$' Cargo.lock` in the build shows `49.0.7`, and
+  `cargo audit -f Cargo.lock` no longer reports RUSTSEC-2026-0566 to -0573.
+
+  Each was read from the upstream advisory and checked against the host's code (`mycelium-wasm-host/src/host.rs`,
+  `mycelium-wasm-host/Cargo.toml`). A guest here is a component the node installed. On a node installing only what
+  `[hosts].trusted_publishers` signed, it is one of those publishers' components.
+  - **RUSTSEC-2026-0566** (medium; `wasmtime-wasi`): host memory grows by 32 bytes for each empty `output-stream.write`
+    to an `AsyncWriteStream`. Not reachable. The only WASI context a component gets is
+    `WasiCtxBuilder::new().build()`, a private field of `HostState`. Its stdout and stderr are `tokio::io::empty()`,
+    whose WASI p2 stream is `SinkOutputStream`, not the `AsyncWriteStream` adapter. No file is preopened, every socket
+    address is refused, and no other p2 stream in `wasmtime-wasi` is an `AsyncWriteStream`. An embedder cannot give a
+    component another stdout through this crate.
+  - **RUSTSEC-2026-0571** (medium; `wasmtime-wasi-http`, empty body writes over HTTP/2): **not linked**.
+    `wasmtime-wasi-http` is in no tracked lockfile, here or at v2.38.3, v2.39.0 or v2.40.0.
+  - **RUSTSEC-2026-0568** (medium): a stale GC heap base pointer lets a guest abort the host. Not reachable. By the
+    advisory it needs a host function that allocates a GC object and returns it to the guest. The host's imports are
+    the WIT world's `kv`, `mesh` and `log` (strings, byte lists, options; `wit/host.wit`) and WASI p2, and the crate
+    names no `ExternRef`, `AnyRef`, `StructRef` or `ArrayRef`. The GC proposal itself is on (wasmtime's default; the
+    host does not call `wasm_gc(false)`), so this answer rests on the advisory's stated condition, not on a disabled
+    feature.
+  - **RUSTSEC-2026-0573** (low): a process abort when a GC heap's reservation is not a multiple of the page size. Not
+    reachable. It needs `gc_heap_may_move(false)` or `memory_may_move(false)` with a `gc_heap_reservation` or
+    `memory_reservation` that is not page-aligned. The host's one `Config` sets the component model, fuel and epoch
+    interruption and nothing else, and the advisory states that the default configuration is not affected.
+  - **RUSTSEC-2026-0567** and **-0570** (low): an abort in a build *without* the `threads`, respectively the `gc`, cargo
+    feature. They do not apply: the host's feature list turns both on. Before the list existed (v2.38.0 and earlier),
+    wasmtime was built with its defaults, which include both.
+  - **RUSTSEC-2026-0572** (low): a panic when a component cancels a stream or future copy on the wrong end. Not
+    reachable. By the advisory the panic needs two component instances in one `Store` and a host that passes a `stream`
+    or `future` between them. The host makes one `Store` for each instance, instantiates one component in it, and
+    names no `StreamReader` or `FutureReader`. The host's world having no `stream` or `future` type is not the barrier:
+    component-model async is compiled in and on in the engine, so a guest can make streams of its own. What the
+    advisory leaves a single-instance embedder is a trap (its statement, not exercised here). A trap already ends the
+    call, and the serve loop replaces the instance.
+  - **RUSTSEC-2026-0569** (low): a panic in `Caller::get_module_export`. Not reachable. It affects core WebAssembly
+    only, not components (the advisory), and the crate has no `Caller`: it instantiates components only, through the
+    generated bindings.
+
+  **Affected releases:** v2.38.3, v2.39.0 and v2.40.0 link wasmtime 49.0.5. Earlier releases with the WASM host link
+  older wasmtime (45.0.3 at v2.0.0 through 49.0.4 at v2.38.2). Those versions are inside the ranges of -0566, -0567,
+  -0569 and -0571 throughout, of -0572 from wasmtime 46.0.0, and of -0568, -0570 and -0573 from 47.0.0. The host's
+  engine configuration, WASI context and linker calls at the three 49.0.5 tags are the ones read here, so none of the
+  eight is reachable in them either. A node built without `mycelium-wasm-host` does not link wasmtime.
+
+  wasmtime 49.0.7's feature table is identical to 49.0.5's (`default` included, and `wasmtime-wasi`'s too), so
+  `mycelium-wasm-host`'s list (every default but `cache`) needs no change and `zstd` stays out of the tree. This is a
+  lockfile change only: the version and checksum lines of 32 packages in `Cargo.lock` (wasmtime, `wasmtime-wasi`,
+  `wasmtime-wasi-io`, `wasmtime-environ`, the `wasmtime-internal-*` crates, wiggle, pulley, cranelift), and nothing
+  else. The two other tracked lockfiles hold no wasmtime. The minimum Rust version wasmtime 49 requires (1.96.0, the
+  pinned toolchain) is unchanged.
+
 ## [2.40.0] — 2026-11-12
 
 Wire **v12** unchanged (`PREV = 11`; the rolling-upgrade gate, 3 + 2, passes). A MINOR: **identity and lifecycle wave

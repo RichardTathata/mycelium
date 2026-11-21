@@ -2,7 +2,7 @@
 
 ↑ [Operations](README.md) · beside the [shared-responsibility matrix](shared-responsibility-matrix.md)
 
-**As of 2026-11-12 (v2.40.0).** One dated page for the line between what CI proves on every merge,
+**As of 2026-11-21 (v2.40.1).** One dated page for the line between what CI proves on every merge,
 what has been demonstrated with its bound stated, and what has not yet been shown. Every line names
 its evidence. The places that used to restate this list — `CLAUDE.md` § Active work, the contracts-axis
 plan §10, the self-audit series, the publications ledger, both decks — now link here instead, and
@@ -100,7 +100,7 @@ the deployment, multi-machine recovery or NovusLens consumer-rendering gaps belo
 
 ## Not yet shown — and what would show it
 
-| Gap | State on 2026-11-12 | What would show it |
+| Gap | State on 2026-11-21 | What would show it |
 |---|---|---|
 | <a id="binary-provenance"></a>**Binary provenance** | the Release workflow (adopter-surface X0) attaches `SHA256SUMS` to every tag's tarballs and pushes the image by digest: integrity of the download, not provenance of the build; nothing signs a binary or the image, and reproducible builds are not claimed | a Sigstore or GPG signature on each tarball and the image, verified by the clean-container smoke before the assets are attached |
 | <a id="named-third-party-production-deployment"></a>**A named third-party production deployment** | none. NovusLens is a design partner that consumes the evidence records; the council-minutes corpus is envelope-qualified, not live. The [pilot kit](pilot-kit/README.md) (adopter-surface Y10) is everything a pilot needs on its first day — the two-domain scaffold, the fault classes against its declaration and a report built from their output, run in CI — and the pilot kit is not the deployment: it runs on one machine, under no one's name | a customer pilot run to the `customer-pilot.md` bar with the kit's report filled in by the counterparty, named with consent |
