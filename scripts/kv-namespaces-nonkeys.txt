@@ -14,6 +14,7 @@ mesh/emit/            # mesh_handle.rs: timer-seam stream, one per emitted kind
 mesh/stale/           # mesh_handle.rs: timer-seam stream, one per watched kind
 signal/handler        # signal.rs SIGNAL_CHAN: the per-handler signal channel's seam name
 wal/append            # persistence.rs WAL_CHAN: the WAL's bounded append channel's seam name
+wal/drain             # persistence.rs WAL_DRAIN: the writer's recorded drain-count choice (group commit, §9 O11), a seam stream name
 writer/               # writer.rs STATE_REQ_CHAN and tasks.rs writer_stream: per-peer writer channel names
 kv-persist/           # kv_persist.rs: timer-seam stream, one per persisted key
 intent/               # agent/intent.rs: timer-seam stream, one per governor intent key

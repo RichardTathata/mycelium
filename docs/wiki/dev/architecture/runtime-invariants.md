@@ -610,7 +610,11 @@ never had it, and the snapshot is taken from the store.
 inbound `Data` paths apply a record to the store and then await its WAL append, so between the two the
 store holds a record its WAL does not yet — the window invariant 1 accepts; a crash inside it loses the
 record from disk and anti-entropy re-sends it. Group-committing anti-entropy was tried in round 3 and
-removed in round 5.
+removed in round 5. **That was caller-side batching** — the path collected applied records and appended them
+together, so each sat applied and un-enqueued for as long as its batch took to collect: it widened this window.
+The writer's group commit (identity-and-lifecycle §9 O11, PR 1, 2026-11-21; invariant 6 below) is **behind the
+channel**: the callers still apply and enqueue one record at a time, and `begin_inbound`'s window still closes at
+the enqueue, so it does not. A row that proposes batching again says which side of the channel it is on.
 What the window must not do is make a **replica-sync** answer claim the record (external review 2026-10-31, F3;
 row R8, #720): all three inbound sites (`Data`, `SignedData`, the anti-entropy entry) now go through
 `connection::apply_inbound_then_append`, which counts the record in flight from before the apply until it is on
@@ -705,13 +709,38 @@ transition its owner lowers, so `is_self_opaque` still reads those unaged and ag
 `a_stale_self_opacity_mark_does_not_read_as_opaque`. And `persist.sync_mode` resolves
 `not_configured` for `Os` — the writer syncs on `force_sync || sync_mode == Flush`, nothing else.
 
+**6. The writer commits what is queued under one sync — group commit, no batching window** (identity-and-lifecycle
+§9 O11, PR 1, 2026-11-21; the maintainer's decisions of that day). `wal_writer_task` takes an append, drains what is
+**already** on the channel behind it through `sim_seam::chan_drain` (at most `BATCH_MAX_RECORDS` = 4 096 appends or
+`BATCH_MAX_BYTES` ≈ 4 MiB of keys and values; it never waits for more), and `commit_batch` writes every frame in
+**one** `write_all` (separate writes cost several times more — the scoping bench), syncs once when any member needs it
+(`force_sync`, `Flush`, or a `Sync` ending the batch), and **only then** answers each member. The rules a change here
+must keep: **every ack after its batch's sync** (`concurrent_append_syncs_share_one_sync_and_none_is_acknowledged_before_it`
+holds the sync at a gate and sees no answer); **a failed encode, write or sync fails, counts and poisons for every
+member** — the complete frames before a tear too, so `Err` never means absent (`a_failed_sync_fails_and_counts_every_append_in_its_batch`,
+`a_write_torn_inside_a_batch_fails_every_member_and_nothing_lands_behind_it`); **`Sync`, `TriggerSnapshot`, `Shutdown`
+and `PoisonForTest` end a batch**, a `Sync` answered by its batch's sync (`each_boundary_message_ends_a_batch`); a
+poisoned writer refuses a whole batch member by member, as it refused each append; the threshold snapshot runs at
+the end of a batch, so it may fire up to a batch past `snapshot_wal_threshold`; **the bytes are the frames
+concatenated** (`a_batch_writes_the_same_bytes_as_its_records_written_one_by_one`), so the golden fixtures and
+replay are untouched. **A failed `Sync` poisons** (deprecations §125): after an `fsync` error a later one can succeed
+without the data, so carrying on let a later replica-sync answer claim `Persisted` wrongly; and that sync now goes
+through `fs_sync_data` like the append's (it was a bare `sync_data()` the seam gate's pattern does not match). **The
+drain is a recorded choice** (`chan wal/drain`, recorded only when it took something, so a lone append's trace is
+what it was; `a_drain_is_a_recorded_choice_and_a_lone_append_records_none`, `a_replay_that_drains_a_different_batch_diverges`;
+the replay inventory §2.3). The tests' faults (`WalFaults`: a tear inside a batch, a failed or held sync, the sync and
+batch counts) are `#[cfg(test)]` and absent from a shipped writer. **Not changed by it:** the connection reader under
+`flush` still awaits each record's ack (O11's PR 2), the evidence and identity journals still sync a record at a time
+(§9 O12), and `PEER_WRITE_STALL_DEFAULT_MS` is still derived from the per-record figure.
+
 **The contract above the invariants (contracts axis item 1, ADR 2026-09-13).** What each public
 acknowledgement proves — and does not — is inventoried site by site in
 [`docs/design/contracts-receipts.md`](../../../design/contracts-receipts.md) §1, with the four receipts
 (local application · local sync · replica sync · destination commit) it commits PRs 2–4 to return. The
-**regression floor** pins today's meanings (`floor_observe_counts_any_update_at_or_after_write_ts`,
-`floor_committed_persisted_is_true_when_persistence_unconfigured`, plus the durability tests named
-here); the **golden on-disk fixtures** (`tests/fixtures/persistence/<format>/`, replayed by
+**regression floor** pins today's meanings (`observe_counts_only_this_exact_payload`, which replaced
+`floor_observe_counts_any_update_at_or_after_write_ts` in PR 4a by changing the pin in the open —
+`src/agent/kv_quorum.rs` `floor_tests` —, `floor_committed_persisted_is_true_when_persistence_unconfigured`, plus the
+durability tests named here); the **golden on-disk fixtures** (`tests/fixtures/persistence/<format>/`, replayed by
 `golden_fixture_replays_every_released_on_disk_format`) pin that every released `wal.bin` /
 `snapshot.bin` still replays — one family, `fixint-v1`, since v1.0.0. Persist-first on the strong path
 (PR 3) is admissible **only** because invariant 2 holds; the two regression tests above are its pin.

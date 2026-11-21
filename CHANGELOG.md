@@ -32,6 +32,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   wrote the record and folded once; if a fold was already running, which the write itself can start, the call
   returned before that fold ended, and this node trusted the revoked key until it did. It now waits for a fold that
   started after the write (`revocation::refresh_through`).
+- **The KV WAL's writer commits what is queued under one sync** (identity-and-lifecycle §9 O11, PR 1;
+  `deprecations.md` §125; the ledger row `what-is-proven.md#call-cancel-behind-collector` moves toward closed). A
+  required-sync write — a mint, a revoke, a grant's records, the use markers, `KvHandle::set_requiring_sync`,
+  consensus's accepted, committed and lease records — waited for one sync per synced record queued ahead of it, and
+  under `sync_mode = "flush"` behind every append: a cancel asked while the gateway's collector deleted 1 000
+  records waited seconds for its revocation to reach disk. The writer now takes what is already queued behind an
+  append (at most 4 096 appends or about 4 MiB, never waiting for more), writes the batch in one write, syncs it once,
+  and then answers every member. No acknowledgement changes meaning, the on-disk bytes are unchanged, and a lone
+  write produces the same bytes and the same replay trace as before. A failed write or sync fails and counts every
+  append in its batch and poisons the writer. **A failed `sync()` now poisons the writer** too, where it used to
+  carry on (after an `fsync` error a later one can succeed without the data), and goes through the replay seam. The
+  callers still apply first and then hand the record to the writer, so the apply-to-append window is not widened
+  (why #602's caller-side batching was removed). How many messages a batch drained is a recorded replay choice
+  (`chan wal/drain`, only when it drained any). The inbound reader under `flush` still awaits each record's sync
+  (O11's PR 2). Pinned: `a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog`, un-ignored, and
+  the group-commit tests in `persistence.rs`'s `durability_tests`.
 - **The governed-call scaffold waits until both nodes know each other before node B calls node A** (found as a CI flake
   in the Scaffold job: the run ended `Error: Timeout`). It waited for B's connection only. A has no bootstrap peers
   and sends a reply only to a node in its own peer table, so a call made before A had heard of B lost its reply and
