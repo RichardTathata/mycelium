@@ -24,7 +24,7 @@ The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/expl
 
 ## v2.40.1 release — 2026-11-21 (tag `v2.40.1`) — a grant's issued record answers its own request; wasmtime 49.0.7
 
-A **security PATCH** cut from the v2.40.0 tag on `release/v2.40.1`, not from `main`, which carries unreleased wave 1b
+A **security PATCH** cut from the v2.40.0 tag on `release-2.40.x` (PR branch `release/v2.40.1`, #823), not from `main`, which carries unreleased wave 1b
 and critique-plan material (MINOR). Three fixes from `main`, nothing else. **#819:** the revoke route, the agent's wait
 and the status route read `grant/{agent}/{request}/issued` only as a grant whose term is the request, whose scope is
 `grant:{request}` and whose holder segment is the key's (`gateway_authority::grant_answers_key`); before it, any member
