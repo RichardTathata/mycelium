@@ -31,7 +31,7 @@ and the status route read `grant/{agent}/{request}/issued` only as a grant whose
 could copy another genuine grant of the same issuer and holder under a request's key, and a revoke of that request
 revoked the other grant's term (2.38.0–2.40.0). Counted on `/stats` `grant_issued_refused`. Revoking can still be
 denied by a copy, garbage or a tombstone at the key, now by name, until I7-S's decision journal. **#815:** wasmtime
-49.0.5 → 49.0.7 for RUSTSEC-2026-0566 to -0573, none reachable through the host; a lockfile change only. Wire v12
+49.0.5 → 49.0.7 for RUSTSEC-2026-0566 to -0573, none reachable through the host; a lockfile change only. **`0acb7b91`:** quinn-proto 0.11.19 and quinn-udp 0.5.16 for RUSTSEC-2026-0523, -0524 and -0538, not reachable (no QUIC code is compiled), with main's two dated audit ignores (`chrono`, `humantime`, W9). Wire v12
 unchanged; no API change. Log: `.log/2026-11-21-release-v2.40.1.md`.
 
 ## v2.40.0 release — 2026-11-12 (tag `v2.40.0`) — identity and lifecycle wave 1a, and the external review's last rows

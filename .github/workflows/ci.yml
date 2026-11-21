@@ -1124,6 +1124,12 @@ jobs:
               # 2026-11-06 — `paste` 1.0.15, unmaintained (no defect advisory). Only in the excluded GPU demo crate, through
               # `metal` (wgpu's Metal backend): a build-time procedural macro, in no shipped build. Remove when wgpu drops it.
               examples/conway-gpu/Cargo.lock) ignore=(--ignore RUSTSEC-2024-0436) ;;
+              # 2026-11-17 — `chrono` 0.4.45 (RUSTSEC-2026-0543) and `humantime` 2.4.0 (RUSTSEC-2026-0542), both
+              # *unmaintained* (no defect advisory, no fixed version). Both reach the tree only through `object_store`
+              # 0.14.2, the wasm host's optional `object_store` feature: in the published stem, in no node binary.
+              # Mycelium calls neither. The maintainer accepted them on 2026-11-17 (rust-ecosystem-watch W9); a defect
+              # in either would be a new advisory id and still fail this step. Remove when `object_store` drops them.
+              Cargo.lock) ignore=(--ignore RUSTSEC-2026-0543 --ignore RUSTSEC-2026-0542) ;;
             esac
             cargo audit --deny warnings "${ignore[@]}" -f "$lock" || { status=1; echo "::error file=$lock::cargo audit failed for $lock (an advisory, or the audit could not run)"; }
             echo "::endgroup::"

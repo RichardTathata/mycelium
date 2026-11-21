@@ -12,7 +12,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [2.40.1] — 2026-11-21
 
 A security PATCH cut from the v2.40.0 tag. Wire **v12** unchanged (`PREV = 11`); no on-disk change, no public API
-change. It carries #819 and #815 from `main` and nothing else.
+change. It carries #819, #815 and the quinn bump `0acb7b91` from `main`, and nothing else.
 
 ### Upgrade notes
 
@@ -133,6 +133,37 @@ change. It carries #819 and #815 from `main` and nothing else.
   `wasmtime-wasi-io`, `wasmtime-environ`, the `wasmtime-internal-*` crates, wiggle, pulley, cranelift), and nothing
   else. The two other tracked lockfiles hold no wasmtime. The minimum Rust version wasmtime 49 requires (1.96.0, the
   pinned toolchain) is unchanged.
+
+- **`quinn-proto` 0.11.18 → 0.11.19 and `quinn-udp` 0.5.14 → 0.5.16** (main's `0acb7b91`). These answer
+  RUSTSEC-2026-0523, -0524 and -0538, three denial-of-service advisories dated 2026-09-30 and in the advisory database
+  since 2026-11-13.
+  - **-0523:** a MAX_STREAM_DATA frame naming an unopened peer-initiated bidirectional stream opened it and every
+    lower-numbered one without checking the advertised stream limit. One small frame hands an accepting endpoint more
+    than 2^40 streams (`quinn-proto` 0.11.0–0.11.18).
+  - **-0524:** a QUIC client kept a Retry packet's token without a length limit. A long one makes the next transmit
+    panic (debug) or attempt an allocation above 10 GiB (release), and anyone who sees the client's first Initial can
+    send it (`quinn-proto` 0.11.0–0.11.18).
+  - **-0538:** on targets that read one datagram per `recvmsg` (Apple without `fast-apple-datapath`, OpenBSD, NetBSD,
+    Solaris, illumos), the receive loop spins after a truncated datagram. Linux, Android, FreeBSD and Windows are not
+    affected (`quinn-udp` below 0.5.16, and 0.6.0–0.6.2).
+
+  **Not reachable here, in any build:** no QUIC code is compiled. `quinn` is in the root lockfile only as an optional
+  dependency of `reqwest` 0.12.28 and 0.13.5, which their `http3` feature turns on. No manifest in the workspace
+  enables it, and `cargo tree --locked --workspace --all-features --target all -e all` lists no `quinn` crate. The
+  entry stays in the lockfile because `reqwest`'s TLS features name `quinn?/…`. An adopter is exposed only by enabling
+  `reqwest`'s `http3` in their own build, where their own lockfile decides the version.
+
+  **Affected lockfiles:** the root one, through v2.40.0. `fuzz/Cargo.lock` was already on 0.11.19 / 0.5.16, and
+  `examples/conway-gpu/Cargo.lock` carries no `quinn`. This is a lockfile change only: the version and checksum lines
+  of the two packages, nothing else. `quinn` itself stays at 0.11.9. No API change.
+
+  **Check:** `grep -A1 -E '^name = "quinn-(proto|udp)"$' Cargo.lock` shows `0.11.19` and `0.5.16`, and
+  `cargo audit --deny warnings -f Cargo.lock` reports none of the three.
+
+  **Also in CI:** the audit step accepts `chrono` (RUSTSEC-2026-0543) and `humantime` (RUSTSEC-2026-0542), both marked
+  *unmaintained*, with no defect and no fixed version. They are dated in the open, as on `main` (2026-11-17,
+  rust-ecosystem-watch W9). Both reach the tree only through `object_store` 0.14.2, the wasm host's optional feature,
+  and Mycelium calls neither.
 
 ## [2.40.0] — 2026-11-12
 
