@@ -2078,7 +2078,7 @@ unless it says debug, two in-process nodes on loopback, one run, 2026-11-20, oth
   4. **Recorded 2026-11-21 (the maintainer's decisions on §9 O11):** WAL group commit is two PRs. **O11-1**, group
      commit in the writer, is delivered (#824): `a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog`
      passes un-ignored. **O11-2**, the inbound reader stops awaiting a per-record sync under `flush`, is next; exit 14's
-     `flush` soak waits on it, so this row stays open until O10's PR, O11-2 and that soak. The journals' writers are
+     `flush` soak waits on it, so this row stays open until O11-2 and that soak (O10's PR, #821, has merged). The journals' writers are
      §9 O12, not this row.
 - *"This row closed"* — **not built.** Exit 14 is not met over a gateway that keeps exit 11's promise. The other
   seventeen exits are quoted beside their evidence below, so that the PR that fixes the finding and re-runs the soak
