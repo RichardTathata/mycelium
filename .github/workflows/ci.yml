@@ -1127,7 +1127,7 @@ jobs:
               # 2026-11-17 — `chrono` 0.4.45 (RUSTSEC-2026-0543) and `humantime` 2.4.0 (RUSTSEC-2026-0542), both
               # *unmaintained* (no defect advisory, no fixed version). Both reach the tree only through `object_store`
               # 0.14.2, the wasm host's optional `object_store` feature: in the published stem, in no node binary.
-              # Mycelium calls neither. The maintainer accepted them on 2026-11-17 (rust-ecosystem-watch W9); a defect
+              # Mycelium calls neither. The maintainer accepted them on 2026-11-17 (rust-ecosystem-watch W9 on `main`); a defect
               # in either would be a new advisory id and still fail this step. Remove when `object_store` drops them.
               Cargo.lock) ignore=(--ignore RUSTSEC-2026-0543 --ignore RUSTSEC-2026-0542) ;;
             esac

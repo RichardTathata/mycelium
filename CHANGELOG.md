@@ -77,14 +77,14 @@ change. It carries #819, #815 and the quinn bump `0acb7b91` from `main`, and not
   **was really revoked**, and revocation is monotonic.
 
 - **`wasmtime` / `wasmtime-wasi` 49.0.5 → 49.0.7**, with the cranelift family 0.136.5 → 0.136.7 and pulley and wiggle
-  49.0.5 → 49.0.7 (#815). These answer eight advisories published 2026-11-16, each fixed in 49.0.6; 49.0.7 is the
-  current 49.x.
+  49.0.5 → 49.0.7 (#815). These answer nine advisories: eight published 2026-11-16, each fixed in 49.0.6, and
+  RUSTSEC-2026-0587, dated 2026-11-19 and fixed in 49.0.7, the current 49.x.
 
   **Check whether you are affected:** a node links wasmtime only if it hosts WASM components, that is if it runs
-  `mycelium-stem` or a binary that links `mycelium-wasm-host`. **None of the eight is reachable through the host as it
+  `mycelium-stem` or a binary that links `mycelium-wasm-host`. **None of the nine is reachable through the host as it
   is configured**, so no hosted component can use them against a node. The bump is here because the vulnerable versions
   were linked. After upgrading, `grep -A1 '^name = "wasmtime"$' Cargo.lock` in the build shows `49.0.7`, and
-  `cargo audit -f Cargo.lock` no longer reports RUSTSEC-2026-0566 to -0573.
+  `cargo audit -f Cargo.lock` no longer reports RUSTSEC-2026-0566 to -0573 or -0587.
 
   Each was read from the upstream advisory and checked against the host's code (`mycelium-wasm-host/src/host.rs`,
   `mycelium-wasm-host/Cargo.toml`). A guest here is a component the node installed. On a node installing only what
@@ -120,12 +120,19 @@ change. It carries #819, #815 and the quinn bump `0acb7b91` from `main`, and not
   - **RUSTSEC-2026-0569** (low): a panic in `Caller::get_module_export`. Not reachable. It affects core WebAssembly
     only, not components (the advisory), and the crate has no `Caller`: it instantiates components only, through the
     generated bindings.
+  - **RUSTSEC-2026-0587** (`wasmtime-wasi`, dated 2026-11-19, fixed in 49.0.7): a WASI filesystem sandbox escape on
+    **Windows** through a drive-prefixed path component (GHSA-f2pq-268w-886c). Not reachable, for two reasons. First,
+    the advisory affects Windows only (`os = ["windows"]`), and no published binary is built for Windows: the Release
+    workflow builds Linux x86_64 and aarch64 and macOS aarch64. Second, a path escape needs a preopened directory to
+    resolve against, and the host preopens none. The only WASI context a component gets is
+    `WasiCtxBuilder::new().build()` (`mycelium-wasm-host/src/host.rs:195`), and the crate calls no `preopened_dir`.
+    An embedder building the host for Windows would still preopen nothing through this crate.
 
   **Affected releases:** v2.38.3, v2.39.0 and v2.40.0 link wasmtime 49.0.5. Earlier releases with the WASM host link
   older wasmtime (45.0.3 at v2.0.0 through 49.0.4 at v2.38.2). Those versions are inside the ranges of -0566, -0567,
-  -0569 and -0571 throughout, of -0572 from wasmtime 46.0.0, and of -0568, -0570 and -0573 from 47.0.0. The host's
-  engine configuration, WASI context and linker calls at the three 49.0.5 tags are the ones read here, so none of the
-  eight is reachable in them either. A node built without `mycelium-wasm-host` does not link wasmtime.
+  -0569, -0571 and (on Windows) -0587 throughout, of -0572 from wasmtime 46.0.0, and of -0568, -0570 and -0573 from
+  47.0.0. The host's engine configuration, WASI context and linker calls at the three 49.0.5 tags are the ones read here, so none of the
+  nine is reachable in them either. A node built without `mycelium-wasm-host` does not link wasmtime.
 
   wasmtime 49.0.7's feature table is identical to 49.0.5's (`default` included, and `wasmtime-wasi`'s too), so
   `mycelium-wasm-host`'s list (every default but `cache`) needs no change and `zstd` stays out of the tree. This is a
@@ -162,7 +169,7 @@ change. It carries #819, #815 and the quinn bump `0acb7b91` from `main`, and not
 
   **Also in CI:** the audit step accepts `chrono` (RUSTSEC-2026-0543) and `humantime` (RUSTSEC-2026-0542), both marked
   *unmaintained*, with no defect and no fixed version. They are dated in the open, as on `main` (2026-11-17,
-  rust-ecosystem-watch W9). Both reach the tree only through `object_store` 0.14.2, the wasm host's optional feature,
+  rust-ecosystem-watch W9 on `main`; the watch file on this line stops at W7). Both reach the tree only through `object_store` 0.14.2, the wasm host's optional feature,
   and Mycelium calls neither.
 
 ## [2.40.0] — 2026-11-12
