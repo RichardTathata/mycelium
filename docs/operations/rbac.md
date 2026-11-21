@@ -282,7 +282,8 @@ call waits for a supervisor's grant and is refused on silence. Running it needs:
   pushes them as server-sent events: `grant_request` once each, `grant_answered` for each issue, refusal or
   revocation, `grant_expired` for one that lapses unanswered.
 - **Answering.** `POST /gateway/grants/{agent}/{request}` with `{"decision": "issue" | "refuse", "ttl_secs": …,
-  "reason": …}`; `ttl_secs` defaults to 300 and is capped at 3 600. The door's own refusals: `404 unknown_request`,
+  "reason": …, "shown": {"tool", "resource", "arguments_digest", "request_expires_at_ms"}}` — `shown` read from the
+  pending row (I7-S, below; without it the answer is `403 decision_names_nothing` by default); `ttl_secs` defaults to 300 and is capped at 3 600. The door's own refusals: `404 unknown_request`,
   `409 already_answered`, `409 not_a_member` (an agent on no member node this gateway knows), `410 expired`.
 - **Signed decisions.** A supervisor with a client certificate signs its answer (`"signed": {...}`, the SDKs'
   `signer=`), and the node records the signer as the actor; a client carrying it needs only `grant:relay`. The

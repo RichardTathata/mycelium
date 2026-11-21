@@ -34,7 +34,9 @@ This feature is turned on in code.
 - [`gw_grants_pending`](../../src/agent/http/grants.rs), [`gw_grant_decide`](../../src/agent/http/grants.rs) and
   [`gw_grant_revoke`](../../src/agent/http/grants.rs) — the supervisor's door: `GET /gateway/grants/pending`
   (`grant:read`), `POST /gateway/grants/{agent}/{request}` (`grant:issue`, or `grant:relay` with `signed`) with
-  `{"decision": "issue"|"refuse", "ttl_secs", "reason", "signed"?}`, and `POST /gateway/grants/{agent}/{request}/revoke`
+  `{"decision": "issue"|"refuse", "ttl_secs", "reason", "shown"}` — or `"signed"`, naming the block inside it — (the
+  block is the request record's tool, resource, digest and expiry; a decision naming none is `403
+  decision_names_nothing` by default, below), and `POST /gateway/grants/{agent}/{request}/revoke`
   (`grant:issue`, or `grant:relay` with `signed`) with `{"reason", "signed"?}` at the node that issued (signed decisions
   below). Issuing, refusing and revoking are actions the evaluator sees (`grant.issue` · `grant.refuse` ·
   `grant.revoke` on `tool:{tool}@{agent node}`, the caller as the actor; a `503 not_durable` on revoke means the supervisor
@@ -158,8 +160,9 @@ This feature is turned on in code.
     - compares the block with that record field by field — the digest **byte for byte, as the record writes it**, never
       recomputed (a request recorded under the pre-I3 form is named in that form) — and refuses a difference `409
       decision_names_another_request`, naming the field, counted (`/stats` `grant_decisions_naming_another`,
-      `mycelium_gateway_decisions_mismatched_total{field}`), before the evaluator is asked; a block whose expiry has
-      passed is `410 expired`;
+      `mycelium_gateway_decisions_mismatched_total{field}`), before the evaluator is asked; then an answer already
+      written is `409 already_answered` — also for a re-send after the request's window — and only then is a block
+      whose expiry has passed `410 expired`;
     - refuses a consent decider's issue or refusal with no block `decision_shown_missing`, a block with no grade `400
       decision_shown_ungraded`, a block on a revocation `400 decision_shown_on_revoke` (a revocation names the grant at
       its path), and a signed body with `shown` beside `signed` `400 bad_request`;
@@ -200,7 +203,8 @@ This feature is turned on in code.
     in [`src/agent/grant_shown_tests.rs`](../../src/agent/grant_shown_tests.rs):
     `a_record_another_member_rewrote_after_the_decider_read_it_is_refused_naming_the_field` (a second member rewrites
     each field over gossip), `a_record_that_disagrees_with_itself_is_refused_signed_or_not` and
-    `a_decision_naming_nothing_is_refused_by_default_and_admitted_counted_under_the_opt_out`; the vector's
+    `a_decision_naming_nothing_is_refused_by_default_and_admitted_counted_under_the_opt_out` and
+    `an_answered_decision_re_sent_after_the_window_is_told_it_was_answered`; the vector's
     `the_shown_decision_vector_is_the_same_in_every_language`.
   - **Not built:** M-of-N decisions; an `oidc:` decider (key-less); a decider whose scopes come from anything but this
     gateway's named tokens (OIDC groups, positional tokens); a relay at an un-upgraded gateway, which refuses

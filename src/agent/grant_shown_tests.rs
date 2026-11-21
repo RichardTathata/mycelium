@@ -251,3 +251,36 @@ async fn a_decision_naming_nothing_is_refused_by_default_and_admitted_counted_un
     assert_eq!((signed.0, bearer.0, named.0), (200, 200, 200), "OPT-OUT: {} / {} / {}", signed.1, bearer.1, named.1);
     assert_eq!(stats["grant_decisions_unnamed"].as_u64(), Some(2), "COUNTED: each unnamed decision answered: {stats}");
 }
+
+/// **An honest re-send of an answered decision is told it was answered, after the request's window too** (#820's
+/// review, M1). A decider whose answer timed out re-sends the same signed body. The request's window is 2 s; the
+/// signature stays fresh far longer. Issued `200`, re-sent at once `409 already_answered`, and re-sent once the window
+/// has passed: still `409 already_answered` — never `410 expired … the agent has refused the call` while the grant it
+/// issued stands. Seen failing first with the block's expiry checked before `already_answered` (the third answer was
+/// `410 expired`, the grant issued).
+#[tokio::test]
+async fn an_answered_decision_re_sent_after_the_window_is_told_it_was_answered() {
+    let dir = scratch("shown-resend");
+    let http_port = alloc_port();
+    let (a, _) = started(&dir, http_port).await;
+    let _ = forecaster_key(&a, &dir);
+    let treasurer = client_key_in(&a, &dir.join("tls"), &dir.join("client-treasurer"), "treasurer");
+    let (status, asked) = http(http_port, "fc-secret", reqwest::Method::POST, "/gateway/grants/request", Some(serde_json::json!({"tool": TOOL, "arguments": {"city": "Lyon"}, "window_secs": 2}))).await;
+    assert_eq!(status, 200, "{asked}");
+    let request = asked["request"].as_str().unwrap().to_string();
+    let shown = asked_block(&request).expect("asked here");
+    let node = a.node_id().to_string();
+    let body = serde_json::json!({"decision": "issue", "ttl_secs": 600, "signed": crate::sign_grant_decision_naming(&treasurer, DECIDER, &node, FORECASTER, &request, "issue", Some(600), None, mycelium_core::sim_seam::wall_now_ms(), &shown)});
+    let first = post_decision(http_port, "relay-secret", &request, body.clone()).await;
+    let again = post_decision(http_port, "relay-secret", &request, body.clone()).await;
+    let lapsed = until(|| a.task_ctx.hlc.decision_now_ms() > shown.request_expires_at_ms + 50, Duration::from_secs(10)).await;
+    let after = post_decision(http_port, "relay-secret", &request, body).await;
+    let issued = mycelium_core::ops::kv_get(&a.task_ctx, &format!("{}/issued", record_key(&request))).is_some();
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(first.0, 200, "{}", first.1);
+    assert_eq!(code(&again), (409, Some("already_answered".into())), "{}", again.1);
+    assert!(lapsed, "the request's window passed");
+    assert_eq!(code(&after), (409, Some("already_answered".into())), "RE-SENT AFTER THE WINDOW: {}", after.1);
+    assert!(issued, "the grant stands");
+}

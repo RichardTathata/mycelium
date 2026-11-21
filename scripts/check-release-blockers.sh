@@ -47,10 +47,10 @@
 #   (`scripts/check-shipped-ca-generation-refusal.sh`). This check only makes removing the early refusal a red build.
 #
 #   A third blocker, not an OID (the maintainer's decision of 2026-11-18; #813's review, F1):
-#   `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN`, in the same file. A consent decision's signature does not name
-#   the tool, resource or digest the approver was shown, so an approval can be moved to another call and replayed.
-#   No release may carry consent decisions while it is `true`; the PR that makes the approver sign what it saw
-#   (the plan's row I7-S) sets it `false`.
+#   `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN`, in the same file. Since I7-S's first PR a signed decision names
+#   what its decider saw, so it can no longer be moved to another call; it can still be replayed for the same request
+#   once its answer (`…/issued`) is removed, until I7-S's second PR (the node's own record of answered requests). No
+#   release may carry consent decisions while it is `true`; that second PR sets it `false`.
 #
 # USAGE
 #   scripts/check-release-blockers.sh [--release] [tls.rs path]
@@ -177,7 +177,7 @@ for constant in CONSENT_GRADE_OID_IS_PROVISIONAL CA_GENERATION_OID_IS_PROVISIONA
   fi
   if [[ "$line" == *"= true;"* ]]; then
     if [[ "$constant" == CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN ]]; then
-      msg="release blocked: ${constant} is true in $file — a consent decision's signature does not name the tool, resource or digest the approver was shown, so an approval can be moved to another call and replayed (identity-and-lifecycle I7-S: the approver signs what it saw; RELEASING.md § 2)"
+      msg="release blocked: ${constant} is true in $file — a signed grant decision can be replayed for the same request once its answer (…/issued) is removed, until the node keeps its own record of answered requests (identity-and-lifecycle I7-S, PR 2; RELEASING.md § 2)"
     else
       msg="release blocked: ${constant} is true in $file — the OID is the documentation-PEN placeholder until the registered IANA PEN arc replaces it (identity-and-lifecycle I7 and I2; RELEASING.md § 2)"
     fi

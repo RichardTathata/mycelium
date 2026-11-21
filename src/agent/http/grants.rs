@@ -474,19 +474,24 @@ pub(crate) async fn decide_grant(
         return disagrees("resource", format!("{resource} is not tool:{tool}@{node}"));
     }
     // What the decider saw, against the record (I7-S): a member who rewrote the record after it was read moves no
-    // decision onto it. Checked before the answer is, so a rewritten answered request names the rewrite.
+    // decision onto it. Compared before the answer is read, so a rewritten answered request names the rewrite; the
+    // block's expiry after it.
     if let Some(named) = named {
         let held = crate::agent::grant_decision::Shown::new(tool, resource, digest, rec["expires_at_ms"].as_u64().unwrap_or(0));
         if let Some(field) = named.differs_from(&held) {
             ctx.unsigned_actions.note_naming_another(field);
             return Err(GrantRefusal::door(StatusCode::CONFLICT, "decision_names_another_request", format!("the decision names {field} {}; this node's record {key} names {} — the record was rewritten after the decider read it, or the decision is for another request", shown_field(named, field), shown_field(&held, field))));
         }
-        if named.request_expires_at_ms <= now_ms {
-            return Err(GrantRefusal::door(StatusCode::GONE, "expired", format!("{key} expired at {} by the decision's own block; the agent has refused the call", named.request_expires_at_ms)));
-        }
     }
+    // An answer already written is said as such, before any expiry: an honest re-send after the window is told it
+    // was answered, never that the agent refused the call (#820's review, M1).
     if mycelium_core::ops::kv_get(ctx, &format!("{key}/issued")).is_some() || mycelium_core::ops::kv_get(ctx, &format!("{key}/refused")).is_some() {
         return Err(GrantRefusal::door(StatusCode::CONFLICT, "already_answered", format!("{key} was already issued or refused")));
+    }
+    if let Some(named) = named
+        && named.request_expires_at_ms <= now_ms
+    {
+        return Err(GrantRefusal::door(StatusCode::GONE, "expired", format!("{key} expired at {} by the decision's own block; the agent has refused the call", named.request_expires_at_ms)));
     }
     if rec["expires_at_ms"].as_u64().is_none_or(|e| e <= now_ms) {
         return Err(GrantRefusal::door(StatusCode::GONE, "expired", format!("{key} expired; the agent has refused the call")));

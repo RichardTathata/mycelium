@@ -531,7 +531,8 @@ ttlSecs, reason })` posts the answer to `POST /gateway/grants/{agent}/{request}`
 tool, resource, digest and expiry (`shownFromRecord`) — and the node refuses it if its own record says otherwise
 (`decision_names_another_request`). The ids-only `grantDecide(agent, request, decision)` is `@deprecated`: a gateway
 after identity-and-lifecycle I7-S refuses it (`decision_names_nothing`) unless its operator sets
-`gateway_accept_unnamed_decisions`;
+`gateway_accept_unnamed_decisions`. Upgrade the gateways first: one before I7-S refuses a signed decision naming the
+block, and **admits a bearer's `shown` while ignoring it** (no comparison);
 issuing is itself an action the node's evaluator decides, so a refusal is the route's 403, and 409 `not_a_member`
 names an agent on no member node this gateway knows. A node's grant is presented by its holder, the agent's node; a client's own grant by the client (below). `grantRevoke(agent, request, {
 reason })` revokes at the issuing node, and `grantsStream()` is the requests as they come (an async generator of

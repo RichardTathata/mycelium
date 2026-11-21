@@ -108,6 +108,24 @@ def test_the_ids_only_form_is_deprecated_and_names_nothing(stub):
     assert [(m, p, b) for m, p, b, _ in _Stub.seen] == [("POST", "/gateway/grants/node%3A127.0.0.1%3A7946/r1", {"decision": "issue", "ttl_secs": 120})]
 
 
+def test_every_deprecated_shape_still_posts_for_the_window(stub):
+    # #820's review, L1: the ids-only call kept for one release in each shape a caller may have written — positional,
+    # the decision by keyword, all by keyword — and the record form by keyword too.
+    agent = MyceliumAgent("127.0.0.1", stub, token="super")
+    with pytest.warns(DeprecationWarning):
+        agent.grant_decide("node:127.0.0.1:7946", "r1", decision="issue")
+    with pytest.warns(DeprecationWarning):
+        agent.grant_decide(agent="node:127.0.0.1:7946", request="r2", decision="refuse", reason="no")
+    agent.grant_decide(record=_row("r3"), decision="issue")
+    assert [(p, b) for _, p, b, _ in _Stub.seen] == [
+        ("/gateway/grants/node%3A127.0.0.1%3A7946/r1", {"decision": "issue"}),
+        ("/gateway/grants/node%3A127.0.0.1%3A7946/r2", {"decision": "refuse", "reason": "no"}),
+        ("/gateway/grants/node%3A127.0.0.1%3A7946/r3", {"decision": "issue", "shown": SHOWN}),
+    ]
+    with pytest.raises(TypeError):
+        agent.grant_decide(_row("r4"), "issue", decision="issue")
+
+
 def test_a_record_lacking_a_field_it_names_is_refused_before_it_is_sent(stub):
     agent = MyceliumAgent("127.0.0.1", stub, token="super")
     for field in ("tool", "resource", "arguments_digest", "expires_at_ms"):

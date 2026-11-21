@@ -5582,12 +5582,16 @@ TypeScript. Wire v12 is unchanged: everything is in the decision's body.
   hole open by default for another release.
 - `410 expired` — also from the block's own expiry.
 
-**What you do.** Upgrade the gateways — the nodes decisions are addressed to — **before** any signer names the block:
-a node before I7-S refuses a body carrying `shown` (an unknown field). Then move the deciders to the record form:
+**What you do.** Upgrade the gateways — the nodes decisions are addressed to — **before** any decider names the block.
+A node before I7-S refuses a **signed** body carrying `signed.shown` (an unknown field of `SignedDecision`), but
+**admits a bearer's top-level `shown` and ignores it** — no comparison and no signal — since the decision body there
+is not strict; so for bearer deciders the order is not enforced, and a new SDK against an old gateway is as exposed
+as before. Then move the deciders to the record form:
 - Python `mycelium-py` 0.2.16: `agent.grant_decide(record, "issue", ttl_secs=…, signer=…)`, `record` a row of
   `grants_pending()` or a `grant_request` event; `ClientSigner.sign_grant_decision(…, shown=shown_from_record(record))`.
-  `grant_decide(agent, request, decision)` is kept, deprecated (`DeprecationWarning`), and names nothing. The first
-  two parameters are now positional-only in effect: a call passing `agent=` or `request=` by name fails.
+  `grant_decide(agent, request, decision)` is kept, deprecated (`DeprecationWarning`), and names nothing — in each shape
+  it was called in: positional, `decision=` by keyword, or `agent=`, `request=` and `decision=` all by keyword;
+  `record=` by keyword is the new form.
 - TypeScript `mycelium-ts` 0.2.10: `agent.grantDecide(record, "issue", { signer })`; `signGrantDecision(…, { shown:
   shownFromRecord(record) })`. `grantDecide(agent, request, decision)` is kept, `@deprecated`, and names nothing.
 - Rust: `ClientSigner::sign_grant_decision_naming(node, &record, decision, ttl, reason)`,
@@ -5612,7 +5616,8 @@ fence), not built; `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN` stays `true` 
 - Test: in `src/agent/grant_shown_tests.rs`,
   `a_record_another_member_rewrote_after_the_decider_read_it_is_refused_naming_the_field`,
   `a_record_that_disagrees_with_itself_is_refused_signed_or_not`,
-  `a_decision_naming_nothing_is_refused_by_default_and_admitted_counted_under_the_opt_out`; in
+  `a_decision_naming_nothing_is_refused_by_default_and_admitted_counted_under_the_opt_out`,
+  `an_answered_decision_re_sent_after_the_window_is_told_it_was_answered`; in
   `src/agent/dev_consent_tests.rs`, `dev_names_what_it_showed_and_a_rewrite_after_its_second_read_is_refused`,
   `dev_approves_a_request_recorded_under_the_legacy_digest`; the vector,
   `the_shown_decision_vector_is_the_same_in_every_language` (Rust, jest, pytest).

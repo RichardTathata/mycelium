@@ -788,14 +788,15 @@ class MyceliumAgent:
 
     def grant_decide(
         self,
-        record: Any,
+        *args: Any,
+        record: Optional[Dict[str, Any]] = None,
         decision: Optional[str] = None,
-        legacy_decision: Optional[str] = None,
-        *,
         ttl_secs: Optional[int] = None,
         reason: Optional[str] = None,
         signer: Optional[Any] = None,
         node: Optional[str] = None,
+        agent: Optional[str] = None,
+        request: Optional[str] = None,
     ) -> Dict[str, Any]:
         """``POST /gateway/grants/{agent}/{request}`` (``grant:issue``, or ``grant:relay`` with ``signer``): answer a
         pending request.
@@ -804,9 +805,10 @@ class MyceliumAgent:
         **names what was decided on** (identity-and-lifecycle I7-S): its tool, resource, arguments digest and expiry
         (:func:`~mycelium.shown_from_record`) — signed inside the decision with ``signer``, sent beside it without.
         The node compares them with its own record and refuses a difference by name, so a record rewritten after it
-        was read here is not the one decided. ``grant_decide(agent, request, decision)`` — ids only, naming nothing —
-        is kept for one release, deprecated: a gateway after I7-S refuses it (``decision_names_nothing``) unless its
-        operator sets ``gateway_accept_unnamed_decisions``.
+        was read here is not the one decided: ``grant_decide(record, decision)`` (``decision`` positional or by
+        keyword). The ids-only shapes — ``grant_decide(agent, request, decision)``, with ``decision`` or all three by
+        keyword — name nothing and are kept for one release, deprecated: a gateway after I7-S refuses them
+        (``decision_names_nothing``) unless its operator sets ``gateway_accept_unnamed_decisions``.
 
         With ``signer`` (a :class:`~mycelium.ClientSigner` for a principal holding a client certificate and
         ``grant:issue`` at the node), the decision is signed (identity-and-lifecycle I3): the node records the signer
@@ -842,13 +844,29 @@ class MyceliumAgent:
         """
         from .client_sig import shown_from_record
 
-        if isinstance(record, dict):
-            if legacy_decision is not None:
+        shown: Optional[Dict[str, Any]] = None
+        if record is not None:
+            if args:
+                raise TypeError("grant_decide(record, decision): the record given once")
+            args = (record,)
+        if args and isinstance(args[0], dict):
+            if len(args) > 2 or (len(args) == 2 and decision is not None) or agent is not None or request is not None:
                 raise TypeError("grant_decide(record, decision): a record names its agent and request")
+            record = args[0]
+            decision = args[1] if len(args) == 2 else decision
             agent, request, shown = record.get("agent"), record.get("request"), shown_from_record(record)
             if not isinstance(agent, str) or not isinstance(request, str):
                 raise ValueError("a request record names its agent and request")
         else:
+            # The deprecated ids-only shapes: positional, partly keyword, or all keyword.
+            ids = list(args) + [None] * (3 - len(args))
+            if len(args) > 3 or (len(args) >= 1 and agent is not None) or (len(args) >= 2 and request is not None) or (len(args) == 3 and decision is not None):
+                raise TypeError("grant_decide(agent, request, decision): each given once")
+            agent = ids[0] if len(args) >= 1 else agent
+            request = ids[1] if len(args) >= 2 else request
+            decision = ids[2] if len(args) == 3 else decision
+            if not isinstance(agent, str) or not isinstance(request, str):
+                raise TypeError("grant_decide(record, decision), or the deprecated grant_decide(agent, request, decision)")
             import warnings
 
             warnings.warn(
@@ -858,7 +876,6 @@ class MyceliumAgent:
                 DeprecationWarning,
                 stacklevel=2,
             )
-            agent, request, decision, shown = record, decision, legacy_decision, None
         if decision not in ("issue", "refuse"):
             raise ValueError('decision must be "issue" or "refuse"')
         body: Dict[str, Any] = {"decision": decision}
