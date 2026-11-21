@@ -622,7 +622,7 @@ attempt it holds; the argument above then needs every other adopter of `k` to re
   member and the carrier, neither holds the decision's record yet (the predecessor's proposer stopped, or lagged,
   after it committed), and the carry adopts the outvoted acceptance. It is **detected, not prevented**: the carry is
   counted on `commit_conflicts` and `mycelium_electorate_carry_conflicts_total` and the completion reports the slot.
-  - **By default (2.41.0) this stands.** A carrier without `consensus_record_acceptance_group` carries as 2.40.0
+  - **By default (2.41.0) this stands.** A carrier without `consensus_record_acceptance_group` carries as 2.40.1
     did, whatever the members record. Where the carrier holds the predecessor's record the carry instead never
     decides — the carrier's own acceptor refuses its proposal of the adopted value at every ballot — and leaves that
     value accepted by a majority of the successor.
@@ -801,7 +801,7 @@ skipped only when the successor may not decide them at all.
 group count allowed to be zero and, after the groups, where the acceptance was made: `0x00` outside any electorate
 group, or `0x01` and a length-prefixed group name. A node from 2.41.0 reads `0x02`–`0x05` and keeps the group in
 memory whatever its configuration; it **writes** `0x05` only with `consensus_record_acceptance_group`, so with the
-switch off its records are byte-identical to 2.40.0's while no `0x05` record is in its store. **A 2.40.0 node reads
+switch off its records are byte-identical to 2.40.1's while no `0x05` record is in its store. **A node at 2.40.1 or earlier reads
 `0x05` as no record**: restarted over such a record it has forgotten that promise and acceptance, and its guard
 cannot decode a peer's copy either. With the switch on every acceptance is `0x05`, cluster-scoped and electorate
 slots included. So the switch goes on only when every node is at 2.41.0 or later, and a fleet that has turned it on

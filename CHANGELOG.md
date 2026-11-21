@@ -19,12 +19,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   after it, whichever thread runs it (`revocation::fold_ticket`, `refresh_answers`). The succession tests' fold and
   durability waits are bounded at 30 s. A change of roots also waits the same way for the client-certificate fold,
   which it documented and did not do.
-- **An identity or client-certificate change that arrives just as a fold ends is folded** (2.40.0 and earlier; found
+- **An identity or client-certificate change that arrives just as a fold ends is folded** (2.40.1 and earlier; found
   by #822's review). A call made while a fold was ending could see the fold running, and the fold could then finish
   without seeing the call's request. The change was then applied only at the next trigger: another record, or the
   maintenance tick, 60 s or more later. A call now records its request before it checks for a running fold, and a
   fold that ends checks for requests after it stops (`src/agent/single_flight.rs`). A panic in a fold no longer
-  leaves the fold marked running. **What that meant in 2.40.0:** a revocation or certificate record that arrived in
+  leaves the fold marked running. **What that meant in 2.40.0 and 2.40.1:** a revocation or certificate record that arrived in
   that window was not applied on this node until the next identity or revocation record arrived, or until the
   maintenance tick (every `max(60 s, health_check_interval_secs)`). For that long, a revoked key could stay trusted
   here. No patch release: the fix ships with wave 1b.
@@ -36,14 +36,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in the Scaffold job: the run ended `Error: Timeout`). It waited for B's connection only. A has no bootstrap peers
   and sends a reply only to a node in its own peer table, so a call made before A had heard of B lost its reply and
   timed out after 5 s. The wait now holds both peer tables, bounded at 30 s with an error naming it. A project
-  scaffolded by 2.40.0 keeps the old wait: in its `src/main.rs`, replace the `while b.connected_peers().is_empty()`
+  scaffolded by 2.40.1 or earlier keeps the old wait: in its `src/main.rs`, replace the `while b.connected_peers().is_empty()`
   line with this release's four (a comment and three lines of code, `templates/governed-call/src/main.rs`).
 - **The two-domains scaffold's `fleet.sh start` reads only its own start's log** (found as a CI flake in the Scaffold
   job). `start` launched the node with `> data/<node>.log &` and then waited for the log's `up as` line. On a restart
   the previous run's log was still there until the background shell emptied it, so `start` could return on the old
   line before the node was up, or exit 1 printing nothing when the file was emptied between the loop's two reads. The
   README's own sequence reaches it (`bash fleet.sh stop`, then `start-all` or `start kitchen-gw`). `start` now empties
-  the log before it launches, the node appends, and the loop reads once. A project scaffolded by 2.40.0 keeps the old
+  the log before it launches, the node appends, and the loop reads once. A project scaffolded by 2.40.1 or earlier keeps the old
   `fleet.sh`: replace its `start)` case with this release's (`templates/two-domains/fleet.sh`), or remove
   `data/<node>.log` before a restart.
 - **`wire-check` reads an edge to a hosted component as the provider built from the declaration decides a member's
@@ -122,7 +122,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that had not yet applied the removal). No wire change: the SWIM datagram's layout is unchanged, and a probe's gossip sample holds no more entries.
   Every release with SWIM on by default is affected (`deprecations.md` §113).
   - **Upgrade the members, not the seed:** the fix is on the prober's side, so a restarted seed of any version is
-    found again once its peers run this release. A fleet whose members run 2.40.0 keeps the bug.
+    found again once its peers run this release. A fleet whose members run 2.40.1 or earlier keeps the bug.
   - **The cost, for as long as the peer is listed:** one UDP `Ping` per `swim_suspicion_timeout_ms` to each bootstrap
     peer held `Dead`, in turn, each waiting up to `swim_probe_timeout_ms` in its own task. A decommissioned seed left
     in `bootstrap_peers` keeps receiving them; remove it from the list.
@@ -173,10 +173,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     successor; when any is of unknown group, was made outside every group, or names a group outside the lineage,
     it hears all of them, as before. So a carry is never worse off than before, and is sound once nothing in its quorum is unknown. The
     switch becomes the default one MINOR later.
-  - **Every node at this release reads `0x05` and the older tags**, whatever the switch says. **A 2.40.0 node reads
+  - **Every node at this release reads `0x05` and the older tags**, whatever the switch says. **A node at 2.40.1 or earlier reads
     `0x05` as no record**, which is why writing it is not the default yet.
-  - **With the switch off a node's carry is the 2.40.0 carry, message for message**, and its records are
-    byte-identical to 2.40.0's while no `0x05` record is in its store. The gap stands, pinned by four tests and
+  - **With the switch off a node's carry is the 2.40.1 carry, message for message**, and its records are
+    byte-identical to 2.40.1's while no `0x05` record is in its store. The gap stands, pinned by four tests and
     listed on `what-is-proven.md`.
   - **A fix to the acceptor guard (`cons.acceptor_memory`, since 2.32.0):** a second forgotten copy of a node's
     own record, lower than the first but still above memory, was merged with memory alone and written over the

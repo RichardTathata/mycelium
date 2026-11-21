@@ -3243,7 +3243,7 @@ reads `Unknown` (it fails closed).
   `call:` mandate's revocation checkpoints, which only the gateway that issued the mandate writes; a write there
   could hide a call's cancellation from the provider running it. **Who is affected:** an application that keeps its
   own keys under `call/` through the gateway's KV routes. **Check, before upgrading**, on the release you run
-  now (2.40.0 or earlier): `GET /gateway/kv/keys?prefix=call/`, and move such keys to another prefix. From this
+  now (2.40.1 or earlier): `GET /gateway/kv/keys?prefix=call/`, and move such keys to another prefix. From this
   release the routes neither write nor read a key under `call/`, and the listing leaves its names out and answers
   that prefix `403 protected_key` (§99), so the check cannot be made after the upgrade.
 - **Behaviour change — `offer_checkpoint`.** A revocation checkpoint whose scope begins `call:` is kept only while the
@@ -3995,7 +3995,7 @@ the migration, 2.33.0 on.
   messages appended after every earlier one, `CarryPrepareTagged` and `PrepareAckTagged`. It reports what it
   holds, unfiltered, with the group as far as it knows it.
 - **What 2.41.0 changes by default: nothing you can observe.** A node with the switch off writes the records
-  2.40.0 wrote and runs its own carry with the messages 2.40.0 sent. The gap stands, and is detected as before:
+  2.40.1 wrote and runs its own carry with the messages 2.40.1 sent. The gap stands, and is detected as before:
   the carry is counted (`mycelium_electorate_carry_conflicts_total`, `commit_conflicts`) and the completion names
   the slot under `conflicts`.
 - **The switch: `consensus_record_acceptance_group = true`** (env `GOSSIP_CONSENSUS_RECORD_ACCEPTANCE_GROUP`; a new
@@ -4009,7 +4009,7 @@ the migration, 2.33.0 on.
     those made **in the successor** and no other. That is the sound rule: ballot numbers of two groups do not
     compare;
   - any reported acceptance is of unknown group, was made outside every group, or names a group outside the
-    lineage → the carry hears **all** of them, as 2.40.0 did. (A non-exclusive slot can be proposed on an
+    lineage → the carry hears **all** of them, as 2.40.1 did. (A non-exclusive slot can be proposed on an
     unrelated electorate group, and such an acceptance can have replaced one made in the successor on a shared
     member — as a cluster-scoped one can. An ancestor's cannot: a member answers a carry only once the direct
     predecessor's retirement is visible to it, which closes the predecessor there. For an older ancestor that
@@ -4025,16 +4025,16 @@ the migration, 2.33.0 on.
 - **Turn it on only when every node runs 2.41.0 or later, and do not downgrade below 2.41.0 afterwards.**
   - A carry that asks needs a strict majority of the successor at 2.41.0 or later: an older member ignores the
     question, and the carry times out rather than decides.
-  - A 2.40.0 node reads a `0x05` record as no record: restarted over one it has forgotten that promise and
+  - A node at 2.40.1 or earlier reads a `0x05` record as no record: restarted over one it has forgotten that promise and
     acceptance. With the switch on **every** acceptance is written `0x05` — cluster-scoped slots and an
-    electorate's own genesis and retirement slots included — so a downgrade forgets all of them. 2.40.0's guard
+    electorate's own genesis and retirement slots included — so a downgrade forgets all of them. 2.40.1's guard
     (`cons.acceptor_memory`) does not help: it cannot decode a peer's `0x05` copy of the node's own record either,
     so it is blind to exactly these slots.
   - Turning the switch off again stops the writing. A record already `0x05` stays so until its slot is next
     written; that write is the older shape **and drops the group for good**, while memory keeps it until the next
     start — so the acceptance turns from "named" to "unknown" at a later restart, with no configuration change.
 - **It becomes the default one MINOR after 2.41.0.** The default is off now so that a fleet mid-upgrade, or one
-  that rolls back to 2.40.0, loses nothing.
+  that rolls back to 2.40.1 or earlier, loses nothing.
 - **What an acceptance of unknown group costs.** An acceptance made before its node ran 2.41.0, or one whose node
   restarted with the switch off, has no group. A carry whose promise quorum reports one hears everything: for that
   ballot the migration is exactly as exposed as before, never more. The switch protects carries whose quorum
@@ -4605,7 +4605,7 @@ in `mycelium-core/src/swim.rs`.
   tick with SWIM off, as the enforced domain profile runs). Every insert into the peer table re-checks removal after
   it inserts, so a removal landing between the check and the insert still wins.
 - **Who must upgrade:** the fix is on the prober's side. A restarted seed is found again once its **peers** run this
-  release, whatever version the seed runs. A fleet whose members run 2.40.0 keeps the bug.
+  release, whatever version the seed runs. A fleet whose members run 2.40.1 or earlier keeps the bug.
 - **Still not covered:** a node with no bootstrap peers that is in **no one's** `bootstrap_peers`, and that was
   declared `Dead` while it was down, stays partitioned. Rejoin follows bootstrap edges only. List such a node as a
   bootstrap peer of at least one other node.
@@ -4755,7 +4755,7 @@ status are unchanged. Under `gateway_caller_profile = legacy` nothing changes: n
 **API (additive):** `GossipAgent::gateway_sends_to(&NodeId) -> bool` (`gateway`) — the predicate the node's doors use,
 for a companion door that chooses among providers before `ServiceHandle::rpc_call_as` — and
 `GossipAgent::gateway_note_passed_over()`, which counts one such provider under `companion`. `mycelium-reason` 0.12.0
-uses both, so it needs a `mycelium` newer than 2.40.0. `/stats` gains `providers_passed_over_unpromised`.
+uses both, so it needs a `mycelium` newer than 2.40.1. `/stats` gains `providers_passed_over_unpromised`.
 
 Tests: `src/agent/http/marker_race_tests.rs` (each door, the tool entry delivered before the marker, its `data.reason`
 and count; served once it arrives; a tombstoned marker restored by its provider within a period),

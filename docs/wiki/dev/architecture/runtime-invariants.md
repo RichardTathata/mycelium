@@ -175,7 +175,7 @@ and `carry_hears` runs over the whole quorum, the carrier's own memory included 
 the successor's lineage (`ConsensusEngine::lineage`: the successor and the ancestors whose verified electorates
 the carrier holds): only the successor's; any unknown, outside every group, or naming a group outside the lineage:
 all of them, as before. The switch also writes the group to
-the record (tag `0x05`; a 2.40.0 node reads it as no record, hence off by default in 2.41.0). Two shapes not to
+the record (tag `0x05`; a node at 2.40.1 or earlier reads it as no record, hence off by default in 2.41.0). Two shapes not to
 return to: a rule on ballots at the proposer (ballots of two groups do not compare — counting the manifest's
 acceptance as a report lets a re-carry replace the successor's own decision), and a filter at the acceptor (it
 cannot see the other reports; hiding a recorded predecessor acceptance while an unrecorded one is heard decided
