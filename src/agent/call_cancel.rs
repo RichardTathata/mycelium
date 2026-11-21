@@ -30,7 +30,7 @@
 //! |---|---|---|
 //! | on disk | answered | `Ok(CancelReceipt)`, the provider's class |
 //! | on disk | no answer in [`CANCEL_FORWARD_TIMEOUT_MS`], or not sent (no target known) | `Ok(CancelReceipt)`, `DeliveryUnknown` or `NotForwarded` — the KV carries it |
-//! | refused | answered, or not | `Err(CancelRefusal::NotDurable)`: the provider's class is counted (`call_cancel_receipts`) and not returned; call again to write it (idempotent, the forward sent again) |
+//! | refused | answered, or not | `Err(CancelRefusal::NotDurableForwarded { class, .. })`: the provider's class beside the refusal (#821's review, F2); call again to write it (idempotent, the forward sent again) |
 //! | the gateway crashes before it returns | sent, perhaps answered | **no answer at all**: the revocation is in no KV after the restart, and the provider holds it in memory only (D-4) — after a provider restart the call, re-presented inside its window, is admitted |
 //!
 //! A door ([`cancel_at_door`]) forwards on a task of its own and answers once the durable write returns: the door's
@@ -194,6 +194,18 @@ pub enum CancelRefusal {
     /// `call_cancel_receipts` — and this gateway's own authority holds it. No restart of either keeps it, and the KV
     /// does not carry it. Called again, the cancel writes it (the same checkpoint) and forwards it again.
     NotDurable(String),
+    /// **`cancel_call`'s** refusal when the revoking checkpoint is not on disk (#821's review, F2): as
+    /// [`NotDurable`](Self::NotDurable) — forwarded, held in memory only, call again — and with what the provider
+    /// answered the forward, so the caller learns whether its call stopped though the cancel is not durable. `class`
+    /// is [`CancelClass::NotForwarded`] where this gateway did not know the provider (nothing was sent), and
+    /// [`CancelClass::DeliveryUnknown`] where no answer came in time. The doors answer [`NotDurable`](Self::NotDurable):
+    /// they forward on a task of their own and do not wait for its answer.
+    NotDurableForwarded {
+        /// What the provider answered the forward, or why there is no answer.
+        class: CancelClass,
+        /// Why the disk refused the revoking checkpoint.
+        error: String,
+    },
 }
 
 impl std::fmt::Display for CancelRefusal {
@@ -202,6 +214,11 @@ impl std::fmt::Display for CancelRefusal {
             Self::NoIdentity => f.write_str("this gateway has no TLS identity to sign a cancel with"),
             Self::UnknownTerm => f.write_str("this gateway issued no call of that term"),
             Self::NotDurable(e) => write!(f, "the cancel could not be recorded on disk: it is held in memory only, here and at the provider it was forwarded to: {e}"),
+            Self::NotDurableForwarded { class, error } => write!(
+                f,
+                "the cancel could not be recorded on disk: it is held in memory only, here and at the provider it was forwarded to, which answered {}: {error}",
+                class.label()
+            ),
         }
     }
 }
@@ -225,18 +242,33 @@ impl From<super::call_issuer::RevokeRefusal> for CancelRefusal {
 /// record it on disk, the two together (§9 O10: the forward does not wait for the disk), and return what the provider
 /// answered once both are done — `NotDurable` if the disk refused, the forward sent all the same (the module doc's
 /// table). Called again, the revoke is idempotent and the checkpoint is forwarded again.
+///
+/// **The forward runs on a task of its own** (#821's review, F3), as the doors' does: a caller that drops this future
+/// stops neither the forward nor its receipt's count. **Dropping it drops the durable write's wait**: a record the WAL's
+/// writer already holds is still written and synced, but it is not applied to the KV or gossiped (the required-sync
+/// write applies only once its sync returns to it), so until a restart replays the WAL — or the cancel is asked again,
+/// which writes it once more — the revocation reaches the provider only by the forward, and is held there in memory
+/// only.
 pub(crate) async fn cancel(ctx: &Arc<TaskCtx>, term: &str) -> Result<CancelReceipt, CancelRefusal> {
     let pending = super::call_issuer::begin_revoke(ctx, term)?;
-    let forwarded = async {
-        match pending.target.clone() {
-            Some(target) => forward(ctx, target, &pending.checkpoint).await,
+    let (tx, answered) = tokio::sync::oneshot::channel();
+    let (ctx2, checkpoint, target) = (Arc::clone(ctx), pending.checkpoint.clone(), pending.target.clone());
+    ctx.spawn_task(async move {
+        let class = match target {
+            Some(target) => forward(&ctx2, target, &checkpoint).await,
             None => CancelClass::NotForwarded,
-        }
-    };
-    let (class, durable) = tokio::join!(forwarded, super::call_issuer::finish_revoke(ctx, &pending));
-    note_receipt(ctx, &class);
-    durable?;
-    Ok(CancelReceipt { term: term.to_string(), class })
+        };
+        note_receipt(&ctx2, &class);
+        let _ = tx.send(class);
+    });
+    let durable = super::call_issuer::finish_revoke(ctx, &pending).await;
+    // The forward times itself out (`CANCEL_FORWARD_TIMEOUT_MS`); a task gone at shutdown answered nothing.
+    let class = answered.await.unwrap_or(CancelClass::DeliveryUnknown);
+    match durable {
+        Ok(_) => Ok(CancelReceipt { term: term.to_string(), class }),
+        Err(super::call_issuer::RevokeRefusal::NotDurable(error)) => Err(CancelRefusal::NotDurableForwarded { class, error }),
+        Err(other) => Err(other.into()),
+    }
 }
 
 /// Count a receipt by its class.
@@ -286,6 +318,14 @@ fn read_answer(bytes: &[u8]) -> CancelClass {
 pub(crate) struct CallSink {
     term: OnceLock<String>,
     cancelled: AtomicBool,
+    /// What the provider answered the door's forward, once it has (#821's review, F1): the `/a2a` door reads it to
+    /// tell the stop's own answer from a call that completed on its own.
+    forwarded: OnceLock<CancelClass>,
+    forwarded_note: tokio::sync::Notify,
+    /// The `/a2a` door's send answered while its cancel was being recorded: parked here, not in the task table, for
+    /// the cancel to decide (#821's review, F1).
+    #[cfg(feature = "a2a")]
+    parked: OnceLock<super::a2a::Task>,
 }
 
 impl CallSink {
@@ -298,6 +338,46 @@ impl CallSink {
     #[cfg_attr(not(feature = "a2a"), allow(dead_code))] // read by the `/a2a` door's `TaskReservation::complete`
     pub(crate) fn cancel_asked(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Park the send's answer while the cancel decides; `false` if one is parked already.
+    #[cfg(feature = "a2a")]
+    pub(crate) fn park(&self, task: super::a2a::Task) -> bool {
+        self.parked.set(task).is_ok()
+    }
+
+    /// The send's answer, if one was parked while the cancel ran.
+    #[cfg(feature = "a2a")]
+    pub(crate) fn parked(&self) -> Option<&super::a2a::Task> {
+        self.parked.get()
+    }
+
+    /// **What the provider answered the door's forward**, waiting up to `within_ms` for it (the forward times itself
+    /// out at [`CANCEL_FORWARD_TIMEOUT_MS`]). `None`: no answer was noted in time — read as no stop seen.
+    #[cfg_attr(not(feature = "a2a"), allow(dead_code))] // read by the `/a2a` door
+    pub(crate) async fn forwarded_class(&self, within_ms: u64) -> Option<CancelClass> {
+        let deadline = mycelium_core::sim_seam::mono_instant() + Duration::from_millis(within_ms);
+        loop {
+            let noted = self.forwarded_note.notified();
+            tokio::pin!(noted);
+            noted.as_mut().enable();
+            if let Some(class) = self.forwarded.get() {
+                return Some(class.clone());
+            }
+            let left = deadline.saturating_duration_since(mycelium_core::sim_seam::mono_instant());
+            if left.is_zero() {
+                return None;
+            }
+            tokio::select! {
+                _ = noted => {}
+                _ = mycelium_core::sim_seam::sleep_ms("authority/cancel-forwarded", left.as_millis() as u64) => {}
+            }
+        }
+    }
+
+    fn note_forwarded(&self, class: &CancelClass) {
+        let _ = self.forwarded.set(class.clone());
+        self.forwarded_note.notify_waiters();
     }
 }
 
@@ -339,12 +419,12 @@ pub(crate) enum DoorCancel {
 /// **forward it on a task of its own at once** (§9 O10), and record it on disk, awaited, so the door answers only once
 /// that is recorded. A door answers what is known when it answers (Q2): that the gateway revoked and recorded the
 /// cancel, never the provider's stop. `Err(NotDurable)`: the disk refused, and the forward was sent all the same.
-pub(crate) async fn cancel_at_door(ctx: &Arc<TaskCtx>, sink: &CallSink) -> Result<DoorCancel, CancelRefusal> {
+pub(crate) async fn cancel_at_door(ctx: &Arc<TaskCtx>, sink: &Arc<CallSink>) -> Result<DoorCancel, CancelRefusal> {
     sink.cancelled.store(true, Ordering::SeqCst);
     std::sync::atomic::fence(Ordering::SeqCst);
     let Some(term) = sink.term().map(str::to_string) else { return Ok(DoorCancel::BeforeMint) };
     let pending = super::call_issuer::begin_revoke(ctx, &term)?;
-    let (ctx2, checkpoint, target) = (Arc::clone(ctx), pending.checkpoint.clone(), pending.target.clone());
+    let (ctx2, checkpoint, target, sink2) = (Arc::clone(ctx), pending.checkpoint.clone(), pending.target.clone(), Arc::clone(sink));
     ctx.spawn_task(async move {
         let class = match target {
             Some(target) => forward(&ctx2, target, &checkpoint).await,
@@ -352,6 +432,7 @@ pub(crate) async fn cancel_at_door(ctx: &Arc<TaskCtx>, sink: &CallSink) -> Resul
         };
         tracing::debug!(term = %term, class = class.label(), "a door's cancel was forwarded");
         note_receipt(&ctx2, &class);
+        sink2.note_forwarded(&class);
     });
     super::call_issuer::finish_revoke(ctx, &pending).await?;
     Ok(DoorCancel::Revoked)

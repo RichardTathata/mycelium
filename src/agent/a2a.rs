@@ -381,13 +381,16 @@ pub(crate) struct TaskReservation {
 impl TaskReservation {
     /// Store the completed task under the reserved id; the reservation is spent. A reservation a `tasks/cancel`
     /// removed stays removed (I4, PR 3): the task was cancelled, and its send's late answer does not bring it back.
-    /// **Nor does one a `tasks/cancel` has begun** (§9 O10): the cancel forwards the revocation before its durable
-    /// write returns, so the send's answer — the provider's stop — can arrive while the task is still in the table;
-    /// recorded as `completed`, it would turn the cancel's own answer into *"task already completed"*. The task stays
-    /// as it is, for the cancel to remove (or, if the disk refused it, to be cancelled again).
+    /// **One a `tasks/cancel` has begun is not decided here** (§9 O10; #821's review, F1): the cancel forwards the
+    /// revocation before its durable write returns, so the send's answer can arrive while the task is still in the
+    /// table — the provider's stop, or a call that completed on its own. This method cannot tell which, so the answer
+    /// is **parked** on the call's handle and the task stays as it is; the cancel decides by what the provider answered
+    /// its forward (`handle_tasks_cancel`): `Stopped` — the answer was the stop's, and the task is cancelled; anything
+    /// else — the task is recorded with this answer, completed, and the cancel answers *"task already completed"*.
     fn complete(mut self, task: Task) {
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        if self.call.as_ref().is_some_and(|c| c.cancel_asked()) {
+        if let Some(call) = self.call.as_ref().filter(|c| c.cancel_asked()) {
+            call.park(task);
             // Spent without touching the entry: the reservation's drop would remove it, and the cancel owns it now.
             self.token = None;
             return;
@@ -1124,6 +1127,26 @@ fn handle_tasks_get(
     }
 }
 
+/// Record a send's answer parked while its cancel ran as the task's completion (#821's review, F1): the call completed
+/// on its own, so its result stays readable. Only over the pending entry: one already replaced or removed is left.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+fn record_parked_completion(state: &A2aState, task_id: &str, parked: Task) {
+    let now = mycelium_core::sim_seam::mono_instant();
+    // Retry-safe: each attempt builds its value from its own input and the parked answer, which it only clones.
+    state.tasks.pin().compute(task_id.to_string(), |existing| match existing {
+        Some((_, t)) if t.pending.is_some() => papaya::Operation::Insert(A2aTask {
+            task: parked.clone(),
+            context_id: t.context_id.clone(),
+            generation: t.generation,
+            created_at: now,
+            owner: t.owner.clone(),
+            pending: None,
+            call: None,
+        }),
+        _ => papaya::Operation::Abort(()),
+    });
+}
+
 /// `tasks/cancel` / `CancelTask`: the same owner rule as `tasks/get`, checked before the task's state,
 /// and the same `asked`.
 ///
@@ -1134,7 +1157,14 @@ fn handle_tasks_get(
 /// gateway did (the task is `canceled` here, its call revoked) and never that the provider stopped: that is the
 /// provider's to say, in the cancel receipt (`GET /stats` `call_cancel_receipts`). A revoke the disk refuses is
 /// answered `-32603` and the task is kept, so the caller can cancel again — **the forward was sent all the same**,
-/// so the call may already have stopped; the error says the cancel is held in memory only.
+/// so the call may already have stopped; the error says the cancel is held in memory only. Kept, it reads as working
+/// in `tasks/get` until `A2A_TASK_TTL` (300 s) removes it, its send having answered.
+///
+/// **A send that answers while the cancel is being recorded** (#821's review, F1) is decided by what the provider
+/// answered the forward: `Stopped` — the answer was the stop's, and the task is cancelled (or kept, if the disk
+/// refused); anything else, or no answer in the forward's 5 s and a second — the call completed on its own, its result
+/// is recorded and readable, and the cancel answers `-32002` *"task already completed"*. An answer that arrives after
+/// the cancel removed the task reaches its sender only, as before.
 async fn handle_tasks_cancel(
     state:  &A2aState,
     caller: Option<&ResolvedPrincipal>,
@@ -1154,11 +1184,22 @@ async fn handle_tasks_cancel(
     #[cfg(all(feature = "gateway", feature = "tls"))]
     {
         let call = state.tasks.pin().get(task_id).and_then(|e| e.call.clone());
-        if let Some(call) = call
-            && let Err(e) = super::call_cancel::cancel_at_door(&state.task_ctx, &call).await
-        {
-            warn!("A2A tasks/cancel: the call's cancel was not recorded: {e}");
-            return jsonrpc_error(id, -32603, &format!("the cancel could not be recorded; the task is kept, cancel it again: {e}"));
+        if let Some(call) = call {
+            let recorded = super::call_cancel::cancel_at_door(&state.task_ctx, &call).await;
+            // The send answered while the cancel was recorded (#821's review, F1): the provider's stop, or a call that
+            // completed on its own. The provider's answer to the forward decides: only `Stopped` makes it the stop's.
+            if let Some(parked) = call.parked().cloned() {
+                let stopped = call.forwarded_class(super::call_cancel::CANCEL_FORWARD_TIMEOUT_MS + 1_000).await
+                    == Some(super::call_cancel::CancelClass::Stopped);
+                if !stopped {
+                    record_parked_completion(state, task_id, parked);
+                    return jsonrpc_error(id, -32002, "task already completed");
+                }
+            }
+            if let Err(e) = recorded {
+                warn!("A2A tasks/cancel: the call's cancel was not recorded: {e}");
+                return jsonrpc_error(id, -32603, &format!("the cancel could not be recorded; the task is kept, cancel it again: {e}"));
+            }
         }
     }
     // Removed unless its send completed meanwhile: a completed task is not cancelled.

@@ -773,7 +773,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mints under the default). The forward now goes out beside the durable write (`call_issuer::begin_revoke`, then
   `finish_revoke`), and the acknowledgement still waits for the write. **A reversal:** a revocation the disk refuses
   (`CancelRefusal::NotDurable`, A2A `-32603`) has still been forwarded — the call may have been stopped, and the stop
-  is held in memory only; it used to stand in the gateway's process only, unforwarded. A gateway that crashes between
+  is held in memory only; it used to stand in the gateway's process only, unforwarded. `cancel_call` then answers a new
+  `CancelRefusal::NotDurableForwarded { class, error }` carrying the provider's answer. At `/a2a`, a send answering
+  while its cancel is recorded is cancelled only if the provider answered the forward `Stopped`; a call that completed
+  on its own keeps its result and the cancel answers `-32002`. A gateway that crashes between
   the forward and the sync answers nothing and leaves no record of the revocation; after a provider restart the call,
   presented again inside its window, is admitted (the bound, stated and tested). A revocation reaches disk no sooner:
   the WAL is unchanged (that is §9 O11, group commit). *Check:* read `NotDurable` as *perhaps stopped, not on disk*,

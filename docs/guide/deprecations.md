@@ -5648,7 +5648,7 @@ record. What the caller receives:
 |---|---|---|---|---|
 | on disk | answered | `Ok(CancelReceipt)`, the provider's class | `canceled` | `202` |
 | on disk | no answer in 5 s, or no target known | `Ok`, `DeliveryUnknown` / `NotForwarded` (the KV carries it) | `canceled` | `202` |
-| **refused** | **sent all the same** — answered or not | **`Err(NotDurable)`**, the provider's class counted in `call_cancel_receipts` and not returned | `-32603`, the task kept (not recorded `completed` by the stop's own answer), so it can be cancelled again | `202` (a notification has no answer; logged) |
+| **refused** | **sent all the same** — answered or not | **`Err(NotDurableForwarded { class, error })`**: the provider's answer beside the refusal (`NotForwarded` where nothing was sent) | `-32603`, the task kept so it can be cancelled again — it reads as working in `tasks/get` until `A2A_TASK_TTL` (300 s) removes it | `202` (a notification has no answer; logged) |
 | the gateway crashes before it returns | sent, perhaps answered | **no answer at all** | no answer | no answer |
 
 **A cancel that is not durable is bounded, and announced.** A required-sync write applies nothing until its sync
@@ -5659,16 +5659,28 @@ record says otherwise. Such a cancel lasts as long as the provider process that 
 window. Where the disk refused, the caller is told (`NotDurable`, `-32603`); where the gateway crashed, the caller is
 told nothing, which a caller must read as *not acknowledged*, never as a refusal.
 
-**At `/a2a`, a task whose cancel has begun is not recorded `completed`.** The forward can stop the skill, and the
-skill's answer reach the gateway, before the cancel's durable write returns; that answer no longer turns the task
-`completed` (which made the cancel answer *"task already completed"*). The send itself is answered as before.
+**At `/a2a`, a send that answers while its cancel is being recorded is decided by the provider's answer to the
+forward.** The forward can stop the skill, and the skill's answer reach the gateway, before the cancel's durable write
+returns — and a skill can also complete on its own in that window. The answer is held aside until the cancel's write
+returns: if the provider answered the forward **`Stopped`**, it was the stop's answer and the task is `canceled`
+(kept, if the disk refused); **otherwise** — any other class, or none within the forward's 5 s and a second — the call
+completed on its own: the task is recorded `completed` with its result, readable by `tasks/get`, and the cancel answers
+**`-32002` *"task already completed"***. An answer that arrives after the cancel removed the task reaches its sender
+only, as before. The send itself is answered as before.
+
+**`cancel_call`'s forward runs on a task of its own.** A caller that drops the future stops neither the forward nor
+its receipt's count. Dropping it drops the durable write's wait: a record the WAL's writer already holds is still
+written and synced but not applied to the KV or gossiped, until a restart replays the WAL or the cancel is asked
+again.
 
 **What did not change.** A `CancelReceipt` is still returned only once the revocation is on disk. A revocation
 reaches disk no sooner than before: the WAL is untouched, and a cancel still waits its turn there behind the syncs
 ahead of it (that is §9 O11, WAL group commit). A mint's two records are still on disk before its call is sent. A
 cancel before the mint still sends nothing and revokes on disk.
 
-*Check:* a caller that read `CancelRefusal::NotDurable` (or `-32603` from `tasks/cancel`) as *the call keeps
-running* reads it now as *the call may have been stopped, and the stop is not on disk*: call the cancel again — the
+*Check:* `cancel_call` now refuses a cancel the disk will not take with **`CancelRefusal::NotDurableForwarded { class,
+error }`** (a new variant; `CancelRefusal` is `#[non_exhaustive]`), whose `class` says whether the provider stopped the
+call; the doors' `NotDurable(String)` is unchanged. A caller that read `NotDurable` (or `-32603` from `tasks/cancel`) as
+*the call keeps running* reads either now as *the call may have been stopped, and the stop is not on disk*: call the cancel again — the
 revoke is idempotent, writes the same checkpoint once the disk takes it, and forwards it again. A caller that got no
 answer retries the same way.

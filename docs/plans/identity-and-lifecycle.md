@@ -3841,16 +3841,26 @@ Items found while building a row that the row does not own. Each names its home,
       envelope presented again inside its window is admitted and runs; a cancel asked again is written durably
       (`NotForwarded`) and the KV stops the call. Seen failing with the old order planted back.
     - **Found in the build, fixed:** at `/a2a` the stop's own answer could complete the task before the cancel removed
-      it, so the cancel answered *"task already completed"*; `TaskReservation::complete` now leaves a task whose cancel
-      has begun (`CallSink::cancel_asked`) for the cancel. Seen failing with the guard planted out (both A2A tests).
+      it, so the cancel answered *"task already completed"*. **Corrected by #821's review (F1):** the first fix left
+      every answer during the cancel unrecorded, so a call that *completed on its own* in that window was answered
+      `canceled` and its result lost. Now `TaskReservation::complete` parks the answer on the call's handle and the
+      cancel decides by the provider's answer to the forward (`CallSink::forwarded_class`): `Stopped` — the stop's,
+      the task cancelled; anything else — completed, its result recorded, the cancel `-32002`.
+      `a_call_that_completes_while_its_cancel_is_recorded_is_answered_completed_and_its_result_kept` (the reviewer's
+      probe: write held, forward suppressed, the skill completing in 2 s), seen failing with the first fix planted
+      back (`canceled`, `tasks/get` `-32001`); the stop's-answer case stays pinned by the door and NotDurable tests.
     - **Found in the build, not fixed (O11's family):** under `flush` the gateway's connection reader awaits the WAL
       for each inbound record (`apply_inbound_then_append`), so the provider's answer to the forward can wait behind
       the same burst: in the `flush` run the receipt was `DeliveryUnknown` though the call stopped in 160 ms. The rung
       is honest (never a negative); the burst test accepts `Stopped` or `DeliveryUnknown` and says why.
-    - **Decisions made in the build, stated for the reviewer:** on `NotDurable`, `cancel_call` returns the error and
-      not the provider's class (the class is counted in `call_cancel_receipts`), keeping `CancelRefusal`'s shape; a
-      caller that wants it reads the counter or cancels again. `cancelled_before_sent` keeps both steps together (it
-      has nothing to forward). The A2A door's `-32603` keeps the task so it can be cancelled again.
+    - **From #821's review, F2 and F3:** `cancel_call` refuses a cancel the disk will not take with a new
+      `CancelRefusal::NotDurableForwarded { class, error }` carrying the provider's answer (asserted in
+      `a_cancel_the_disk_refuses_still_stops_the_call_and_cancel_call_says_not_durable`, seen failing with `NotDurable`
+      planted back); its forward runs on a task of its own, so a dropped future stops neither the forward nor its count
+      (`a_dropped_cancel_call_still_forwards_and_counts_the_providers_answer`, seen failing with the forward joined to
+      the future), and what dropping does to the durable write is stated on `cancel`. `cancelled_before_sent` keeps both
+      steps together (it has nothing to forward). The A2A door's `-32603` keeps the task so it can be cancelled again;
+      it reads as working in `tasks/get` until `A2A_TASK_TTL` (300 s).
 - **O11 · WAL group commit** *(open; a row of its own by the maintainer's decision of 2026-11-20, from O10; **before
   the wave 1b release**)*. The WAL's writer commits what is queued under one sync, so no synced append waits for a
   sync per record ahead of it — the cause O10's (d) works around for a cancel, and what still holds a mint, a grant's

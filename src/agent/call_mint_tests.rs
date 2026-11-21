@@ -162,8 +162,10 @@ pub(super) async fn node(opts: Opts) -> N {
                 let (a3, s, f) = (Arc::clone(&a2), Arc::clone(&s), Arc::clone(&f));
                 tokio::spawn(async move {
                     s.fetch_add(1, Ordering::SeqCst);
+                    // `soon` completes on its own in 2 s (#821's review, F1: a completion racing its cancel); else 30 s.
+                    let secs = if req.payload().as_ref() == b"soon" { 2 } else { 30 };
                     tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                        _ = tokio::time::sleep(Duration::from_secs(secs)) => {
                             f.fetch_add(1, Ordering::SeqCst);
                             a3.service().rpc_respond(&req, b"dispatched".to_vec());
                         }
