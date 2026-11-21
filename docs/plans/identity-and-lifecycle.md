@@ -3825,7 +3825,7 @@ Items found while building a row that the row does not own. Each names its home,
       acknowledgement still waits for the disk"* — `under_flush_the_providers_stop_beats_the_acknowledgement_behind_a_burst_of_writes`
       and, under the default mode behind concurrent mints, `under_the_default_mode_the_providers_stop_beats_the_acknowledgement_behind_concurrent_mints`:
       each burst sized from a calibration of the disk to about 3·*F*; asserted by structure — the stop inside *F*, the
-      acknowledgement not yet given when it is seen, and at least three times later. **Seen failing first on main at
+      acknowledgement not yet given when it is seen (a 3x ratio, first asserted, was dropped by #821's CI: on a loaded runner it failed with the promise kept). **Seen failing first on main at
       7e9486f7:** the stop 2.89 s after the cancel behind 271 writes (the same instant as the acknowledgement), and
       behind 200 mints after the acknowledgement. Figures on the [ledger](../operations/what-is-proven.md#call-cancel-behind-collector).
     - *"If the write then fails, the call has still been stopped and the caller is told the cancel was not durable"* —

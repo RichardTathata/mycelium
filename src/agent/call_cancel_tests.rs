@@ -526,7 +526,9 @@ enum Burst {
     /// gossiped, the stop came when the provider had applied 12 550 of 15 718 burst keys; with it on the WAL alone, in
     /// 13 ms (`docs/operations/what-is-proven.md#call-cancel-behind-collector`).
     WalAppends,
-    /// Concurrent mints (`call_issuer::record`): two required-sync writes each, synced under any mode.
+    /// Concurrent mints (`call_issuer::record`): two required-sync writes each, synced under any mode. Each mint gossips
+    /// its records only once synced, so few frames are ahead of the forward on the connection: probed for #821's CI,
+    /// 800 mints held the stop 11.8 ms, as 800 synced appends gossiped nowhere did.
     Mints,
 }
 
@@ -622,8 +624,10 @@ async fn the_stop_beats_the_acknowledgement_behind(mode: crate::config::SyncMode
         stop_took < Duration::from_millis(F_MS),
         "the provider's stop came {stop_took:?} after the cancel, outside bound 1 (F = {F_MS} ms): the forward waited for the {n} {burst:?} ahead of the revocation's sync (the cancel was acknowledged after {ack_took:?})"
     );
+    // What O10 promises, and no ratio (#821's CI: on a loaded runner a 3x margin failed with the promise kept): the stop
+    // inside bound 1, above, and the acknowledgement not yet given when the stop was seen — the burst, sized to about
+    // 3·F, still held the disk then.
     assert!(!acknowledged_at_the_stop, "the cancel was acknowledged ({ack_took:?}) before the provider's stop was seen ({stop_took:?}): the burst did not hold the disk");
-    assert!(ack_took > stop_took * 3, "the acknowledgement waited for the disk behind the burst, the stop did not: stop {stop_took:?}, acknowledgement {ack_took:?}");
     let receipt = receipt.expect("the revocation is on disk");
     // The provider answers `stopped`; under `flush` the answer can reach the gateway's caller too late for the
     // forward's 5 s — the gateway's connection reader awaits the WAL for each inbound record (`append_inbound`), so the
