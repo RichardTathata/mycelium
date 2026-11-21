@@ -5688,3 +5688,45 @@ call; the doors' `NotDurable(String)` is unchanged. A caller that read `NotDurab
 *the call keeps running* reads either now as *the call may have been stopped, and the stop is not on disk*: call the cancel again — the
 revoke is idempotent, writes the same checkpoint once the disk takes it, and forwards it again. A caller that got no
 answer retries the same way.
+
+## 125. The KV WAL's writer commits what is queued under one sync; a failed `sync` poisons it (unreleased, identity-and-lifecycle §9 O11, PR 1)
+
+**What changed.** The KV write-ahead log's writer (`mycelium-core/src/persistence.rs`) used to take one record at a
+time and, when the record asked for it (`append_sync`, or every append under `sync_mode = "flush"`), sync it before it
+took the next — so a required-sync write waited for one sync per synced record queued ahead of it. It now **group
+commits**: an append starts a batch, the writer takes what is already queued behind it (at most 4 096 appends or about
+4 MiB of keys and values, and never waiting for more), writes every frame in one write, syncs once if any member needs
+it, and only then answers each member. **No acknowledgement changes meaning:** each is still sent after the sync that
+covers its record; the on-disk bytes are the same frames, so every existing `wal.bin` replays and no setting is added.
+What is different for a caller:
+- **A failure is a batch's.** A failed write or sync fails every append in its batch — the complete frames before a
+  tear included — counts each in `dropped_appends`, and poisons the writer, as one failed append did before. A
+  required-sync write told `DurabilityNotEstablished` may therefore have a whole frame on disk that a restart replays,
+  now also when a *later* record in its batch tore (`kv_set_requiring_sync`'s doc).
+- **An `Async`/`Os` append awaiting its write** (`set_with_receipt`, `append_acked`) whose batch also holds a
+  required-sync record is answered after that batch's sync: later, never weaker.
+- **A `sync()` that ends a batch** is answered by that batch's one sync.
+- **A failed `sync()` now poisons the writer.** It used to return `Err` and carry on. After an `fsync` error a later
+  `fsync` can succeed without the data reaching the disk, so a later replica-sync answer could claim `Persisted`
+  wrongly. Now every later `sync()` and append is refused until a snapshot repairs the file (the writer tries one at
+  once, then on every snapshot it is asked for or its timer brings), and `/health` shows
+  `persistence.wal_refusing_appends`. The sync now goes through the replay seam, as the append's sync did.
+- **`gossip_wal_append_failures_total` still counts appends**: a failed batch adds every member, each an append with
+  no WAL record, so the total is what the one-at-a-time writer's failed append and refusals behind it summed to; a
+  failed `sync()` with no append in its batch counts one. New counters: `gossip_wal_syncs_total`,
+  `gossip_wal_batches_total`, `gossip_wal_batch_appends_total`.
+- **The byte cap is exact this way:** it counts each record's key and value only (not the frame's length prefix, the
+  codec's fields or a cipher's expansion), and the record that reaches 4 MiB is included — so a batch is under 4 MiB of
+  keys and values plus one whole record, and a record over the cap is a batch of one.
+
+The inbound reader under `flush` still awaits a sync for each record it receives; that is O11's PR 2.
+
+**What you do.** Nothing to change. A dashboard that alerted on `gossip_wal_append_failures_total` still fires on its
+first increase, and one that summed it with `gossip_wal_appends_refused_total` as "appends with no WAL record" still
+reads the same total (the members of a failed batch are in the first, where the appends refused behind a failed one
+were in the second). Operators who saw a transient `fsync` error once and the node carry on will now see the node refuse
+appends until a snapshot succeeds: that is the point — check the disk.
+
+*Check:* `curl -s $NODE/metrics | grep -E 'gossip_wal_(syncs|batches|batch_appends)_total'` — under load,
+`batch_appends_total / batches_total` above 1 is group commit at work; `syncs_total` well below the appends is the
+saving.

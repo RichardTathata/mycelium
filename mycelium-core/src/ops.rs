@@ -443,6 +443,16 @@ pub async fn kv_set_with_receipt(
 /// tell it: **nothing became visible at this node** — no reader saw it, no subscriber fired, nothing
 /// gossiped.
 ///
+/// **That holds until this node restarts, not after.** The refusal says the attempt applied nothing; it
+/// does not say the record is absent from disk. Its frame may be whole in `wal.bin`: when the write
+/// succeeded and the sync failed, and — since the WAL's writer commits a batch under one write and one
+/// sync (identity-and-lifecycle §9 O11) — when a *later* record's write in the same batch tore, which
+/// fails every member of the batch, the complete frames before the tear included. The writer's
+/// repairing snapshot carries such a frame into `snapshot.bin` (it merges the WAL tail), and a restart
+/// replays it, so the value can appear here after a restart without this call having succeeded
+/// (`regression_an_unsynced_record_still_replays`,
+/// `a_write_torn_inside_a_batch_fails_every_member_and_nothing_lands_behind_it`).
+///
 /// Persist-first is admissible here *only* because the snapshot merges the WAL tail before
 /// truncating (D8): a record fsynced before the caller applied it cannot be discarded. That
 /// dependency is pinned by `regression_snapshot_retains_wal_record_acked_before_local_apply` and

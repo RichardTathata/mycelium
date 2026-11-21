@@ -21,11 +21,12 @@
 //!
 //! **The gateway's `[persistence]`** (`Soak::persist`, its `sync_mode`). Since §9 O10's fix (2026-11-21) a cancel's
 //! forward no longer waits for the disk, and the 10⁵ soak passes over a durable gateway under the default `async`.
-//! Under `SyncMode::Flush` it still **fails**, at the collector's minute pass, on what §9 O11 owns: the mints wait
+//! Under `SyncMode::Flush` it still **failed**, at the collector's minute pass, on what §9 O11 owns: the mints waited
 //! their turn at the WAL, and the gateway's connection reader waits on it for each inbound record, so a batch outlives
-//! its windows (bound 1 holds). The finding, pinned at the end of this file by a test that fails today
-//! (`a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog`). The CI run and the dated run are
-//! therefore of a gateway with no `[persistence]`, and say so.
+//! its windows (bound 1 holds). The WAL's half is pinned at the end of this file
+//! (`a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog`), which passes since the WAL's group
+//! commit (§9 O11, PR 1); the `flush` soak waits for O11's PR 2 too, under which the inbound reader stops awaiting a
+//! sync a record. The CI run and the dated run are therefore of a gateway with no `[persistence]`, and say so.
 //!
 //! **What it does not drive** (each has its own tests, none at this count): the SDK serve stream (`rpc/serve`), the
 //! bridged MCP loop, the built-in `llm.invoke` door, a hosted capability, a member's own unframed call (not
@@ -853,10 +854,15 @@ async fn lone(persist: bool) -> Node {
 
 /// [`lone`], with `call_mandate_ttl_secs`.
 async fn lone_with(persist: bool, ttl_secs: u64) -> Node {
+    lone_mode(persist, crate::config::SyncMode::Flush, ttl_secs).await
+}
+
+/// [`lone_with`], its `[persistence]` under `sync_mode`.
+async fn lone_mode(persist: bool, sync_mode: crate::config::SyncMode, ttl_secs: u64) -> Node {
     let (port, http_port) = (crate::test_util::alloc_port(), crate::test_util::alloc_port());
     let id = NodeId::new("127.0.0.1", port).unwrap();
     let dir = std::env::temp_dir().join(format!("i4-soak-{port}"));
-    soak_node(port, http_port, NodeOpts { cert_dir: &dir.join("tls"), bootstrap: vec![], provider: &id, gateway: &id, mint: true, ttl_secs, persist: persist.then_some(crate::config::SyncMode::Flush), mcp_tools: 0, tools: None }).await
+    soak_node(port, http_port, NodeOpts { cert_dir: &dir.join("tls"), bootstrap: vec![], provider: &id, gateway: &id, mint: true, ttl_secs, persist: persist.then_some(sync_mode), mcp_tools: 0, tools: None }).await
 }
 
 /// An execution authority as `soak_node` attaches one, standing alone, and the member table that names `gateway`'s key.
@@ -1153,17 +1159,18 @@ async fn the_memory_a_held_call_window_takes_is_measured_on_each_node() {
 /// `Flush`, 1.25 s under the default `Async`, where the collector's deletes hold nothing: 15 ms). This test pins the
 /// one trigger the soak met.
 ///
-/// Asserted — **structure, not a wall clock**: the cancel is on disk within ten times what one asked just before the
-/// pass took (and 25 ms), so a disk that syncs in a millisecond does not pass it unfixed. **It is not, today** —
-/// 4.3 s on one run and 13.7 s on another against 5 and 8 ms quiet, on the machine of the dated run — during which
-/// the call runs on, to its window if that comes first. That is why the 10⁵ soak fails over a `Flush` gateway.
+/// Asserted — **structure, not a wall clock**: the cancel is on disk within ten times the least of five asked just
+/// before the pass (and 25 ms), so a disk that syncs in a millisecond does not pass it unfixed. **It was not, before O11's
+/// PR 1** — 4.3 s on one run and 13.7 s on another against 5 and 8 ms quiet, on the machine of the dated run — during
+/// which the call ran on, to its window if that came first. That is why the 10⁵ soak failed over a `Flush` gateway.
 /// **It is the test of the WAL's group commit (the plan's §9 O11), not of O10's fix** (#816's confirm round, R2): the
 /// fix the maintainer chose for O10 forwards the cancel at once and holds only the caller's acknowledgement for the
 /// disk, which changes when the provider is told and not when the revocation reaches disk — what this measures. O10's
 /// own PR adds its own test: the provider's stop inside bound 1 during such a burst while the acknowledgement waits.
-/// Ignored until O11 (`docs/operations/what-is-proven.md#call-cancel-behind-collector`).
+/// **Passing since O11's PR 1** (WAL group commit, 2026-11-21): the writer commits what is queued under one sync, so
+/// the revocation waits for the batch in progress and its own — a sync or two — not for a sync per delete ahead of it
+/// (`docs/operations/what-is-proven.md#call-cancel-behind-collector`). Seen failing first on the writer before it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "fails today — the soak's finding: a revocation waits its turn at the WAL behind the collector's deletes; the test of WAL group commit (plan §9 O11); run it with -- --ignored --nocapture; un-ignore with O11"]
 async fn a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog() {
     const BACKLOG: usize = 500;
     let n = lone_with(true, 1).await;
@@ -1184,10 +1191,16 @@ async fn a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlo
     // Past every window + 2·skew + `max_drain_secs` (1 s): the whole backlog is the collector's to delete.
     let floor = n.now() + 1_000 + 2 * SKEW_MS + 1_000;
     assert!(until(|| n.now() > floor, Duration::from_secs(10)).await);
-    let (before, during) = (mint().await, mint().await);
-    let asked = Instant::now();
-    assert_eq!(call_issuer::revoke_call(n.ctx(), &before).await, Ok(true));
-    let quiet = asked.elapsed();
+    // The quiet write is the **least** of five (#824's review): one sample can be an fsync spike — one run saw 758 ms
+    // against about 5 ms — and an allowance of ten times a spike is one the old writer also met.
+    let mut quiet = Duration::MAX;
+    for _ in 0..5 {
+        let before = mint().await;
+        let asked = Instant::now();
+        assert_eq!(call_issuer::revoke_call(n.ctx(), &before).await, Ok(true));
+        quiet = quiet.min(asked.elapsed());
+    }
+    let during = mint().await;
     // The collector's pass: every expired pair deleted, the two fresh calls kept.
     let collected = call_issuer::collect(n.ctx(), n.now());
     assert_eq!(collected.call_records, 2 * BACKLOG, "the backlog is collected in one pass");
@@ -1201,4 +1214,83 @@ async fn a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlo
     // quiet writes; one that waits for a thousand costs a thousand.
     let allowed = quiet * 10 + Duration::from_millis(25);
     assert!(behind < allowed, "a cancel asked while the collector deleted {} records was on disk only after {behind:?} — {:.0} times the {quiet:?} it takes with the WAL quiet (allowed: ten times, and 25 ms)", 2 * BACKLOG, behind.as_secs_f64() / quiet.as_secs_f64());
+}
+
+/// **The bursts ahead of one revoke, re-measured on group commit** (identity-and-lifecycle §9 O11, PR 1) — the table
+/// #816's reviewer measured on the writer before it, re-run here by the same shapes: nothing ahead; the collector's
+/// pass deleting 1 000 records; 1 000 plain owned writes; 100 and 300 concurrent mints — each under `Flush` and under
+/// the default `Async`. What is timed is the revoke's own required-sync write (`revoke_call`), asked once the burst
+/// is queued. A measurement, not a gate (`#[ignore]`): release only, run by hand
+/// (`cargo test --release --lib the_wal_bursts_ahead_of_a_revoke_are_measured -- --ignored --nocapture`); its figures
+/// are dated on `docs/operations/what-is-proven.md#call-cancel-behind-collector`. The inbound reader's own wait under
+/// `Flush` is O11's PR 2 and is not exercised here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "a measurement: release only, run by hand; its figures are dated on docs/operations/what-is-proven.md"]
+async fn the_wal_bursts_ahead_of_a_revoke_are_measured() {
+    use crate::config::SyncMode;
+    let target = NodeId::new("127.0.0.1", 65_000).unwrap();
+    let payload = Bytes::from(serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "work", "arguments": {"aisle": 4}}}).to_string());
+    async fn mint(ctx: Arc<super::TaskCtx>, target: NodeId, payload: Bytes) -> (String, Duration) {
+        let asked = Instant::now();
+        let now = ctx.hlc.decision_now_ms();
+        let (framed, minted) = frame_minting(&ctx, &target, ALICE, &[], MCP, payload, None, None, None, None, now);
+        let minted = minted.expect("minted");
+        assert!(framed.is_some());
+        let term = minted.term.clone();
+        call_issuer::record(&ctx, minted).await.expect("on disk");
+        (term, asked.elapsed())
+    }
+    let ms = |d: Duration| d.as_secs_f64() * 1_000.0;
+    for mode in [SyncMode::Flush, SyncMode::Async] {
+        let n = lone_mode(true, mode, 1).await;
+        let one = |n: &Node| mint(Arc::clone(n.ctx()), target.clone(), payload.clone());
+        // Nothing ahead.
+        let (t, _) = one(&n).await;
+        let asked = Instant::now();
+        assert_eq!(call_issuer::revoke_call(n.ctx(), &t).await, Ok(true));
+        let quiet = asked.elapsed();
+        // The collector's pass over 1 000 records.
+        for _ in 0..500 {
+            one(&n).await;
+        }
+        let floor = n.now() + 1_000 + 2 * SKEW_MS + 1_000;
+        assert!(until(|| n.now() > floor, Duration::from_secs(10)).await);
+        let (t, _) = one(&n).await;
+        let collected = call_issuer::collect(n.ctx(), n.now());
+        // The 500 minted for it, and the first call's two records past their floor too.
+        assert!(collected.call_records >= 1_000, "{}", collected.call_records);
+        let deleted = collected.call_records;
+        let asked = Instant::now();
+        assert_eq!(call_issuer::revoke_call(n.ctx(), &t).await, Ok(true));
+        let collector = asked.elapsed();
+        // 1 000 plain owned writes.
+        let (t, _) = one(&n).await;
+        for i in 0..1_000 {
+            super::state_machine::write_owned_kv(n.ctx(), &format!("o11-burst/{i}"), vec![7; 64]);
+        }
+        let asked = Instant::now();
+        assert_eq!(call_issuer::revoke_call(n.ctx(), &t).await, Ok(true));
+        let owned = asked.elapsed();
+        // 100 and 300 concurrent mints.
+        let mut minted = Vec::new();
+        for k in [100usize, 300] {
+            let (t, _) = one(&n).await;
+            let mints: Vec<_> = (0..k).map(|_| tokio::spawn(mint(Arc::clone(n.ctx()), target.clone(), payload.clone()))).collect();
+            tokio::task::yield_now().await;
+            let asked = Instant::now();
+            assert_eq!(call_issuer::revoke_call(n.ctx(), &t).await, Ok(true));
+            let behind = asked.elapsed();
+            let mut each: Vec<Duration> = Vec::new();
+            for m in mints {
+                each.push(m.await.unwrap().1);
+            }
+            each.sort();
+            minted.push(format!("behind {k} concurrent mints {:.1} ms (the mints themselves {:.1} ms p50, {:.1} ms max)", ms(behind), ms(each[k / 2]), ms(each[k - 1])));
+        }
+        eprintln!(
+            "o11-1 bursts ahead of one revoke, {mode:?}: nothing ahead {:.1} ms; behind the collector's {deleted} deletes {:.1} ms; behind 1 000 plain owned writes {:.1} ms; {}",
+            ms(quiet), ms(collector), ms(owned), minted.join("; "),
+        );
+        n.a.shutdown().await;
+    }
 }
