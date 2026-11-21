@@ -62,7 +62,7 @@ which pins the guide's rule for reading output against the binary.
 - **Not gated:** a subcommand's sub-verbs and flags (`tls ca`, `skills list`, `--watch`). The guide names a few, and
   no test compares them with the binary; `--help` on the subcommand is the reference.
 - **A build from `main` runs ahead of the release.** The guide describes the binary that printed it, so a binary built
-  from a branch may list a subcommand the newest published release lacks; `skills` itself is absent from v2.40.0.
+  from a branch may list a subcommand the newest published release lacks; `skills` itself is absent from the 2.40.x line (v2.40.1 included).
 - The walk needs the published binary or a build with the release's features. In a checkout the guide is printed by
   the `cargo run` form in the root `AGENTS.md`.
 - The guide is at most 6 KB and the root `AGENTS.md` at most 2 KB, gated. Neither carries a path of the machine that
