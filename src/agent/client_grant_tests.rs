@@ -349,6 +349,38 @@ async fn a_grant_issued_before_a_rotation_is_revoked_by_its_issuer() {
     assert_eq!(ran.load(Ordering::SeqCst), 0);
 }
 
+/// **The status route hands a client only a grant that answers its request** (the owner-signed rule's (b) at
+/// `GET /gateway/grants/request/{request}`). The forecaster's first request is issued; its second is left unanswered,
+/// and the first grant — genuine, the forecaster's own — is copied under the second request's `…/issued`, as any
+/// member can write it. The second request reads `pending`, not `issued` with another request's grant, and the read
+/// is counted; the first still reads `issued`. Seen failing first with the check removed: the second request read
+/// `issued`, carrying the first request's grant.
+#[tokio::test]
+async fn the_status_route_reads_a_grant_copied_from_another_request_as_no_answer() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let dir = scratch("status-copied");
+        let http_port = alloc_port();
+        let (a, _ran) = started(&dir, http_port).await;
+        let _key = forecaster_key(&a, &dir);
+        let (asked1, _g1) = ask_and_issue(http_port, &serde_json::json!({"city": "Brest"})).await;
+        let (status, asked2) = http(http_port, "fc-secret", reqwest::Method::POST, "/gateway/grants/request", Some(serde_json::json!({"tool": TOOL, "arguments": {"city": "Vannes"}}))).await;
+        assert_eq!(status, 200, "{asked2}");
+        let genuine1 = mycelium_core::ops::kv_get(&a.task_ctx, &format!("{}/issued", asked1["key"].as_str().unwrap())).unwrap();
+        assert!(a.kv().set(format!("{}/issued", asked2["key"].as_str().unwrap()), genuine1));
+        let path = |r: &serde_json::Value| format!("/gateway/grants/request/{}", segment(r["request"].as_str().unwrap()));
+        let (_, second) = http(http_port, "fc-secret", reqwest::Method::GET, &path(&asked2), None).await;
+        let (_, first) = http(http_port, "fc-secret", reqwest::Method::GET, &path(&asked1), None).await;
+        let counted = a.task_ctx.grant_issued_refused.status.load(Ordering::Relaxed);
+        a.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(second["state"], "pending", "COPIED: the second request was answered with the first request's grant: {second}");
+        assert_eq!(first["state"], "issued", "{first}");
+        assert!(counted >= 1, "the copy is counted where it was read");
+    })
+    .await
+    .expect("bounded");
+}
+
 /// **The request door reuses, bounds and records** (#743's review, items 5 and 7). Asking twice for the same tool and
 /// arguments answers the standing request (`reused`), not a second; past
 /// [`MAX_PENDING_GRANT_REQUESTS_PER_CLIENT`](crate::agent::http::grants::MAX_PENDING_GRANT_REQUESTS_PER_CLIENT) standing
