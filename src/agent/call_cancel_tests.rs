@@ -896,11 +896,13 @@ async fn a_gateway_crash_between_the_forward_and_the_sync_leaves_no_record_and_a
 
 /// **#821's review, F1: a call that completes on its own while its cancel is being recorded is answered as completed,
 /// never `canceled`, and its result stays readable.** The reviewer's probe: the skill `soon` runs at the provider and
-/// completes on its own in 2 s; the gateway's revoke write is held and its forward suppressed (so the provider stops
-/// nothing and the answer is not the stop's); `tasks/cancel` is asked. The send answers `completed` while the cancel
-/// waits; released, the cancel answers `-32002` *"task already completed"* and `tasks/get` returns the completed task
-/// with the skill's result. Seen failing first with the guard as #821 first shipped it (any answer during the cancel
-/// left unrecorded): the cancel answered `canceled` and `tasks/get` `-32001`.
+/// completes on its own in 2 s; the gateway's revoke write is held and its forward held back until the skill has
+/// completed, so the provider answers it `not_running` (the work ended with no stop of its own); `tasks/cancel` is
+/// asked. The send answers `completed` while the cancel waits; released, the cancel answers `-32002` *"task already
+/// completed"* and `tasks/get` returns the completed task with the skill's result. Seen failing first with the guard as
+/// #821 first shipped it (any answer during the cancel left unrecorded): the cancel answered `canceled` and `tasks/get`
+/// `-32001`. (With the forward suppressed instead — no answer at all — the confirm round's rule answers it unknown:
+/// `a_stop_whose_forward_answer_is_lost_is_answered_unknown_never_completed`.)
 #[cfg(feature = "a2a")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_call_that_completes_while_its_cancel_is_recorded_is_answered_completed_and_its_result_kept() {
@@ -912,17 +914,22 @@ async fn a_call_that_completes_while_its_cancel_is_recorded_is_answered_complete
     let answered = tokio::spawn(async move { a2a(&g2, "alice-secret", "tasks/send", send).await });
     p.running(1).await;
     let held = call_issuer::test_hooks::hold_revoke_writes(g.a.node_id());
-    call_cancel::test_hooks::SUPPRESS_FORWARD.pin().insert(g.a.node_id().to_string(), ());
+    let forward = Arc::new(tokio::sync::Semaphore::new(0));
+    call_cancel::test_hooks::HOLD_FORWARD.pin().insert(g.a.node_id().to_string(), Arc::clone(&forward));
     let g2 = Arc::clone(&g);
     let cancel = tokio::spawn(async move { a2a(&g2, "alice-secret", "tasks/cancel", serde_json::json!({"id": "t-1"})).await });
     assert!(until(|| held.reached() == 1, Duration::from_secs(10)).await, "the cancel reached its durable write");
     let sent = tokio::time::timeout(Duration::from_secs(10), answered).await.expect("the skill completed on its own").unwrap();
     assert_eq!(sent["result"]["status"]["state"], "completed", "{sent}");
     assert_eq!(p.finished.load(Ordering::SeqCst), 1, "the skill finished: the provider stopped nothing");
+    p.running(0).await;
+    forward.add_permits(1);
+    assert!(until(|| stat(&g, "receipts", "not_running") == 1, Duration::from_secs(10)).await, "the provider answered the forward not_running");
     assert!(!cancel.is_finished(), "the cancel waits for its write");
     held.release(1);
     let v = tokio::time::timeout(Duration::from_secs(15), cancel).await.expect("the cancel is answered").unwrap();
-    call_cancel::test_hooks::SUPPRESS_FORWARD.pin().remove(&g.a.node_id().to_string());
+    call_cancel::test_hooks::HOLD_FORWARD.pin().remove(&g.a.node_id().to_string());
+    forward.close();
     assert_eq!(v["error"]["code"], -32002, "a call that completed is not answered canceled: {v}");
     let v = a2a(&g, "alice-secret", "tasks/get", serde_json::json!({"id": "t-1"})).await;
     assert_eq!(v["result"]["status"]["state"], "completed", "the result stays readable: {v}");
@@ -955,6 +962,44 @@ async fn a_dropped_cancel_call_still_forwards_and_counts_the_providers_answer() 
     let reply = tokio::time::timeout(Duration::from_secs(10), answered).await.expect("the call stopped").unwrap();
     assert!(reply.to_string().contains("cancelled"), "{reply}");
     assert!(until(|| stat(&g, "receipts", "stopped") == 1, Duration::from_secs(10)).await, "the provider's answer is counted though the caller left");
+    drop(held);
+    g.a.shutdown().await;
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **#821's confirm round: a stop the provider did not confirm to the gateway is never answered as a completion.** The
+/// reviewer's probe 1: the skill runs at the provider; the gateway's revoke write is held, and its forward is
+/// delivered but its answer lost (`DeliveryUnknown`). The provider stops the skill — the send answers the stop's own
+/// text, the skill never finishes — while the cancel waits; released, the cancel answers **outcome unknown**
+/// (`-32603`), neither `canceled` nor *"task already completed"*, and `tasks/get` holds the send's answer, the text its
+/// sender was given. Seen failing first on 3276b116 (the two-way rule): the cancel answered `-32002`.
+#[cfg(feature = "a2a")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stop_whose_forward_answer_is_lost_is_answered_unknown_never_completed() {
+    let (g, p, cert_dir) = pair(Opts { mint: true, persist: true, more_doors: true, ..Opts::default() }).await;
+    assert!(until(|| crate::store::scan_kv_prefix(&g.ctx().kv_state, "cap/").iter().any(|(k, _)| k.contains("depot")), Duration::from_secs(20)).await, "the gateway sees the skill");
+    let g = Arc::new(g);
+    let g2 = Arc::clone(&g);
+    let send = serde_json::json!({"id": "t-1", "skillId": "depot/dispatch", "message": {"role": "user", "parts": [{"type": "text", "text": "go"}]}});
+    let answered = tokio::spawn(async move { a2a(&g2, "alice-secret", "tasks/send", send).await });
+    p.running(1).await;
+    let held = call_issuer::test_hooks::hold_revoke_writes(g.a.node_id());
+    call_cancel::test_hooks::LOSE_FORWARD_ANSWER.pin().insert(g.a.node_id().to_string(), ());
+    let g2 = Arc::clone(&g);
+    let cancel = tokio::spawn(async move { a2a(&g2, "alice-secret", "tasks/cancel", serde_json::json!({"id": "t-1"})).await });
+    assert!(until(|| held.reached() == 1, Duration::from_secs(10)).await, "the cancel reached its durable write");
+    p.running(0).await;
+    let sent = tokio::time::timeout(Duration::from_secs(10), answered).await.expect("the send is answered").unwrap();
+    assert!(sent.to_string().contains("stopped"), "the send answered the stop's own text: {sent}");
+    assert_eq!(p.finished.load(Ordering::SeqCst), 0, "the provider stopped the skill");
+    assert!(until(|| stat(&g, "receipts", "delivery_unknown") == 1, Duration::from_secs(10)).await, "the forward's answer was lost");
+    held.release(1);
+    let v = tokio::time::timeout(Duration::from_secs(15), cancel).await.expect("the cancel is answered").unwrap();
+    call_cancel::test_hooks::LOSE_FORWARD_ANSWER.pin().remove(&g.a.node_id().to_string());
+    assert_eq!(v["error"]["code"], -32603, "outcome unknown, neither canceled nor completed: {v}");
+    let v = a2a(&g, "alice-secret", "tasks/get", serde_json::json!({"id": "t-1"})).await;
+    assert!(v.to_string().contains("stopped"), "the send's answer stays readable: {v}");
     drop(held);
     g.a.shutdown().await;
     p.a.shutdown().await;

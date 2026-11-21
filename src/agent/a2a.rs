@@ -385,8 +385,9 @@ impl TaskReservation {
     /// revocation before its durable write returns, so the send's answer can arrive while the task is still in the
     /// table — the provider's stop, or a call that completed on its own. This method cannot tell which, so the answer
     /// is **parked** on the call's handle and the task stays as it is; the cancel decides by what the provider answered
-    /// its forward (`handle_tasks_cancel`): `Stopped` — the answer was the stop's, and the task is cancelled; anything
-    /// else — the task is recorded with this answer, completed, and the cancel answers *"task already completed"*.
+    /// its forward (`handle_tasks_cancel`): `Stopped` — the answer was the stop's, and the task is cancelled;
+    /// `NotRunning` — recorded as completed, the cancel *"task already completed"*; anything else — recorded, the
+    /// cancel's outcome unknown.
     fn complete(mut self, task: Task) {
         #[cfg(all(feature = "gateway", feature = "tls"))]
         if let Some(call) = self.call.as_ref().filter(|c| c.cancel_asked()) {
@@ -1160,10 +1161,12 @@ fn record_parked_completion(state: &A2aState, task_id: &str, parked: Task) {
 /// so the call may already have stopped; the error says the cancel is held in memory only. Kept, it reads as working
 /// in `tasks/get` until `A2A_TASK_TTL` (300 s) removes it, its send having answered.
 ///
-/// **A send that answers while the cancel is being recorded** (#821's review, F1) is decided by what the provider
-/// answered the forward: `Stopped` — the answer was the stop's, and the task is cancelled (or kept, if the disk
-/// refused); anything else, or no answer in the forward's 5 s and a second — the call completed on its own, its result
-/// is recorded and readable, and the cancel answers `-32002` *"task already completed"*. An answer that arrives after
+/// **A send that answers while the cancel is being recorded** (#821's review, F1, and its confirm round) is decided
+/// by what the provider answered the forward, three ways: `Stopped` — the answer was the stop's, and the task is
+/// cancelled (or kept, if the disk refused); `NotRunning` — the work ended with no stop of the provider's: the call
+/// completed, its result is recorded and readable, and the cancel answers `-32002` *"task already completed"*;
+/// anything else, or no answer in the forward's 5 s and a second — **unknown**: the answer is recorded as the task's
+/// result (its sender was given it) and the cancel answers `-32603`, neither *canceled* nor *completed*. An answer that arrives after
 /// the cancel removed the task reaches its sender only, as before.
 async fn handle_tasks_cancel(
     state:  &A2aState,
@@ -1186,14 +1189,27 @@ async fn handle_tasks_cancel(
         let call = state.tasks.pin().get(task_id).and_then(|e| e.call.clone());
         if let Some(call) = call {
             let recorded = super::call_cancel::cancel_at_door(&state.task_ctx, &call).await;
-            // The send answered while the cancel was recorded (#821's review, F1): the provider's stop, or a call that
-            // completed on its own. The provider's answer to the forward decides: only `Stopped` makes it the stop's.
+            // The send answered while the cancel was recorded (#821's review, F1, and its confirm round): the provider's
+            // stop, or a call that completed on its own. The provider's answer to the forward decides, three ways, and an
+            // answer not seen is never read as a negative: `Stopped` — the stop's; `NotRunning` — the work ended with no
+            // stop of the provider's, so it completed; anything else — unknown.
             if let Some(parked) = call.parked().cloned() {
-                let stopped = call.forwarded_class(super::call_cancel::CANCEL_FORWARD_TIMEOUT_MS + 1_000).await
-                    == Some(super::call_cancel::CancelClass::Stopped);
-                if !stopped {
-                    record_parked_completion(state, task_id, parked);
-                    return jsonrpc_error(id, -32002, "task already completed");
+                use super::call_cancel::CancelClass;
+                match call.forwarded_class(super::call_cancel::CANCEL_FORWARD_TIMEOUT_MS + 1_000).await {
+                    Some(CancelClass::Stopped) => {}
+                    Some(CancelClass::NotRunning) => {
+                        record_parked_completion(state, task_id, parked);
+                        return jsonrpc_error(id, -32002, "task already completed");
+                    }
+                    _ => {
+                        // Kept readable: its sender was given it. Neither canceled nor completed is known.
+                        record_parked_completion(state, task_id, parked);
+                        return jsonrpc_error(
+                            id,
+                            -32603,
+                            "the call answered while the cancel was recorded and the provider did not confirm a stop; its answer is the task's result",
+                        );
+                    }
                 }
             }
             if let Err(e) = recorded {

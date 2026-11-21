@@ -775,8 +775,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`CancelRefusal::NotDurable`, A2A `-32603`) has still been forwarded — the call may have been stopped, and the stop
   is held in memory only; it used to stand in the gateway's process only, unforwarded. `cancel_call` then answers a new
   `CancelRefusal::NotDurableForwarded { class, error }` carrying the provider's answer. At `/a2a`, a send answering
-  while its cancel is recorded is cancelled only if the provider answered the forward `Stopped`; a call that completed
-  on its own keeps its result and the cancel answers `-32002`. A gateway that crashes between
+  while its cancel is recorded is cancelled if the provider answered the forward `Stopped`, answered `-32002` with its
+  result kept if `NotRunning`, and otherwise kept as the task's result with the cancel answering `-32603`, outcome
+  unknown. A gateway that crashes between
   the forward and the sync answers nothing and leaves no record of the revocation; after a provider restart the call,
   presented again inside its window, is admitted (the bound, stated and tested). A revocation reaches disk no sooner:
   the WAL is unchanged (that is §9 O11, group commit). *Check:* read `NotDurable` as *perhaps stopped, not on disk*,

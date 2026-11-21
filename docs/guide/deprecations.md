@@ -5662,10 +5662,14 @@ told nothing, which a caller must read as *not acknowledged*, never as a refusal
 **At `/a2a`, a send that answers while its cancel is being recorded is decided by the provider's answer to the
 forward.** The forward can stop the skill, and the skill's answer reach the gateway, before the cancel's durable write
 returns — and a skill can also complete on its own in that window. The answer is held aside until the cancel's write
-returns: if the provider answered the forward **`Stopped`**, it was the stop's answer and the task is `canceled`
-(kept, if the disk refused); **otherwise** — any other class, or none within the forward's 5 s and a second — the call
-completed on its own: the task is recorded `completed` with its result, readable by `tasks/get`, and the cancel answers
-**`-32002` *"task already completed"***. An answer that arrives after the cancel removed the task reaches its sender
+returns, and the provider's answer to the forward decides, three ways (#821's confirm round):
+- **`Stopped`** — it was the stop's answer: the task is `canceled` (kept, with `-32603`, if the disk refused);
+- **`NotRunning`** — the provider saw the work end with no stop of its own: the call completed, the answer is recorded
+  as the task's result, readable by `tasks/get`, and the cancel answers **`-32002` *"task already completed"***;
+- **anything else** — `StopRequested`, `Unbounded`, `NotRegistered`, `NotForwarded`, `DeliveryUnknown`, or no answer
+  within the forward's 5 s and a second — **the outcome is unknown**: the answer is recorded as the task's result (its
+  sender was given it), and the cancel answers **`-32603`** *"the call answered while the cancel was recorded and the
+  provider did not confirm a stop"* — neither *canceled* nor *completed*, since a lost answer is never a negative. An answer that arrives after the cancel removed the task reaches its sender
 only, as before. The send itself is answered as before.
 
 **`cancel_call`'s forward runs on a task of its own.** A caller that drops the future stops neither the forward nor

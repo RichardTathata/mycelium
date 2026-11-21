@@ -75,7 +75,7 @@ work.
   accepted only from the issuing gateway — `cancel_not_from_issuer` otherwise) and record it on disk beside the
   forward; the caller's acknowledgement waits for the disk, the provider's stop does not
   ([§124](../guide/deprecations.md); identity-and-lifecycle §9 O10). A cancel the disk refuses has still been
-  forwarded: `cancel_call` answers `NotDurableForwarded` with the provider's class (A2A `-32603`, the task kept — it reads as working in `tasks/get` until `A2A_TASK_TTL`, 300 s), the stop held in memory only. At `/a2a` a send that answers while its cancel is recorded is the stop's only if the provider answered the forward `Stopped`; otherwise the call completed on its own, its result is kept and the cancel answers `-32002`. `cancel_call` returns a
+  forwarded: `cancel_call` answers `NotDurableForwarded` with the provider's class (A2A `-32603`, the task kept — it reads as working in `tasks/get` until `A2A_TASK_TTL`, 300 s), the stop held in memory only. At `/a2a` a send that answers while its cancel is recorded is decided by the provider's answer to the forward: `Stopped` — the stop's, the task `canceled`; `NotRunning` — the call completed, its result kept, the cancel `-32002`; anything else (a lost answer among them) — outcome unknown, the answer kept as the task's result and the cancel `-32603`, never *canceled* or *completed*. `cancel_call` returns a
   `CancelReceipt` whose class is the provider's own answer — `Stopped` only where the agent doing the work promised
   to stop and it ended, `Unbounded` where it made no such promise, `DeliveryUnknown` for no answer (never a
   negative). Tests: [`src/agent/call_cancel_tests.rs`](../../src/agent/call_cancel_tests.rs).

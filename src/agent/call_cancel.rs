@@ -285,10 +285,14 @@ async fn forward(ctx: &TaskCtx, target: NodeId, checkpoint: &SignedRevocationChe
     let Ok(payload) = serde_json::to_vec(&json!({ "v": 1, "checkpoint": checkpoint })) else { return CancelClass::DeliveryUnknown };
     // A test stands in for a lost forward: the same `Timeout` a dropped frame gives, read by the same match.
     #[cfg(test)]
+    test_hooks::forward_gate(&ctx.node_id).await;
+    #[cfg(test)]
     let reply = if test_hooks::forward_suppressed(&ctx.node_id) {
         Err(super::rpc::RpcError::Timeout)
     } else {
-        super::rpc::rpc_call_ctx(ctx, target, Arc::from(CANCEL_RPC_KIND), Bytes::from(payload), Duration::from_millis(CANCEL_FORWARD_TIMEOUT_MS)).await
+        let reply = super::rpc::rpc_call_ctx(ctx, target, Arc::from(CANCEL_RPC_KIND), Bytes::from(payload), Duration::from_millis(CANCEL_FORWARD_TIMEOUT_MS)).await;
+        // A test stands in for a forward delivered whose answer is lost (#821's confirm round): the provider acted on it.
+        if test_hooks::answer_lost(&ctx.node_id) { Err(super::rpc::RpcError::Timeout) } else { reply }
     };
     #[cfg(not(test))]
     let reply = super::rpc::rpc_call_ctx(ctx, target, Arc::from(CANCEL_RPC_KIND), Bytes::from(payload), Duration::from_millis(CANCEL_FORWARD_TIMEOUT_MS)).await;
@@ -716,6 +720,26 @@ pub(crate) mod test_hooks {
 
     pub(super) fn forward_suppressed(node: &crate::node_id::NodeId) -> bool {
         SUPPRESS_FORWARD.pin().contains_key(&node.to_string())
+    }
+
+    /// Per gateway node: each forward waits at its start for a permit (a test's way of delaying it until the call has
+    /// completed on its own). Closed, it lets every forward by.
+    pub(crate) static HOLD_FORWARD: std::sync::LazyLock<papaya::HashMap<String, std::sync::Arc<tokio::sync::Semaphore>>> = std::sync::LazyLock::new(papaya::HashMap::new);
+
+    pub(super) async fn forward_gate(node: &crate::node_id::NodeId) {
+        let gate = HOLD_FORWARD.pin().get(&node.to_string()).cloned();
+        if let Some(gate) = gate
+            && let Ok(permit) = gate.acquire().await
+        {
+            permit.forget();
+        }
+    }
+
+    /// Per gateway node: forwards are sent, and their answers are lost (the receipt answers `DeliveryUnknown`).
+    pub(crate) static LOSE_FORWARD_ANSWER: std::sync::LazyLock<papaya::HashMap<String, ()>> = std::sync::LazyLock::new(papaya::HashMap::new);
+
+    pub(super) fn answer_lost(node: &crate::node_id::NodeId) -> bool {
+        LOSE_FORWARD_ANSWER.pin().contains_key(&node.to_string())
     }
 
     /// Per gateway node: run once between the `/mcp` table's eviction scan and its removals.

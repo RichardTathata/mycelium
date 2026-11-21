@@ -3844,8 +3844,13 @@ Items found while building a row that the row does not own. Each names its home,
       it, so the cancel answered *"task already completed"*. **Corrected by #821's review (F1):** the first fix left
       every answer during the cancel unrecorded, so a call that *completed on its own* in that window was answered
       `canceled` and its result lost. Now `TaskReservation::complete` parks the answer on the call's handle and the
-      cancel decides by the provider's answer to the forward (`CallSink::forwarded_class`): `Stopped` — the stop's,
-      the task cancelled; anything else — completed, its result recorded, the cancel `-32002`.
+      cancel decides by the provider's answer to the forward (`CallSink::forwarded_class`), **three ways (#821's
+      confirm round, which found the two-way rule calling a stop whose answer was lost a completion)**: `Stopped` —
+      the stop's, the task cancelled; `NotRunning` — completed, its result recorded, the cancel `-32002`; anything
+      else, a lost answer among them — **unknown**: the answer recorded as the task's result, the cancel `-32603`,
+      neither *canceled* nor *completed*. `a_stop_whose_forward_answer_is_lost_is_answered_unknown_never_completed`
+      (the reviewer's probe 1: the forward delivered, its answer lost, the write held), seen failing on 3276b116
+      (`-32002`).
       `a_call_that_completes_while_its_cancel_is_recorded_is_answered_completed_and_its_result_kept` (the reviewer's
       probe: write held, forward suppressed, the skill completing in 2 s), seen failing with the first fix planted
       back (`canceled`, `tasks/get` `-32001`); the stop's-answer case stays pinned by the door and NotDurable tests.
