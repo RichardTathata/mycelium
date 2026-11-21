@@ -2318,7 +2318,12 @@ read `again`; `SeqCst` on that two-variable handshake; a guard clears `running` 
 `single_flight::tests::a_request_made_while_a_run_ends_is_run` plants the window. (D) Tests that called `refresh` or
 `client_cert::refresh` once and then read the result (`lib_tests.rs` ×4, `client_grant_tests.rs`, `client_cert_tests.rs`
 ×3, `consent_decision_tests.rs`) could read before any fold had run while the watcher's fold held `running`. They now
-use `refresh_through_for_test`, a bounded ticket wait.
+use `refresh_through_for_test`, a bounded ticket wait. **The confirm round added two.** The holder's half of the
+handshake (re-reading `again` after releasing `running`) had no test: a mutant without it passed every test.
+`a_request_that_finds_the_run_held_as_it_ends_is_run_by_the_holder` plants a second call between the holder's last
+pass and its release, and was seen failing first on that mutant. And `revoke_key` folded once after writing the
+record, so with a fold already running, the revoked key stayed trusted on this node until that fold ended. It now
+waits on a ticket (`refresh_through`); `a_revocation_is_in_force_here_when_revoke_returns_while_another_fold_runs`.
 In `revocation.rs`'s own tests the `anchors_durable_for` waits behind a planted hold were already bounded
 (`tokio::time::timeout`); the rest wait on an unplanted append, which settles within the journal's 5 s `ACK_TIMEOUT`
 (`SettleAppend` settles it on every exit), and none of them retries a fold.

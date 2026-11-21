@@ -24,7 +24,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   without seeing the call's request. The change was then applied only at the next trigger: another record, or the
   maintenance tick, 60 s or more later. A call now records its request before it checks for a running fold, and a
   fold that ends checks for requests after it stops (`src/agent/single_flight.rs`). A panic in a fold no longer
-  leaves the fold marked running.
+  leaves the fold marked running. **What that meant in 2.40.0:** a revocation or certificate record that arrived in
+  that window was not applied on this node until the next identity or revocation record arrived, or until the
+  maintenance tick (every `max(60 s, health_check_interval_secs)`). For that long, a revoked key could stay trusted
+  here. No patch release: the fix ships with wave 1b.
+- **`revoke_identity_key` (and the compliance revoke route) returns with the revocation in force on this node.** It
+  wrote the record and folded once; if a fold was already running, which the write itself can start, the call
+  returned before that fold ended, and this node trusted the revoked key until it did. It now waits for a fold that
+  started after the write (`revocation::refresh_through`).
 - **The governed-call scaffold waits until both nodes know each other before node B calls node A** (found as a CI flake
   in the Scaffold job: the run ended `Error: Timeout`). It waited for B's connection only. A has no bootstrap peers
   and sends a reply only to a node in its own peer table, so a call made before A had heard of B lost its reply and

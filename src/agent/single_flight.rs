@@ -16,6 +16,9 @@
 //!   reads `again`. Both sides store one variable then read the other, so both are `SeqCst` (the wiki's ordering
 //!   policy, a two-sided handshake): at least one of them sees the other, and that one runs.
 //!
+//! A request made while a pass panics waits for the next call: unwinding skips the holder's re-check of `again`
+//! (the guard still releases `running`, so that next call runs).
+//!
 //! Lock-free (atomics only): no lock-order row.
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -34,6 +37,9 @@ thread_local! {
     /// A plant run once by the next [`SingleFlight::run`] on this thread, between asking (`again`) and trying
     /// `running` — the window the lost request lived in.
     pub(crate) static BETWEEN_ASK_AND_TRY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// A plant run once by the next holder on this thread after its last `again.swap(false)` found no request and
+    /// before it releases `running` — the window the holder's re-check of `again` covers.
+    pub(crate) static AFTER_LAST_PASS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Clears `running` on every exit of a run, a panic included: a panic in a fold must not leave every later call
@@ -70,6 +76,10 @@ impl SingleFlight {
                     if pass() {
                         self.done.fetch_max(asked, Ordering::Release);
                     }
+                }
+                #[cfg(test)]
+                if let Some(plant) = AFTER_LAST_PASS.with(|p| p.borrow_mut().take()) {
+                    plant();
                 }
             }
             if !self.again.load(Ordering::SeqCst) {
@@ -140,6 +150,35 @@ mod tests {
         });
         holder.join().unwrap();
         assert!(runs.load(Ordering::SeqCst) >= 2, "one run for two asks: the second call's request was lost");
+    }
+
+    /// **A request that finds the run held just before the holder releases it is run** (#822's confirm round: the
+    /// holder's half of the handshake). The holder has made its last pass and found no request; before it releases
+    /// `running`, a second call asks, finds `running` held and returns. The holder's re-check of `again` after the
+    /// release sees the request and makes a second pass. Seen failing first with the re-check removed (the holder
+    /// returning after the release): one pass for two asks.
+    #[test]
+    fn a_request_that_finds_the_run_held_as_it_ends_is_run_by_the_holder() {
+        let sf = Arc::new(SingleFlight::default());
+        let passes = Arc::new(AtomicU64::new(0));
+        let (s, p) = (Arc::clone(&sf), Arc::clone(&passes));
+        AFTER_LAST_PASS.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                let asker = std::thread::spawn(move || {
+                    s.run(|| {
+                        p.fetch_add(1, Ordering::SeqCst);
+                        true
+                    })
+                });
+                asker.join().unwrap();
+            }))
+        });
+        let p = Arc::clone(&passes);
+        sf.run(|| {
+            p.fetch_add(1, Ordering::SeqCst);
+            true
+        });
+        assert_eq!(passes.load(Ordering::SeqCst), 2, "the holder ran a second pass for the request made as it ended");
     }
 
     /// **A panic in a run leaves no run claimed**: the next call runs (#822's review, the guard).

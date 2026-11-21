@@ -2648,6 +2648,57 @@ async fn an_owner_does_not_adopt_a_revocation_planted_through_its_raw_identity()
     assert!(k0_trusted, "and C's retired, unrevoked key still verifies at B");
 }
 
+/// **A revocation is in force on this node when `revoke_identity_key` returns, even while another fold runs**
+/// (#822's confirm round). `revoke_key` wrote the record and called `refresh` once; with a fold already running (the
+/// identity watcher's, woken by that very write, or the maintenance tick's) the call returned at once, and this node
+/// trusted the revoked key until that fold ended. Here a fold is running on another thread, slowed to 300 ms, when the
+/// key is revoked: the revoked key is in this node's standing for itself when the call returns. Seen failing first
+/// with the single `refresh`: the key was not yet revoked here.
+#[cfg(all(feature = "tls", feature = "compliance"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revocation_is_in_force_here_when_revoke_returns_while_another_fold_runs() {
+    use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    let port = alloc_port();
+    let dir = std::env::temp_dir().join(format!("myc-revoke-through-{port}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.tls = Some({
+        let mut tls = crate::config::TlsConfig::default();
+        tls.auto_cert_dir = dir.clone();
+        tls
+    });
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.unwrap();
+    let k0 = a.identity_public_key().unwrap();
+    a.rotate_identity(Duration::from_millis(100)).await.unwrap();
+    crate::agent::revocation::refresh_through_for_test(&a.task_ctx);
+    let ctx = Arc::clone(&a.task_ctx);
+    let folds = Arc::new(AtomicU64::new(0));
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+    let started_tx = std::sync::Mutex::new(Some(started_tx));
+    let f = Arc::clone(&folds);
+    ctx.identity_ledger.fold_plant.store(Some(Arc::new(Box::new(move || {
+        if f.fetch_add(1, SeqCst) == 0 {
+            if let Some(tx) = started_tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    }))));
+    let c = Arc::clone(&ctx);
+    let other = std::thread::spawn(move || crate::agent::revocation::refresh(&c));
+    started_rx.recv_timeout(Duration::from_secs(10)).expect("the other fold started");
+    a.revoke_identity_key(k0).unwrap();
+    let revoked_here = ctx.key_standing.get(&id).is_some_and(|s| s.revoked.contains(&k0));
+    other.join().unwrap();
+    ctx.identity_ledger.fold_plant.store(None);
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(revoked_here, "the revoked key was still trusted here when revoke_identity_key returned");
+}
+
 /// **Revoking one key twice writes one record** (the final review's finding 7). Each call re-signed a
 /// new record for the same `(P, S)`, and each was journaled — sixty-four calls saturated the node. The
 /// second call now keeps the first record. Seen failing first on 38da0472: "a second revocation of the

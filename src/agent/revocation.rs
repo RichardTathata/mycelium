@@ -645,7 +645,7 @@ pub(crate) struct IdentityLedger {
     fold: super::single_flight::SingleFlight,
     /// A test's plant, run at the start of every fold (the livelock test slows the fold with it).
     #[cfg(test)]
-    pub(super) fold_plant: arc_swap::ArcSwapOption<Box<dyn Fn() + Send + Sync>>,
+    pub(crate) fold_plant: arc_swap::ArcSwapOption<Box<dyn Fn() + Send + Sync>>,
     /// Certificate records whose issuance was past `wall_now_ms` plus the skew bound when judged.
     pub(crate) cert_future: AtomicU64,
     /// Records skipped because a per-node or per-key cap was full.
@@ -1498,6 +1498,18 @@ pub(crate) fn refresh_answers(ctx: &TaskCtx, ticket: u64) -> bool {
     ctx.identity_ledger.fold.answered(ticket)
 }
 
+/// [`refresh`] until a fold that started after this call has run whole, on any thread — for a caller that acts on
+/// the fold's result at once (`revoke_key`: this node's own verifiers stop trusting the revoked key before it
+/// returns; #822's confirm round). Unbounded, as the identity wait in `GossipAgent::change_roots`: only roots that
+/// never stop changing can starve it.
+#[cfg_attr(not(feature = "compliance"), allow(dead_code))]
+pub(crate) fn refresh_through(ctx: &TaskCtx) {
+    let ticket = fold_ticket(ctx);
+    while !refresh_answers(ctx, ticket) {
+        std::thread::yield_now();
+    }
+}
+
 /// Fold until a fold that started after this call has run whole (the tests' one-call `refresh` returned at once
 /// while the identity watcher's fold ran, and asserted on a fold that had not happened yet; #822's review, D).
 /// Bounded at 30 s: synchronous, so no `tokio` timeout could interrupt it.
@@ -1840,7 +1852,7 @@ pub(crate) fn revoke_key(
         if mycelium_core::ops::kv_get(ctx, &path).as_deref() != Some(bytes.as_slice()) {
             let _ = mycelium_core::ops::kv_set(ctx, Arc::from(path.as_str()), bytes::Bytes::from(bytes));
         }
-        refresh(ctx);
+        refresh_through(ctx);
         return Ok(());
     }
     let mut certs = vec![mycelium_core::ops::kv_get(ctx, &cert_record_key(&ctx.node_id, &current)).map(|b| b.to_vec()).unwrap_or_else(|| tls.node_cert_der())];
@@ -1851,8 +1863,9 @@ pub(crate) fn revoke_key(
     let bytes = encode_v2(event, &tls.signing_key(), certs);
     let _ = mycelium_core::ops::kv_set(ctx, Arc::from(path.as_str()), bytes::Bytes::from(bytes.clone()));
     ctx.identity_ledger.own(path, bytes);
-    // Our own verifiers stop at once, not when the watcher next runs.
-    refresh(ctx);
+    // Our own verifiers stop at once, not when the watcher next runs: a fold that started after the record was
+    // written has run before this returns, even while the watcher's fold (woken by the write) holds the fold.
+    refresh_through(ctx);
     Ok(())
 }
 
