@@ -42,7 +42,17 @@ This feature is turned on in code.
   grant, `deprecations.md` §77): a client holding `grant:issue` is not thereby
   an approver of everything, and a gateway with no evaluator answers nothing. The two scopes are checked only in a build
   with `compliance` (the published node has it); without it any valid bearer reaches the routes and the evaluator
-  alone decides. A grant is issued for an agent on this
+  alone decides. The revoke acts only on the grant recorded at the path's `…/issued` that this node signed (under any
+  key it has held), held by the path's agent, and **answering the path's request** — its term the request, its scope
+  `grant:{request}`: any other record, a genuine grant copied from another request included, is refused
+  `409 unreadable_grant` and nothing is revoked. The agent's wait and `GET /gateway/grants/request/{request}` read such
+  a copy as no answer. Each such **read** is counted on `/stats` as `grant_issued_refused` (`revoke` · `agent_wait` ·
+  `status`); the SDKs poll every 0.5 s, so one copy counts once per poll. **Revoking can still be denied.** A member who
+  writes a copy, garbage or a tombstone to `…/issued` stops the issuing node revoking that request, and the grant stays
+  live until its `valid_until`. Refusing beats revoking the wrong term. Closing it needs the issuing node's own memory
+  of what it issued: identity-and-lifecycle I7-S's decision journal (PR 2). The status route verifies no signature: a
+  forged grant with the right term and holder is handed out as `issued`, and every door refuses it. A
+  grant is issued for an agent on this
   node or on a fleet member this node holds the key of; the agent's node decides whether that issuer may
   ([`entitle_grants_from_fleet`](../../src/mandate/grant.rs)). [`gw_grants_stream`](../../src/agent/http/grants.rs) —
   `GET /gateway/grants/stream` (`grant:read`): the open requests as they come, `grant_request` once each (the standing
@@ -78,7 +88,8 @@ This feature is turned on in code.
   with the client's key ([client certificates](client-certificates.md)). The tests are in [`src/agent/client_grant_tests.rs`](../../src/agent/client_grant_tests.rs):
   `a_grant_held_by_a_client_principal_is_requested_issued_presented_and_revoked`,
   `a_client_grant_is_revoked_against_its_issued_resource_with_the_provider_gone` (two nodes),
-  `a_possession_proof_by_a_superseded_client_key_is_refused` and
+  `a_possession_proof_by_a_superseded_client_key_is_refused`,
+  `the_status_route_reads_a_grant_copied_from_another_request_as_no_answer` and
   `the_request_door_reuses_a_standing_request_bounds_them_and_withholds_a_classified_rendering`.
 - **Signed decisions** (identity-and-lifecycle I3, D3 and D5): a supervisor holding a client certificate signs its
   answer — issue, refuse or revoke — and the node it is addressed to records **the signer** as the decision's actor,
@@ -167,6 +178,10 @@ This feature is turned on in code.
   [`src/agent/http/grant_tests.rs`](../../src/agent/http/grant_tests.rs): a slow call under a grant stopped by the
   revocation within the drain bound, a second grant revoked before use refused at the doors, a bystander's revocation
   refused by policy.
+- `a_revoke_refuses_a_genuine_grant_copied_under_another_request` (two nodes) and
+  `the_agents_wait_reads_a_grant_copied_from_another_request_as_absent`, in
+  [`src/agent/http/grant_tests.rs`](../../src/agent/http/grant_tests.rs): a member's copy of a genuine grant under
+  another request's `…/issued` is not revoked in that request's name, nor taken by the agent's wait as its answer.
 - `a_grant_revoked_between_the_preflight_and_the_registration_refuses_the_call`, in
   [`src/agent/http/grant_tests.rs`](../../src/agent/http/grant_tests.rs): a call held after the provider's preflight
   while its grant is revoked is refused by name (mandate lapsed before run), and the tool does not run.

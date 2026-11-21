@@ -703,9 +703,18 @@ pub(super) async fn gw_grant_request_status(
         return refused(StatusCode::NOT_FOUND, "unknown_request", format!("no grant request of yours at {request}"));
     };
     let now_ms = tc.hlc.decision_now_ms();
+    // An issued record that is another request's grant is no answer to this one (the owner-signed rule's (b)): read
+    // as absent and counted. The doors verify the grant itself; this is what the caller is handed to present.
+    let answers = |g: &serde_json::Value| {
+        let ok = serde_json::from_value::<SignedMandateGrant>(g.clone()).is_ok_and(|s| super::gateway_authority::grant_answers_key(&s.mandate, &key));
+        if !ok {
+            super::gateway_authority::IssuedRefused::note(&tc.grant_issued_refused.status);
+        }
+        ok
+    };
     let body = if let Some(r) = read("/revoked") {
         json!({ "ok": true, "state": "revoked", "revocation": r })
-    } else if let Some(g) = read("/issued") {
+    } else if let Some(g) = read("/issued").filter(answers) {
         json!({ "ok": true, "state": "issued", "grant": g })
     } else if let Some(r) = read("/refused") {
         json!({ "ok": true, "state": "refused", "refusal": r })
@@ -783,9 +792,15 @@ pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     let Some(bytes) = mycelium_core::ops::kv_get(ctx, &format!("{key}/issued")) else {
         return Err(GrantRefusal::door(StatusCode::NOT_FOUND, "not_issued", format!("no grant was issued at {key}")));
     };
+    // A record that fails any check below is not this request's grant: refused by name and counted (the owner-signed
+    // rule's (c)); nothing is revoked on its strength.
+    let unreadable = |detail: String| {
+        super::gateway_authority::IssuedRefused::note(&ctx.grant_issued_refused.revoke);
+        GrantRefusal::door(StatusCode::CONFLICT, "unreadable_grant", detail)
+    };
     let grant: SignedMandateGrant = match serde_json::from_slice(&bytes) {
         Ok(g) => g,
-        Err(e) => return Err(GrantRefusal::door(StatusCode::CONFLICT, "unreadable_grant", format!("{key}/issued: {e}"))),
+        Err(e) => return Err(unreadable(format!("{key}/issued: {e}"))),
     };
     let this_node = gateway_caller::node_principal(&ctx.node_id);
     if grant.mandate.established_by.as_str() != this_node {
@@ -800,10 +815,16 @@ pub(crate) async fn revoke_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
     // this node's to revoke (#743's review, round 2). Bytes no key of this node signed are refused.
     let canonical = grant.mandate.canonical_bytes();
     if !own_keys(ctx, tls).iter().any(|k| mycelium_core::tls::verify_bytes(k, &canonical, &grant.signature)) {
-        return Err(GrantRefusal::door(StatusCode::CONFLICT, "unreadable_grant", format!("{key}/issued is not signed by any key of this node's identity")));
+        return Err(unreadable(format!("{key}/issued is not signed by any key of this node's identity")));
     }
     if grant.mandate.holder.as_str() != holder_principal {
-        return Err(GrantRefusal::door(StatusCode::CONFLICT, "unreadable_grant", format!("{key}/issued is held by {}, not {holder_principal}", grant.mandate.holder.as_str())));
+        return Err(unreadable(format!("{key}/issued is held by {}, not {holder_principal}", grant.mandate.holder.as_str())));
+    }
+    // The grant must be the one this request was answered with: its term and scope are what the checkpoint below
+    // revokes, and a genuine grant of this node's for the same holder copied here from another request verifies above.
+    // Revoking on it would revoke that other grant, leave this one live and record this one revoked.
+    if !super::gateway_authority::grant_answers_key(&grant.mandate, &key) {
+        return Err(unreadable(format!("{key}/issued is the grant for term {} (scope {}), not for request {request}: nothing is revoked", grant.mandate.term.as_str(), grant.mandate.scope)));
     }
     if mycelium_core::ops::kv_get(ctx, &format!("{key}/revoked")).is_some() {
         return Err(GrantRefusal::door(StatusCode::CONFLICT, "already_revoked", format!("{key} was already revoked")));
