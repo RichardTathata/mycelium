@@ -12,14 +12,21 @@
 //! decision inside its window finds the request already answered or already revoked **while that answer is on
 //! record**. No nonce cache is kept.
 //!
-//! **What the signature does not bind, and what follows** (#813's review, F1, 2026-11-19; true since I3). The signed
-//! bytes name no tool, resource or arguments digest: the grant is issued from this node's own copy of the request
-//! record, which is unsigned in the KV. So a member who rewrites that record changes what a signed decision is
-//! applied to; and the answer a replay "finds" is `…/issued`, a KV record any member can tombstone — with it gone,
-//! the same signed body is admitted again within the freshness window, for whatever the record then says. Both were
-//! run against a node. Closed by identity-and-lifecycle row I7-S (the decider signs what it saw; a spent-decision
-//! memory that is not a deletable KV record); `mycelium_core::tls::CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN`
-//! blocks a release until then.
+//! **What the signature names** (identity-and-lifecycle I7-S, PR 1; the maintainer's decisions of 2026-11-20). Since
+//! I7-S a decision names **what its decider saw**: the request's tool, resource, arguments digest and expiry, in one
+//! block ([`Shown`]) signed after the grade ([`grant_decision_message_shown`]). The addressed node compares the block
+//! with its own copy of the request record, field by field, and refuses a difference by name
+//! (`decision_names_another_request`, `http/grants.rs`): a member who rewrites the record after the decider read it
+//! no longer moves the decision onto another request. A consent decider's decision names the block or is refused
+//! (`decision_shown_missing`); a service's that names nothing is refused by default (`decision_names_nothing`;
+//! `gateway_accept_unnamed_decisions`, one release, counted, `deprecations.md` §123). A decision with no block has
+//! exactly the bytes it had before, so every earlier signature stands.
+//!
+//! **What still does not hold** (#813's review, F1, 2026-11-19; true since I3): the answer a replay "finds" is
+//! `…/issued`, a KV record any member can tombstone — with it gone, the same signed body is admitted again within
+//! the freshness window (up to 900 s of node time at the default drift: 300 s plus drift behind, the drift ahead),
+//! now only for the request it names. Closed by I7-S's second PR (a spent-decision memory that is not a deletable KV
+//! record); `mycelium_core::tls::CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN` blocks a release until then.
 //!
 //! ## The grade (identity-and-lifecycle I7: P1, P2, P4 as H2 revised it, P7)
 //!
@@ -71,8 +78,9 @@ pub const GRANT_DECISION_TAG: &[u8] = b"mycelium.gateway/grant-decision/1";
 /// struct literal is refused (`docs/guide/deprecations.md` §118).
 ///
 /// ```
-/// let d = mycelium::SignedDecision::from_parts("consent:fleet/richard", "127.0.0.1:7946", "token:fleet/forecaster", "r1", 1, "a2V5", "c2ln", Some("tty"));
-/// assert_eq!(d.grade.as_deref(), Some("tty"));
+/// let d = mycelium::SignedDecision::from_parts("consent:fleet/richard", "127.0.0.1:7946", "token:fleet/forecaster", "r1", 1, "a2V5", "c2ln", Some("tty"))
+///     .naming(mycelium::Shown::new("weather.forecast", "tool:weather.forecast@127.0.0.1:7946", "ab12", 2));
+/// assert_eq!((d.grade.as_deref(), d.shown.as_ref().map(|s| s.tool.as_str())), (Some("tty"), Some("weather.forecast")));
 /// ```
 ///
 /// The same fields as a literal do not compile — the twin of the block above, so the error is the literal:
@@ -107,6 +115,66 @@ pub struct SignedDecision {
     /// refuses a body that carries it (unknown field), so verifiers are upgraded before a signer names a grade.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grade: Option<String>,
+    /// **What the decider saw** (identity-and-lifecycle I7-S): the request's tool, resource, arguments digest and
+    /// expiry, inside the signature after the grade — so a block requires a grade. The addressed node compares it
+    /// with its own copy of the request record and refuses a difference by name. Serialised only when present, so a
+    /// body without it is byte-for-byte what it was — and a node before I7-S refuses a body that carries it (unknown
+    /// field), so the gateways are upgraded before a signer names the block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown: Option<Shown>,
+}
+
+/// **What a decider saw of a grant request** (identity-and-lifecycle I7-S, D1): the four fields of the request record
+/// a grant is issued from. Signed inside a decision ([`SignedDecision::shown`]) or, for a bearer's unsigned decision,
+/// sent beside it (`shown` in the decision body, D4); either way the addressed node compares each field with its own
+/// record and refuses a difference, naming the field.
+///
+/// The digest is the record's **string**, compared byte for byte: a node never recomputes it (it may hold no
+/// arguments), and a request recorded under the pre-I3 digest form (`deprecations.md` §93) is named in that form.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Shown {
+    /// The tool the request names.
+    pub tool: String,
+    /// The resource, `tool:{tool}@{node}`.
+    pub resource: String,
+    /// The arguments digest, as the record writes it.
+    pub arguments_digest: String,
+    /// When the request lapses (the record's `expires_at_ms`): the node refuses the decision as `expired` from this
+    /// value too.
+    pub request_expires_at_ms: u64,
+}
+
+impl Shown {
+    /// The block's marker in the signed message: room for later fields under another version.
+    pub const MARKER: &'static str = "shown/1";
+
+    /// A block from its fields.
+    pub fn new(tool: impl Into<String>, resource: impl Into<String>, arguments_digest: impl Into<String>, request_expires_at_ms: u64) -> Self {
+        Self { tool: tool.into(), resource: resource.into(), arguments_digest: arguments_digest.into(), request_expires_at_ms }
+    }
+
+    /// The block a request record names — a row of `GET /gateway/grants/pending` or a `grant_request` event: its
+    /// `tool`, `resource`, `arguments_digest` and `expires_at_ms`. `None` when one is absent or not of its type.
+    pub fn from_record(record: &serde_json::Value) -> Option<Self> {
+        Some(Self::new(record["tool"].as_str()?, record["resource"].as_str()?, record["arguments_digest"].as_str()?, record["expires_at_ms"].as_u64()?))
+    }
+
+    /// The first field in which `self` and `other` differ, by its name in the block, or `None` when they are equal.
+    pub fn differs_from(&self, other: &Self) -> Option<&'static str> {
+        if self.tool != other.tool {
+            Some("tool")
+        } else if self.resource != other.resource {
+            Some("resource")
+        } else if self.arguments_digest != other.arguments_digest {
+            Some("arguments_digest")
+        } else if self.request_expires_at_ms != other.request_expires_at_ms {
+            Some("request_expires_at_ms")
+        } else {
+            None
+        }
+    }
 }
 
 /// The grade a service's decision is recorded with (identity-and-lifecycle I7): a `token:` decider signing with its
@@ -247,7 +315,7 @@ pub fn grant_decision_message(
     reason: Option<&str>,
     issued_at_ms: u64,
 ) -> Vec<u8> {
-    grant_decision_message_graded(decider, node, agent, request, decision, ttl_secs, reason, issued_at_ms, None)
+    grant_decision_message_shown(decider, node, agent, request, decision, ttl_secs, reason, issued_at_ms, None, None)
 }
 
 /// [`grant_decision_message`] with the signer's **grade** (identity-and-lifecycle I7): when `grade` is `Some`, a `u32`
@@ -267,6 +335,28 @@ pub fn grant_decision_message_graded(
     issued_at_ms: u64,
     grade: Option<&str>,
 ) -> Vec<u8> {
+    grant_decision_message_shown(decider, node, agent, request, decision, ttl_secs, reason, issued_at_ms, grade, None)
+}
+
+/// [`grant_decision_message_graded`] with **what the decider saw** (identity-and-lifecycle I7-S, D1): when `shown` is
+/// `Some`, after the grade come [`Shown::MARKER`], the tool, the resource and the arguments digest — each a `u32`
+/// little-endian length and its bytes — then the request's `expires_at_ms` as a `u64` little-endian. When it is
+/// `None` nothing follows the grade, so every earlier signature stands. **A block requires a grade**: a verifier
+/// refuses a body naming the block without one (`decision_shown_ungraded`). **Published format**, pinned in
+/// `tests/fixtures/decision/vector.json` (`shown`).
+#[allow(clippy::too_many_arguments)]
+pub fn grant_decision_message_shown(
+    decider: &str,
+    node: &str,
+    agent: &str,
+    request: &str,
+    decision: &str,
+    ttl_secs: Option<u64>,
+    reason: Option<&str>,
+    issued_at_ms: u64,
+    grade: Option<&str>,
+    shown: Option<&Shown>,
+) -> Vec<u8> {
     let ttl = ttl_secs.map(|t| t.to_string()).unwrap_or_default();
     let mut out = GRANT_DECISION_TAG.to_vec();
     for part in [decider, node, agent, request, decision, ttl.as_str(), reason.unwrap_or("")] {
@@ -277,6 +367,13 @@ pub fn grant_decision_message_graded(
     if let Some(grade) = grade {
         out.extend_from_slice(&(grade.len() as u32).to_le_bytes());
         out.extend_from_slice(grade.as_bytes());
+    }
+    if let Some(shown) = shown {
+        for part in [Shown::MARKER, shown.tool.as_str(), shown.resource.as_str(), shown.arguments_digest.as_str()] {
+            out.extend_from_slice(&(part.len() as u32).to_le_bytes());
+            out.extend_from_slice(part.as_bytes());
+        }
+        out.extend_from_slice(&shown.request_expires_at_ms.to_le_bytes());
     }
     out
 }
@@ -296,7 +393,14 @@ impl SignedDecision {
         sig: impl Into<String>,
         grade: Option<&str>,
     ) -> Self {
-        Self { decider: decider.into(), node: node.into(), agent: agent.into(), request: request.into(), t, k: k.into(), sig: sig.into(), grade: grade.map(str::to_string) }
+        Self { decider: decider.into(), node: node.into(), agent: agent.into(), request: request.into(), t, k: k.into(), sig: sig.into(), grade: grade.map(str::to_string), shown: None }
+    }
+
+    /// The same decision naming what its decider saw (identity-and-lifecycle I7-S): `sig` must be over the message
+    /// with the block ([`grant_decision_message_shown`]).
+    pub fn naming(mut self, shown: Shown) -> Self {
+        self.shown = Some(shown);
+        self
     }
 
     /// Whether `sig` is a signature under `k` over this decision — the signed fields, the decision's terms and the
@@ -307,7 +411,7 @@ impl SignedDecision {
     /// consent key's signature in a build that reads no consent certificate (the provisional gate).
     #[cfg(feature = "tls")]
     pub fn verify_signature(&self, decision: &str, ttl_secs: Option<u64>, reason: Option<&str>) -> bool {
-        if self.grade.as_deref() == Some("") {
+        if self.grade.as_deref() == Some("") || (self.shown.is_some() && self.grade.is_none()) {
             return false;
         }
         let Some(key) = DeciderKey::decode(self) else { return false };
@@ -316,7 +420,7 @@ impl SignedDecision {
 
     /// The bytes this decision's signature is over, for `decision` and its terms.
     pub fn message(&self, decision: &str, ttl_secs: Option<u64>, reason: Option<&str>) -> Vec<u8> {
-        grant_decision_message_graded(&self.decider, &self.node, &self.agent, &self.request, decision, ttl_secs, reason, self.t, self.grade.as_deref())
+        grant_decision_message_shown(&self.decider, &self.node, &self.agent, &self.request, decision, ttl_secs, reason, self.t, self.grade.as_deref(), self.shown.as_ref())
     }
 }
 
@@ -355,9 +459,47 @@ pub fn sign_grant_decision_graded(
     issued_at_ms: u64,
     grade: Option<&str>,
 ) -> SignedDecision {
+    sign_with(key, decider, node, agent, request, decision, ttl_secs, reason, issued_at_ms, grade, None)
+}
+
+/// [`sign_grant_decision`] **naming what the decider saw** (identity-and-lifecycle I7-S): the block `shown`, after the
+/// grade [`GRADE_SERVICE`] — a block requires a grade, and an Ed25519 key is a service's. What a gateway after I7-S
+/// admits by default from a service decider.
+#[cfg(feature = "tls")]
+#[allow(clippy::too_many_arguments)]
+pub fn sign_grant_decision_naming(
+    key: &ed25519_dalek::SigningKey,
+    decider: &str,
+    node: &str,
+    agent: &str,
+    request: &str,
+    decision: &str,
+    ttl_secs: Option<u64>,
+    reason: Option<&str>,
+    issued_at_ms: u64,
+    shown: &Shown,
+) -> SignedDecision {
+    sign_with(key, decider, node, agent, request, decision, ttl_secs, reason, issued_at_ms, Some(GRADE_SERVICE), Some(shown))
+}
+
+#[cfg(feature = "tls")]
+#[allow(clippy::too_many_arguments)]
+fn sign_with(
+    key: &ed25519_dalek::SigningKey,
+    decider: &str,
+    node: &str,
+    agent: &str,
+    request: &str,
+    decision: &str,
+    ttl_secs: Option<u64>,
+    reason: Option<&str>,
+    issued_at_ms: u64,
+    grade: Option<&str>,
+    shown: Option<&Shown>,
+) -> SignedDecision {
     use base64::Engine as _;
     use ed25519_dalek::Signer as _;
-    let msg = grant_decision_message_graded(decider, node, agent, request, decision, ttl_secs, reason, issued_at_ms, grade);
+    let msg = grant_decision_message_shown(decider, node, agent, request, decision, ttl_secs, reason, issued_at_ms, grade, shown);
     let b64 = base64::engine::general_purpose::STANDARD;
     SignedDecision {
         decider: decider.to_string(),
@@ -368,6 +510,7 @@ pub fn sign_grant_decision_graded(
         k: b64.encode(key.verifying_key().to_bytes()),
         sig: b64.encode(key.sign(&msg).to_bytes()),
         grade: grade.map(str::to_string),
+        shown: shown.cloned(),
     }
 }
 
@@ -410,6 +553,15 @@ pub(crate) enum DecisionRefusal {
     /// The decision's grade — the signed body's and the certificate's, which agree — is not the one this gateway's
     /// `gateway_consent_principals` entry accepts for the principal (the maintainer's decision of 2026-11-17).
     GradeNotAccepted(String),
+    /// A body naming what its decider saw ([`Shown`]) with no grade: the block follows the grade (I7-S).
+    ShownUngraded,
+    /// A consent decider's issue or refusal names nothing of what it was shown (I7-S, D1).
+    ShownMissing,
+    /// A service decider's or a bearer's issue or refusal names nothing of what it saw, at a gateway that does not
+    /// accept such a decision (`gateway_accept_unnamed_decisions` unset, the default — I7-S, D2 and D4).
+    NamesNothing,
+    /// A revocation naming a block: a revocation names the grant at its path, not a request's content.
+    ShownOnRevoke,
 }
 
 #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -431,13 +583,17 @@ impl DecisionRefusal {
             Self::GradeMismatch(_) => "decision_grade_mismatch",
             Self::RecordingOutsideSim => "recording_grade_outside_sim",
             Self::GradeNotAccepted(_) => "decision_grade_not_accepted",
+            Self::ShownUngraded => "decision_shown_ungraded",
+            Self::ShownMissing => "decision_shown_missing",
+            Self::NamesNothing => "decision_names_nothing",
+            Self::ShownOnRevoke => "decision_shown_on_revoke",
         }
     }
 
     pub(crate) fn status(&self) -> axum::http::StatusCode {
         use axum::http::StatusCode;
         match self {
-            Self::Malformed | Self::GradeEmpty => StatusCode::BAD_REQUEST,
+            Self::Malformed | Self::GradeEmpty | Self::ShownUngraded | Self::ShownOnRevoke => StatusCode::BAD_REQUEST,
             Self::NotAddressedHere(_) | Self::IssuerUnset => StatusCode::CONFLICT,
             Self::ConsentUnread => StatusCode::UNPROCESSABLE_ENTITY,
             _ => StatusCode::FORBIDDEN,
@@ -461,7 +617,29 @@ impl DecisionRefusal {
             Self::GradeMismatch(why) => why.clone(),
             Self::RecordingOutsideSim => "a `recording` consent grade is accepted only by a `sim` build".into(),
             Self::GradeNotAccepted(why) => why.clone(),
+            Self::ShownUngraded => "signed.shown follows a grade: a decision naming what its decider saw names its grade too (a service's is `service`)".into(),
+            Self::ShownMissing => "a consent principal's decision names what it was shown (signed.shown: tool, resource, arguments_digest, request_expires_at_ms), inside the signature".into(),
+            Self::NamesNothing => "the decision names nothing of what its decider saw: sign it naming the request record's tool, resource, arguments_digest and expires_at_ms (signed.shown), or send them as `shown` beside a bearer's decision; gateway_accept_unnamed_decisions admits such a decision, counted, for one release (deprecations.md §123)".into(),
+            Self::ShownOnRevoke => "a revocation names the grant at its path; it carries no `shown`".into(),
         }
+    }
+}
+
+/// What a decision's block refuses, before any key is used (identity-and-lifecycle I7-S): `shown` and `graded` say
+/// whether the body names a block and a grade, `consent` whether the decider is a consent principal; an unsigned
+/// bearer's decision is `graded`, `consent` false. A revocation names none; an issue or refusal naming a block names a
+/// grade; a consent decider's issue or refusal names one; a service's or a bearer's that names none is refused unless
+/// this gateway accepts unnamed decisions (`gateway_accept_unnamed_decisions`, D2, counted where it is answered).
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) fn shown_refusal(ctx: &super::TaskCtx, shown: bool, graded: bool, consent: bool, decision: &str) -> Option<DecisionRefusal> {
+    match (decision == "revoke", shown) {
+        (true, true) => Some(DecisionRefusal::ShownOnRevoke),
+        (true, false) => None,
+        (false, true) if !graded => Some(DecisionRefusal::ShownUngraded),
+        (false, true) => None,
+        (false, false) if consent => Some(DecisionRefusal::ShownMissing),
+        (false, false) if !ctx.config.gateway_accept_unnamed_decisions => Some(DecisionRefusal::NamesNothing),
+        (false, false) => None,
     }
 }
 
@@ -504,6 +682,10 @@ pub(crate) fn verify(
             return Err(DecisionRefusal::GradeMismatch(format!("{} is a service principal, whose decisions are recorded `{GRADE_SERVICE}`: it names `{g}`", signed.decider)))
         }
         _ => {}
+    }
+    // What the decider saw (I7-S), as the body writes it, before any key is used.
+    if let Some(refusal) = shown_refusal(ctx, signed.shown.is_some(), signed.grade.is_some(), consent, decision) {
+        return Err(refusal);
     }
     if ctx.tls.get().is_none() {
         return Err(DecisionRefusal::Unverifiable);

@@ -346,8 +346,21 @@ impl ClientSigner {
     /// `GET /health` reports it): `decision` is `issue` (with `ttl_secs`), `refuse` or `revoke` (with `reason`).
     /// Send the result as the decision body's `signed` field (identity-and-lifecycle I3).
     #[allow(clippy::too_many_arguments)]
+    ///
+    /// This names nothing of what the signer saw, and a gateway after identity-and-lifecycle I7-S refuses such an
+    /// issue or refusal by default (`decision_names_nothing`): use [`Self::sign_grant_decision_naming`] for those; a
+    /// revocation names no block.
     pub fn sign_grant_decision(&self, node: &str, agent: &str, request: &str, decision: &str, ttl_secs: Option<u64>, reason: Option<&str>) -> super::grant_decision::SignedDecision {
         super::grant_decision::sign_grant_decision(&self.key, &self.principal, node, agent, request, decision, ttl_secs, reason, mycelium_core::sim_seam::wall_now_ms())
+    }
+
+    /// Sign an issue or refusal of the request `record` names — a row of `GET /gateway/grants/pending` or a
+    /// `grant_request` event — **naming what this signer saw** (identity-and-lifecycle I7-S): its holder, id, tool,
+    /// resource, arguments digest and expiry, under the grade `service`. `None` when the record lacks one of them.
+    pub fn sign_grant_decision_naming(&self, node: &str, record: &serde_json::Value, decision: &str, ttl_secs: Option<u64>, reason: Option<&str>) -> Option<super::grant_decision::SignedDecision> {
+        let shown = super::grant_decision::Shown::from_record(record)?;
+        let (agent, request) = (record["agent"].as_str()?, record["request"].as_str()?);
+        Some(super::grant_decision::sign_grant_decision_naming(&self.key, &self.principal, node, agent, request, decision, ttl_secs, reason, mycelium_core::sim_seam::wall_now_ms(), &shown))
     }
 
     /// `{"cs": …, "cn": …}`, to merge into `params._meta`.
@@ -629,6 +642,14 @@ pub(crate) struct UnsignedActions {
     /// (identity-and-lifecycle I3): counted now, refused at the refusal release (`deprecations.md` §95).
     #[cfg(feature = "gateway")]
     pub(crate) decisions: AtomicU64,
+    /// Grant decisions answered naming nothing of what their decider saw, admitted only under
+    /// `gateway_accept_unnamed_decisions` (identity-and-lifecycle I7-S, D2; `deprecations.md` §123).
+    #[cfg(feature = "gateway")]
+    pub(crate) decisions_unnamed: AtomicU64,
+    /// Grant decisions refused because what they name is not the request record this node holds — the record
+    /// rewritten after the decider read it, or a decision sent for another request (I7-S, `decision_names_another_request`).
+    #[cfg(feature = "gateway")]
+    pub(crate) decisions_naming_another: AtomicU64,
     /// The same, counted where the call runs: a provider receiving an unsigned `mcp.invoke` or `skill.invoke` for a
     /// principal whose certificate it holds — what a gateway that strips `cs` leaves behind (#742's review, item 4).
     pub(crate) at_provider: AtomicU64,
@@ -656,6 +677,24 @@ impl UnsignedActions {
         #[cfg(feature = "metrics")]
         metrics::counter!("mycelium_gateway_decisions_unsigned_total", "decision" => decision).increment(1);
         tracing::warn!(decision, "a grant decision was answered with no decider's signature (signed)");
+    }
+
+    /// Count one grant decision answered naming nothing of what its decider saw (I7-S, D2), under the opt-out.
+    #[cfg(feature = "gateway")]
+    pub(crate) fn note_unnamed(&self, decision: &'static str) {
+        self.decisions_unnamed.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_gateway_decisions_unnamed_total", "decision" => decision).increment(1);
+        tracing::warn!(decision, "a grant decision naming nothing of what its decider saw was answered under gateway_accept_unnamed_decisions (one release; deprecations.md §123)");
+    }
+
+    /// Count one grant decision refused because the block it names differs from this node's record in `field`.
+    #[cfg(feature = "gateway")]
+    pub(crate) fn note_naming_another(&self, field: &'static str) {
+        self.decisions_naming_another.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_gateway_decisions_mismatched_total", "field" => field).increment(1);
+        tracing::warn!(field, "a grant decision names another request than the record this node holds: refused");
     }
 
     /// Count one received at this provider.

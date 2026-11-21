@@ -4,7 +4,7 @@ import { Federation } from "./federation";
 import { Artifacts } from "./artifacts";
 import { authHeaders, baseUrl, resolveToken, type AuthOptions } from "./auth";
 import { pathSegment, wholeSeconds, withCausal } from "./wire";
-import type { ClientSigner } from "./client_sig";
+import { shownFromRecord, type ClientSigner, type Shown } from "./client_sig";
 import {
   KvReceipt,
   CausalOptions,
@@ -286,6 +286,9 @@ export interface GrantEvent {
   [field: string]: unknown;
 }
 
+/** `grantDecide`'s options: an issue's `ttlSecs`, a refusal's `reason`, and a `signer` with the `node` it addresses. */
+export interface GrantDecideOptions { ttlSecs?: number; reason?: string; signer?: ClientSigner; node?: string }
+
 /** The answer to a grant decision: the record written and its receipt's rung. */
 export interface GrantAnswer {
   ok: boolean;
@@ -555,7 +558,12 @@ export class MyceliumAgent {
 
   /**
    * `POST /gateway/grants/{agent}/{request}` (`grant:issue`, or `grant:relay` with `signer`): answer a pending
-   * request. With `signer` — a {@link ClientSigner} for a principal holding a client certificate and `grant:issue` at
+   * request. `record` is the request as `grantsPending()` lists it or `grantsStream()` reports it, and the decision
+   * **names what was decided on** (identity-and-lifecycle I7-S): its tool, resource, arguments digest and expiry
+   * ({@link shownFromRecord}) — signed inside the decision with `signer`, sent beside it without. The node compares
+   * them with its own record and refuses a difference by name (409 `decision_names_another_request`), so a record
+   * rewritten after it was read here is not the one decided; one disagreeing with itself is 409 `unreadable_request`.
+   * The ids-only form is deprecated: a gateway after I7-S refuses it (403 `decision_names_nothing`). With `signer` — a {@link ClientSigner} for a principal holding a client certificate and `grant:issue` at
    * the node — the decision is signed (identity-and-lifecycle I3): the node records the signer as its actor, so this
    * client's own bearer needs only `grant:relay`. It is addressed to `node`, read from `GET /health` when not given;
    * `agent` is then the holder's principal, as the pending list names it.
@@ -580,24 +588,39 @@ export class MyceliumAgent {
    * - the answer: 403 `no_identity` (the node cannot sign a grant); 409 `already_revoked` (a later checkpoint stands
    *   beside the request); 503 `not_durable` (not on disk; the request is still pending — retry); 500 `serialise`.
    */
+  async grantDecide(record: PendingGrant | GrantEvent, decision: "issue" | "refuse", options?: GrantDecideOptions): Promise<GrantAnswer>;
+  /**
+   * @deprecated Names nothing of what was decided on, and a gateway after identity-and-lifecycle I7-S refuses it
+   * (`decision_names_nothing`) unless its operator sets `gateway_accept_unnamed_decisions`: pass the pending record,
+   * `grantDecide(record, decision)`.
+   */
+  async grantDecide(agent: string, request: string, decision: "issue" | "refuse", options?: GrantDecideOptions): Promise<GrantAnswer>;
   async grantDecide(
-    agent: string,
-    request: string,
-    decision: "issue" | "refuse",
-    options: { ttlSecs?: number; reason?: string; signer?: ClientSigner; node?: string } = {},
+    first: PendingGrant | GrantEvent | string,
+    second: string,
+    third?: "issue" | "refuse" | GrantDecideOptions,
+    fourth?: GrantDecideOptions,
   ): Promise<GrantAnswer> {
+    let agent: string, request: string, decision: string, options: GrantDecideOptions, shown: Shown | undefined;
+    if (typeof first === "string") {
+      [agent, request, decision, options, shown] = [first, second, third as string, fourth ?? {}, undefined];
+    } else {
+      if (typeof first.agent !== "string" || typeof first.request !== "string") throw new Error("a request record names its agent and request");
+      [agent, request, decision, options, shown] = [first.agent, first.request, second, (third as GrantDecideOptions | undefined) ?? {}, shownFromRecord(first as Record<string, unknown>)];
+    }
     if (decision !== "issue" && decision !== "refuse") throw new Error('decision must be "issue" or "refuse"');
     const signed = options.signer
       ? options.signer.signGrantDecision(options.node ?? (await this.nodeId), agent, request, decision, {
           ttlSecs: decision === "issue" ? options.ttlSecs : undefined,
           reason: decision === "refuse" ? options.reason : undefined,
+          shown,
         })
       : undefined;
     return (await this._post(`/gateway/grants/${pathSegment(agent)}/${pathSegment(request)}`, {
       decision,
       ...(options.ttlSecs !== undefined ? { ttl_secs: options.ttlSecs } : {}),
       ...(options.reason !== undefined ? { reason: options.reason } : {}),
-      ...(signed ? { signed } : {}),
+      ...(signed ? { signed } : shown ? { shown } : {}),
     })) as GrantAnswer;
   }
 

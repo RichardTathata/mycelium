@@ -27,7 +27,7 @@ Must exit 0. Today it fails while `CONSENT_GRADE_OID_IS_PROVISIONAL` is `true` i
 grade extension's OID is a documentation-PEN placeholder until the registered IANA Private Enterprise Number arc
 arrives, and a certificate carrying an OID is permanent (identity-and-lifecycle I7). Replace `CONSENT_GRADE_OID` with
 the registered arc, set the constant to `false`, and update the golden (`the_grade_extensions_oid_and_each_grades_der_are_pinned`)
-in one PR before cutting a release that carries I7. It fails too while `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN` is `true` in the same file, which is not an OID: a consent decision's signature does not yet name the tool, resource and digest the approver was shown, so an approval can be moved to another call and replayed (the maintainer's decision of 2026-11-18; identity-and-lifecycle row I7-S, the approver signs what it saw). The PR that builds I7-S sets it `false`. The release workflow's `version` job runs the same check on the
+in one PR before cutting a release that carries I7. It fails too while `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN` is `true` in the same file, which is not an OID: a signed grant decision can still be replayed for the same request once its answer (`…/issued`) is removed (the maintainer's decision of 2026-11-18; identity-and-lifecycle row I7-S — its first PR made a decision name what its decider saw, so it can no longer be moved to another call). I7-S's second PR, the node's own record of answered requests, sets it `false`. The release workflow's `version` job runs the same check on the
 tag push and refuses the release by name.
 
 ## 2b. CI on the branch you are releasing **from**

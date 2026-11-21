@@ -116,7 +116,53 @@ fn client_key_in(a: &GossipAgent, certs: &Path, out: &Path, name: &str) -> ed255
     ed25519_dalek::SigningKey::from_pkcs8_der(der.secret_pkcs8_der()).unwrap()
 }
 
-async fn http(http_port: u16, bearer: &str, method: reqwest::Method, path: &str, body: Option<serde_json::Value>) -> (u16, serde_json::Value) {
+/// What the request door answered for each request these tests asked (identity-and-lifecycle I7-S): the block a
+/// decider that read the record names — as a supervisor reading `GET /gateway/grants/pending` would.
+static ASKED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, crate::Shown>>> = std::sync::LazyLock::new(Default::default);
+
+/// The block of a request these tests asked, as its door answered it.
+fn asked_block(request: &str) -> Option<crate::Shown> {
+    ASKED.lock().unwrap().get(request).cloned()
+}
+
+/// A request to the node's gateway, as a supervisor that names what it read makes it: the request door's answer is
+/// remembered ([`ASKED`]), and an unsigned issue or refusal carrying no `shown` names the remembered block (I7-S, D4).
+/// [`http_raw`] sends the body as it is.
+async fn http(http_port: u16, bearer: &str, method: reqwest::Method, path: &str, mut body: Option<serde_json::Value>) -> (u16, serde_json::Value) {
+    let decision_on = path.strip_prefix("/gateway/grants/").filter(|p| !p.ends_with("/revoke") && !p.starts_with("request") && method == reqwest::Method::POST).and_then(|p| p.rsplit('/').next()).map(percent_decoded);
+    if let (Some(request), Some(b)) = (&decision_on, body.as_mut())
+        && b.get("signed").is_none()
+        && b.get("shown").is_none()
+        && let Some(shown) = asked_block(request)
+    {
+        b["shown"] = serde_json::to_value(shown).unwrap();
+    }
+    let tool = body.as_ref().and_then(|b| b["tool"].as_str().map(str::to_string));
+    let answer = http_raw(http_port, bearer, method, path, body).await;
+    if path == "/gateway/grants/request"
+        && let Some(shown) = tool.and_then(|tool| crate::Shown::from_record(&serde_json::json!({"tool": tool, "resource": answer.1["resource"], "arguments_digest": answer.1["arguments_digest"], "expires_at_ms": answer.1["expires_at_ms"]})))
+    {
+        ASKED.lock().unwrap().insert(answer.1["request"].as_str().unwrap_or_default().to_string(), shown);
+    }
+    answer
+}
+
+fn percent_decoded(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let (mut out, mut i) = (Vec::new(), 0);
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() && let Ok(b) = u8::from_str_radix(&segment[i + 1..i + 3], 16) {
+            out.push(b);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+async fn http_raw(http_port: u16, bearer: &str, method: reqwest::Method, path: &str, body: Option<serde_json::Value>) -> (u16, serde_json::Value) {
     let mut req = reqwest::Client::new().request(method, format!("http://127.0.0.1:{http_port}{path}")).bearer_auth(bearer);
     if let Some(b) = body {
         req = req.json(&b);
@@ -447,7 +493,7 @@ async fn a_principal_without_a_client_certificate_neither_asks_for_nor_is_issued
     let (a, _ran) = started(&dir, http_port).await;
     let (status, asked) = http(http_port, "nobody-secret", reqwest::Method::POST, "/gateway/grants/request", Some(serde_json::json!({"tool": TOOL, "arguments": {}}))).await;
     let segment = crate::agent::gateway_authority::grant_holder_segment("token:fleet/nobody");
-    let (dstatus, decided) = http(http_port, "treasurer-secret", reqwest::Method::POST, &format!("/gateway/grants/{segment}/0000000000000001"), Some(serde_json::json!({"decision": "issue"}))).await;
+    let (dstatus, decided) = http(http_port, "treasurer-secret", reqwest::Method::POST, &format!("/gateway/grants/{segment}/0000000000000001"), Some(serde_json::json!({"decision": "issue", "shown": {"tool": TOOL, "resource": "tool:x@y", "arguments_digest": "00", "request_expires_at_ms": 1}}))).await;
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!((status, asked["error"].as_str()), (409, Some("not_a_client_holder")), "ASKED: {asked}");
@@ -931,7 +977,7 @@ async fn a_signed_decision_relayed_under_grant_relay_is_the_signers() {
     let (_, r3) = ask(args3.clone()).await;
     let (req1, req2, req3) = (r1["request"].as_str().unwrap().to_string(), r2["request"].as_str().unwrap().to_string(), r3["request"].as_str().unwrap().to_string());
     let sign = |key: &ed25519_dalek::SigningKey, decider: &str, node: &str, request: &str, decision: &str, ttl: Option<u64>, reason: Option<&str>| {
-        crate::sign_grant_decision(key, decider, node, FORECASTER, request, decision, ttl, reason, mycelium_core::sim_seam::wall_now_ms())
+        signed_by(key, decider, node, request, decision, ttl, reason, mycelium_core::sim_seam::wall_now_ms())
     };
     let decide = |bearer: &'static str, request: String, body: serde_json::Value| async move {
         http(http_port, bearer, reqwest::Method::POST, &format!("/gateway/grants/{}/{}", segment(FORECASTER), segment(&request)), Some(body)).await
@@ -991,9 +1037,19 @@ async fn a_signed_decision_relayed_under_grant_relay_is_the_signers() {
 
 const DECIDER: &str = "token:fleet/treasurer";
 
-/// A treasurer-signed decision on the forecaster's request `request`, at `t`.
+/// A treasurer-signed decision on the forecaster's request `request`, at `t`: an issue or refusal names the block
+/// the request door answered for it (identity-and-lifecycle I7-S), a revocation none.
 fn signed_at(key: &ed25519_dalek::SigningKey, node: &str, request: &str, decision: &str, ttl: Option<u64>, reason: Option<&str>, t: u64) -> crate::SignedDecision {
-    crate::sign_grant_decision(key, DECIDER, node, FORECASTER, request, decision, ttl, reason, t)
+    signed_by(key, DECIDER, node, request, decision, ttl, reason, t)
+}
+
+/// [`signed_at`] by `decider`.
+#[allow(clippy::too_many_arguments)]
+fn signed_by(key: &ed25519_dalek::SigningKey, decider: &str, node: &str, request: &str, decision: &str, ttl: Option<u64>, reason: Option<&str>, t: u64) -> crate::SignedDecision {
+    match asked_block(request).filter(|_| decision != "revoke") {
+        Some(shown) => crate::sign_grant_decision_naming(key, decider, node, FORECASTER, request, decision, ttl, reason, t, &shown),
+        None => crate::sign_grant_decision(key, decider, node, FORECASTER, request, decision, ttl, reason, t),
+    }
 }
 
 async fn post_decision(http_port: u16, bearer: &str, request: &str, body: serde_json::Value) -> (u16, serde_json::Value) {
@@ -1187,7 +1243,8 @@ async fn a_signed_decision_at_a_gateway_without_an_identity_issuer_is_refused_by
 fn a_node_without_an_identity_cannot_verify_a_signed_decision() {
     let a = GossipAgent::new(NodeId::new("127.0.0.1", alloc_port()).unwrap(), GossipConfig::default());
     let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
-    let signed = signed_at(&key, &a.node_id().to_string(), "r1", "issue", None, None, 1);
+    let node = a.node_id().to_string();
+    let signed = crate::sign_grant_decision_naming(&key, DECIDER, &node, FORECASTER, "r1", "issue", None, None, 1, &crate::Shown::new(TOOL, format!("tool:{TOOL}@{node}"), "00", 2));
     let got = crate::agent::grant_decision::verify(&a.task_ctx, &signed, FORECASTER, "r1", "issue", None, None, 1);
     assert_eq!(got.map_err(|e| e.code()), Err("decision_unverifiable"));
 }
@@ -1247,7 +1304,7 @@ async fn a_relayed_signed_decision_the_policy_refuses_is_refused_with_the_decide
     let auditor = client_key_in(&a, &dir.join("tls"), &dir.join("client-auditor"), "auditor");
     const AUDITOR: &str = "token:fleet/auditor";
     let node = a.node_id().to_string();
-    let signed = crate::sign_grant_decision(&auditor, AUDITOR, &node, FORECASTER, &requests[0], "issue", Some(600), None, mycelium_core::sim_seam::wall_now_ms());
+    let signed = signed_by(&auditor, AUDITOR, &node, &requests[0], "issue", Some(600), None, mycelium_core::sim_seam::wall_now_ms());
     let answer = post_decision(http_port, "relay-secret", &requests[0], serde_json::json!({"decision": "issue", "ttl_secs": 600, "signed": signed})).await;
     let issued = mycelium_core::ops::kv_get(&a.task_ctx, &format!("grant/{}/{}/issued", crate::agent::gateway_authority::grant_holder_segment(FORECASTER), requests[0]));
     a.shutdown().await;
@@ -1280,11 +1337,12 @@ async fn an_issue_the_node_cannot_sign_records_that_nothing_ran() {
     let record = serde_json::json!({
         "request": request, "agent": agent, "tool": TOOL,
         "arguments_digest": crate::agent::action_evaluator::hex32(&crate::arguments_digest(&serde_json::json!({"city": "Lyon"}))),
-        "resource": format!("tool:{TOOL}@{}", a.node_id()),
+        "resource": format!("tool:{TOOL}@{}", a.node_id()), "node": a.node_id().to_string(),
         "expires_at_ms": mycelium_core::sim_seam::wall_now_ms() + 60_000,
     });
+    let shown = crate::Shown::from_record(&record).unwrap();
     assert!(a.kv().set(format!("grant/{agent}/{request}"), bytes::Bytes::from(serde_json::to_vec(&record).unwrap())));
-    let answer = http(http_port, "treasurer-secret", reqwest::Method::POST, &format!("/gateway/grants/{}/{request}", segment(&agent)), Some(serde_json::json!({"decision": "issue", "ttl_secs": 60}))).await;
+    let answer = http(http_port, "treasurer-secret", reqwest::Method::POST, &format!("/gateway/grants/{}/{request}", segment(&agent)), Some(serde_json::json!({"decision": "issue", "ttl_secs": 60, "shown": shown}))).await;
     a.shutdown().await;
     let journal = journal_of(&dir);
     let _ = std::fs::remove_dir_all(&dir);
@@ -1305,3 +1363,8 @@ mod grant_use;
 #[cfg(feature = "provisional-consent-grade")]
 #[path = "consent_decision_tests.rs"]
 mod consent_decision;
+
+/// Identity-and-lifecycle I7-S, PR 1: a grant decision names what its decider saw, and the node compares it with its
+/// record. A child module, for this file's fleet and decision helpers.
+#[path = "grant_shown_tests.rs"]
+mod grant_shown;

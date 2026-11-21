@@ -282,7 +282,8 @@ call waits for a supervisor's grant and is refused on silence. Running it needs:
   pushes them as server-sent events: `grant_request` once each, `grant_answered` for each issue, refusal or
   revocation, `grant_expired` for one that lapses unanswered.
 - **Answering.** `POST /gateway/grants/{agent}/{request}` with `{"decision": "issue" | "refuse", "ttl_secs": …,
-  "reason": …}`; `ttl_secs` defaults to 300 and is capped at 3 600. The door's own refusals: `404 unknown_request`,
+  "reason": …, "shown": {"tool", "resource", "arguments_digest", "request_expires_at_ms"}}` — `shown` read from the
+  pending row (I7-S, below; without it the answer is `403 decision_names_nothing` by default); `ttl_secs` defaults to 300 and is capped at 3 600. The door's own refusals: `404 unknown_request`,
   `409 already_answered`, `409 not_a_member` (an agent on no member node this gateway knows), `410 expired`.
 - **Signed decisions.** A supervisor with a client certificate signs its answer (`"signed": {...}`, the SDKs'
   `signer=`), and the node records the signer as the actor; a client carrying it needs only `grant:relay`. The
@@ -290,6 +291,12 @@ call waits for a supervisor's grant and is refused on silence. Running it needs:
   `403 stale`, `403 decider_lacks_scope`; unsigned under `grant:relay` alone, `403 decision_unsigned`. Unsigned
   decisions under `grant:issue` are counted (`/stats` `grant_decisions_unsigned`) and refused at a later release
   (`deprecations.md` §95) — watch the counter, and give supervisors a client certificate before then.
+- **A decision names what it was made on** (identity-and-lifecycle I7-S, unreleased). An issue or refusal names the
+  request record's tool, resource, digest and expiry — inside `signed`, or as `shown` beside a bearer's body (the
+  SDKs' `grant_decide(record, …)`) — and the node refuses one its own record contradicts (`409
+  decision_names_another_request`) or one naming nothing (`403 decision_names_nothing`); for one release
+  [`gateway_accept_unnamed_decisions`](../reference/configuration.md#gateway_accept_unnamed_decisions) admits the
+  latter, counted (`grant_decisions_unnamed`). Upgrade the gateways before the deciders ([grants](../features/grants.md)).
 - **A person's consent** (identity-and-lifecycle I7, unreleased and behind the provisional grade OID). A developer's
   [consent principal](../features/consent-certificates.md), `consent:{issuer}/{name}`, signs decisions with a P-256
   key and holds `grant:issue` only through

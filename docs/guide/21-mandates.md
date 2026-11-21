@@ -386,10 +386,16 @@ checkpoint from the issuer naming the term. The decision record carries the gran
 
 ```text
 GET  /gateway/grants/pending                      grant:read   — the open requests, oldest first
-POST /gateway/grants/{agent}/{request}            grant:issue or grant:relay — {"decision": "issue"|"refuse", "ttl_secs", "reason", "signed"?}
+POST /gateway/grants/{agent}/{request}            grant:issue or grant:relay — {"decision": "issue"|"refuse", "ttl_secs", "reason", "shown" | "signed" (naming "shown")}
 POST /gateway/grants/{agent}/{request}/revoke     grant:issue or grant:relay — {"reason", "signed"?}, at the node that issued
 GET  /gateway/grants/stream                       grant:read   — SSE: grant_request once each, grant_answered on issue · refuse · revoke, grant_expired on a lapse
 ```
+
+`shown` is what the decider read of the request — its record's `tool`, `resource`, `arguments_digest` and
+`expires_at_ms` as `request_expires_at_ms` (identity-and-lifecycle I7-S): beside a bearer's body, or inside `signed`. The
+node refuses a decision whose block its record contradicts (`409 decision_names_another_request`) and, by default, one
+naming none (`403 decision_names_nothing`; `gateway_accept_unnamed_decisions` admits it for one release). The SDKs'
+`grant_decide(record, …)` / `grantDecide(record, …)` send it from the pending row.
 
 `signed` is a supervisor's own signature over its answer (identity-and-lifecycle I3): the node records the signer as
 the actor, and a client carrying it needs only `grant:relay` — under which an unsigned body is refused. See

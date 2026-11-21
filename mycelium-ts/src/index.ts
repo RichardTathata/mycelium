@@ -94,5 +94,5 @@ export {
   type LoadOptions,
   type RunSchedulesOptions,
 } from "./eve";
-export { ClientSigner, a2aBinding, clientSignatureMessage, grantDecisionMessage, holdsUnsafeInteger, mandateCanonicalBytes, mandateDigest, mcpBinding, possessionMessage, type ClientNonce, type ClientSignature, type Mandate, type SignedDecision, type SignedMandateGrant } from "./client_sig";
+export { ClientSigner, a2aBinding, clientSignatureMessage, grantDecisionMessage, holdsUnsafeInteger, mandateCanonicalBytes, mandateDigest, mcpBinding, possessionMessage, shownFromRecord, type ClientNonce, type ClientSignature, type Mandate, type Shown, type SignedDecision, type SignedMandateGrant } from "./client_sig";
 export { McpClient, McpError, GrantNotIssuedError, type CallToolOptions, type GrantRequestAnswer, type GrantStatus } from "./mcp";

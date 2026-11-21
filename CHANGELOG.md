@@ -228,6 +228,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   than 300 s plus drift is refused as stale, so it must be re-signed. In the attack, the grant whose record was copied
   **was really revoked**, and revocation is monotonic.
 
+- **A grant decision names what its decider saw, and a rewritten request record is no longer the one decided**
+  (identity-and-lifecycle I7-S, PR 1 of 2; #813's review, F1, the rewrite half; `deprecations.md` §123;
+  [grants](docs/features/grants.md)). A signed issue or refusal names the request record's tool, resource,
+  arguments digest and expiry inside its signature, after the grade (`signed.shown`); a bearer's unsigned one names
+  them beside its body (`shown`). The addressed node checks its own record against itself — for every decision — and
+  compares the block with it field by field, refusing a difference `409 decision_names_another_request` with the
+  field named and counted, before the evaluator is asked. Before this a member who rewrote the unsigned record after
+  the decider read it had the decision — a person's approval at `dev` included — applied to another tool, digest or
+  resource. **A service's or a bearer's decision naming nothing is refused by default** (`decision_names_nothing`);
+  `gateway_accept_unnamed_decisions` admits it, counted, for one release. Upgrade the gateways before any signer
+  names the block. `mycelium-py` (`grant_decide(record, decision)`, `shown_from_record`, `sign_grant_decision(…,
+  shown=)`) and `mycelium-ts` (`grantDecide(record, decision)`, `shownFromRecord`, `signGrantDecision(…, { shown })`)
+  take the pending record; the ids-only form is deprecated. `mycelium dev consent` signs the record's own digest
+  string, so a request recorded under the pre-I3 form is approved. A decision with no block keeps its bytes, and
+  every earlier signature and vector case stands. **Not in this change:** the replay half — a member who tombstones
+  `…/issued` can still have the same signed body admitted again for the same request, inside its window (up to 900 s
+  of node time at the default drift); I7-S's second PR closes it, and until then
+  `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN` stays `true` and blocks a release.
+
 - **A member can no longer re-arm a used grant** (critique plan row CR2, first PR; the owner-signed rule;
   `deprecations.md` §106). A grant admits one call at each enforcement point, and the only durable record of that
   use was the marker `grant/{holder}/{term}/used/{door}` in the gossip KV: an unsigned timestamp, read for

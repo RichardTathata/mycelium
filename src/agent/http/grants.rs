@@ -71,6 +71,11 @@ pub(super) struct GrantDecisionBody {
     /// The decider's signature over this decision (identity-and-lifecycle I3, D3): required under `grant:relay`.
     #[serde(default)]
     signed: Option<crate::agent::grant_decision::SignedDecision>,
+    /// What a bearer's unsigned decision was made on (identity-and-lifecycle I7-S, D4): the request record's tool,
+    /// resource, arguments digest and expiry, compared with this node's record as a signed block is. A signed
+    /// decision names its block inside `signed`, and a body carrying both is refused.
+    #[serde(default)]
+    shown: Option<crate::agent::grant_decision::Shown>,
 }
 
 /// A signed decision as it was presented, with the bearer that carried it (identity-and-lifecycle I3): kept on the
@@ -139,6 +144,11 @@ struct DecisionActor {
     relayed: Option<Relayed>,
     /// An unsigned decision under `grant:issue`: counted once it is answered (#754's review, finding 3).
     unsigned: bool,
+    /// An issue or refusal naming nothing of what its decider saw, admitted under `gateway_accept_unnamed_decisions`
+    /// (I7-S, D2): counted once it is answered.
+    unnamed: bool,
+    /// What the decision names (I7-S): the signed block, or a bearer's unsigned one — compared with the record.
+    named: Option<crate::agent::grant_decision::Shown>,
 }
 
 /// Who a decision route's answer is decided by, and who carried it.
@@ -147,6 +157,10 @@ struct DecisionActor {
 /// the decider holding `grant:issue` at this gateway, and the decider the actor — the bearer, which needs only
 /// `grant:relay`, is named as the relay. A body without `signed` is the bearer's own, under `grant:issue`; under
 /// `grant:relay` alone it is refused `decision_unsigned`.
+///
+/// What the decision names (identity-and-lifecycle I7-S): a signed body's block is inside `signed`; a bearer's
+/// unsigned one is the body's `shown` (D4). An issue or refusal naming none is refused `decision_names_nothing` unless
+/// this gateway sets `gateway_accept_unnamed_decisions` (D2); a revocation names none.
 #[allow(clippy::too_many_arguments)]
 fn decision_actor(
     ctx: &Arc<TaskCtx>,
@@ -157,6 +171,7 @@ fn decision_actor(
     ttl_secs: Option<u64>,
     reason: Option<&str>,
     signed: Option<&crate::agent::grant_decision::SignedDecision>,
+    body_shown: Option<&crate::agent::grant_decision::Shown>,
 ) -> Result<DecisionActor, Box<axum::response::Response>> {
     use crate::agent::grant_decision::{self as gd, DecisionRefusal};
     let refuse = |r: DecisionRefusal| Box::new(refused(r.status(), r.code(), r.detail()));
@@ -169,8 +184,15 @@ fn decision_actor(
         if relay_only {
             return Err(refuse(DecisionRefusal::Unsigned));
         }
-        return Ok(DecisionActor { caller: caller.cloned(), relayed: None, unsigned: true });
+        // A bearer names no grade, and its block needs none: it signs nothing (D4).
+        if let Some(r) = gd::shown_refusal(ctx, body_shown.is_some(), true, false, decision) {
+            return Err(refuse(r));
+        }
+        return Ok(DecisionActor { caller: caller.cloned(), relayed: None, unsigned: true, unnamed: decision != "revoke" && body_shown.is_none(), named: body_shown.cloned() });
     };
+    if body_shown.is_some() {
+        return Err(Box::new(refused(StatusCode::BAD_REQUEST, "bad_request", "a signed decision names what its decider saw inside `signed` (signed.shown), never beside it")));
+    }
     // As I1's doors refuse a signed call (#754's review, finding 5): without an issuer no decider is a principal here.
     if ctx.config.gateway_identity_issuer.is_none() {
         return Err(refuse(DecisionRefusal::IssuerUnset));
@@ -202,6 +224,8 @@ fn decision_actor(
         caller: Some(ResolvedPrincipal { principal: signed.decider.clone(), scopes: vec!["grant:issue".to_string()], subject_token: None }),
         relayed: Some(Relayed { signed: signed.clone(), signed_with, relay, decision, ttl_secs, reason: reason.map(str::to_string) }),
         unsigned: false,
+        unnamed: decision != "revoke" && signed.shown.is_none(),
+        named: signed.shown.clone(),
     })
 }
 
@@ -339,19 +363,32 @@ pub(super) async fn gw_grant_decide(
         "refuse" => ("refuse", None, body.reason.clone()),
         other => return refused(StatusCode::BAD_REQUEST, "bad_request", format!("decision must be \"issue\" or \"refuse\", not {other:?}")),
     };
-    let actor = match decision_actor(&ctx.agent_ctx, caller.as_ref(), &agent, &request, decision_word, ttl, reason.as_deref(), body.signed.as_ref()) {
+    let actor = match decision_actor(&ctx.agent_ctx, caller.as_ref(), &agent, &request, decision_word, ttl, reason.as_deref(), body.signed.as_ref(), body.shown.as_ref()) {
         Ok(a) => a,
         Err(refusal) => return *refusal,
     };
     let decision = if decision_word == "issue" { GrantDecision::Issue { ttl_secs: ttl } } else { GrantDecision::Refuse { reason } };
-    match decide_grant(&ctx.agent_ctx, actor.caller.as_ref(), actor.relayed.as_ref(), &agent, &request, decision).await {
+    match decide_grant(&ctx.agent_ctx, actor.caller.as_ref(), actor.relayed.as_ref(), actor.named.as_ref(), &agent, &request, decision).await {
         Ok(outcome) => {
             if actor.unsigned {
                 ctx.agent_ctx.unsigned_actions.note_decision(decision_word);
             }
+            if actor.unnamed {
+                ctx.agent_ctx.unsigned_actions.note_unnamed(decision_word);
+            }
             Json(outcome.receipt).into_response()
         }
         Err(refusal) => refusal.into_response(),
+    }
+}
+
+/// One field of a block, as text for a refusal's detail.
+fn shown_field(shown: &crate::agent::grant_decision::Shown, field: &str) -> String {
+    match field {
+        "tool" => format!("{:?}", shown.tool),
+        "resource" => format!("{:?}", shown.resource),
+        "arguments_digest" => format!("{:?}", shown.arguments_digest),
+        _ => shown.request_expires_at_ms.to_string(),
     }
 }
 
@@ -362,7 +399,24 @@ pub(super) async fn gw_grant_decide(
 ///
 /// `relayed` is the decision `caller` signed and the bearer that carried it (identity-and-lifecycle I3), kept on the
 /// records. One decision per request at a time on this node ([`DecisionClaim`]).
-pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPrincipal>, relayed: Option<&Relayed>, agent: &str, request: &str, decision: GrantDecision) -> Result<GrantOutcome, GrantRefusal> {
+///
+/// **The record is checked against itself, and against what the decision names** (identity-and-lifecycle I7-S). For
+/// every decision, signed or not: the record's `request` and `agent` are the path's, and its resource is
+/// `tool:{tool}@{node}` — else `409 unreadable_request`, naming the field. Then `named`, what the decider saw (the
+/// signed block, or a bearer's unsigned one), is compared field by field with the record — the digest byte for byte,
+/// never recomputed — and a difference is `409 decision_names_another_request`, naming the field, counted; a block
+/// whose `request_expires_at_ms` has passed is `410 expired`, from the signed value. The route refuses a decision
+/// naming nothing before this, unless the gateway accepts one (D2); the `grant` fault class passes `None`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn decide_grant(
+    ctx: &Arc<TaskCtx>,
+    caller: Option<&ResolvedPrincipal>,
+    relayed: Option<&Relayed>,
+    named: Option<&crate::agent::grant_decision::Shown>,
+    agent: &str,
+    request: &str,
+    decision: GrantDecision,
+) -> Result<GrantOutcome, GrantRefusal> {
     let issuer = caller.map(|c| c.principal.clone()).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
     if request.contains('/') || agent.is_empty() || request.is_empty() {
         return Err(GrantRefusal::door(StatusCode::BAD_REQUEST, "bad_request", "the agent is named and the request is one key segment"));
@@ -402,15 +456,46 @@ pub(crate) async fn decide_grant(ctx: &Arc<TaskCtx>, caller: Option<&ResolvedPri
         Err(e) => return Err(GrantRefusal::door(StatusCode::CONFLICT, "unreadable_request", format!("{key}: {e}"))),
     };
     let now_ms = ctx.hlc.decision_now_ms();
+    let (Some(tool), Some(digest), Some(resource)) = (rec["tool"].as_str(), rec["arguments_digest"].as_str(), rec["resource"].as_str()) else {
+        return Err(GrantRefusal::door(StatusCode::CONFLICT, "unreadable_request", format!("{key} lacks tool, arguments_digest or resource")));
+    };
+    // The record against itself (I7-S; the owner-signed rule's check of a body against its path), for every decision.
+    let disagrees = |field: &str, why: String| Err(GrantRefusal::door(StatusCode::CONFLICT, "unreadable_request", format!("{key}: the record's {field} {why}")));
+    if rec["request"].as_str() != Some(request) {
+        return disagrees("request", format!("is {}, not the path's {request}", rec["request"]));
+    }
+    if rec["agent"].as_str() != Some(holder_principal.as_str()) {
+        return disagrees("agent", format!("is {}, not the path's {holder_principal}", rec["agent"]));
+    }
+    let Some(node) = rec["node"].as_str() else {
+        return disagrees("node", "is absent: the resource cannot be checked against it".into());
+    };
+    if resource != format!("tool:{tool}@{node}") {
+        return disagrees("resource", format!("{resource} is not tool:{tool}@{node}"));
+    }
+    // What the decider saw, against the record (I7-S): a member who rewrote the record after it was read moves no
+    // decision onto it. Compared before the answer is read, so a rewritten answered request names the rewrite; the
+    // block's expiry after it.
+    if let Some(named) = named {
+        let held = crate::agent::grant_decision::Shown::new(tool, resource, digest, rec["expires_at_ms"].as_u64().unwrap_or(0));
+        if let Some(field) = named.differs_from(&held) {
+            ctx.unsigned_actions.note_naming_another(field);
+            return Err(GrantRefusal::door(StatusCode::CONFLICT, "decision_names_another_request", format!("the decision names {field} {}; this node's record {key} names {} — the record was rewritten after the decider read it, or the decision is for another request", shown_field(named, field), shown_field(&held, field))));
+        }
+    }
+    // An answer already written is said as such, before any expiry: an honest re-send after the window is told it
+    // was answered, never that the agent refused the call (#820's review, M1).
     if mycelium_core::ops::kv_get(ctx, &format!("{key}/issued")).is_some() || mycelium_core::ops::kv_get(ctx, &format!("{key}/refused")).is_some() {
         return Err(GrantRefusal::door(StatusCode::CONFLICT, "already_answered", format!("{key} was already issued or refused")));
+    }
+    if let Some(named) = named
+        && named.request_expires_at_ms <= now_ms
+    {
+        return Err(GrantRefusal::door(StatusCode::GONE, "expired", format!("{key} expired at {} by the decision's own block; the agent has refused the call", named.request_expires_at_ms)));
     }
     if rec["expires_at_ms"].as_u64().is_none_or(|e| e <= now_ms) {
         return Err(GrantRefusal::door(StatusCode::GONE, "expired", format!("{key} expired; the agent has refused the call")));
     }
-    let (Some(tool), Some(digest), Some(resource)) = (rec["tool"].as_str(), rec["arguments_digest"].as_str(), rec["resource"].as_str()) else {
-        return Err(GrantRefusal::door(StatusCode::CONFLICT, "unreadable_request", format!("{key} lacks tool, arguments_digest or resource")));
-    };
 
     // Issuing — and refusing, which stops an agent's work just as surely — is an action: the evaluator decides with
     // the issuer as the actor (`grant.issue` / `grant.refuse` on the request's resource). The arguments the policy
@@ -839,7 +924,7 @@ pub(super) async fn gw_grant_revoke(
 ) -> axum::response::Response {
     let caller = caller.map(|Extension(c)| c);
     let body = body.map(|Json(b)| b).unwrap_or_default();
-    let actor = match decision_actor(&ctx.agent_ctx, caller.as_ref(), &agent, &request, "revoke", None, body.reason.as_deref(), body.signed.as_ref()) {
+    let actor = match decision_actor(&ctx.agent_ctx, caller.as_ref(), &agent, &request, "revoke", None, body.reason.as_deref(), body.signed.as_ref(), None) {
         Ok(a) => a,
         Err(refusal) => return *refusal,
     };

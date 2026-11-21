@@ -5555,3 +5555,73 @@ to start as either, by name, and the check does not say so (a stated bound, not 
 `mycelium wire-check <units-dir> --library <artifacts-dir> --format json | jq '[.findings[] | select(.kind |
 endswith(" edge")) | select(.kind != "ungoverned edge")]'` is `[]`. For each entry it prints instead, the message
 names the unit whose rules the provider reads and why its rule does not admit: correct the rule there, as above.
+
+## 123. A grant decision names what its decider saw; a decision naming nothing is refused by default, `gateway_accept_unnamed_decisions` for one release (unreleased, identity-and-lifecycle I7-S, PR 1)
+
+**What changed.** An issue or refusal of a grant request now names the request record's `tool`, `resource`,
+`arguments_digest` and `expires_at_ms` — a signed decision inside its signature, after the grade (`signed.shown`; the
+message `grant_decision_message_shown`: after the grade, `"shown/1"`, the tool, the resource and the digest, each a
+`u32` little-endian length and its bytes, then the expiry as a `u64` little-endian; a block requires a grade), a
+bearer's unsigned decision beside its body (`shown`). The node the decision is addressed to compares each field with
+its own record — the digest byte for byte, as the record writes it — and checks that record against itself. A
+decision with no block has exactly the bytes it had, so every earlier signature and every case of
+`tests/fixtures/decision/vector.json` stands; the vector gains a `shown` section, verified in Rust, Python and
+TypeScript. Wire v12 is unchanged: everything is in the decision's body.
+
+**New refusals at the decision routes:**
+- `409 decision_names_another_request` — the block differs from this node's record; the detail names the field
+  (`tool`, `resource`, `arguments_digest`, `request_expires_at_ms`). Counted: `/stats` `grant_decisions_naming_another`,
+  `mycelium_gateway_decisions_mismatched_total{field}`.
+- `409 unreadable_request` — now also when the record disagrees with itself, for every decision: its `request` or
+  `agent` is not the path's, its `node` is absent, or its `resource` is not `tool:{tool}@{node}`.
+- `403 decision_shown_missing` — a consent decider's issue or refusal with no block.
+- `400 decision_shown_ungraded` — a block with no grade. `400 decision_shown_on_revoke` — a revocation naming a
+  block (a revocation names the grant at its path). `400 bad_request` — a signed body with `shown` beside `signed`.
+- `403 decision_names_nothing` — **a service's or a bearer's issue or refusal naming nothing, by default.** This is a
+  refusal at once, not a counter first (the maintainer's decision D2 of 2026-11-20): a counter would leave a known
+  hole open by default for another release.
+- `410 expired` — also from the block's own expiry.
+
+**What you do.** Upgrade the gateways — the nodes decisions are addressed to — **before** any decider names the block.
+A node before I7-S refuses a **signed** body carrying `signed.shown` (an unknown field of `SignedDecision`), but
+**admits a bearer's top-level `shown` and ignores it** — no comparison and no signal — since the decision body there
+is not strict; so for bearer deciders the order is not enforced, and a new SDK against an old gateway is as exposed
+as before. Then move the deciders to the record form:
+- Python `mycelium-py` 0.2.16: `agent.grant_decide(record, "issue", ttl_secs=…, signer=…)`, `record` a row of
+  `grants_pending()` or a `grant_request` event; `ClientSigner.sign_grant_decision(…, shown=shown_from_record(record))`.
+  `grant_decide(agent, request, decision)` is kept, deprecated (`DeprecationWarning`), and names nothing — in each shape
+  it was called in: positional, `decision=` by keyword, or `agent=`, `request=` and `decision=` all by keyword;
+  `record=` by keyword is the new form.
+- TypeScript `mycelium-ts` 0.2.10: `agent.grantDecide(record, "issue", { signer })`; `signGrantDecision(…, { shown:
+  shownFromRecord(record) })`. `grantDecide(agent, request, decision)` is kept, `@deprecated`, and names nothing.
+- Rust: `ClientSigner::sign_grant_decision_naming(node, &record, decision, ttl, reason)`,
+  `sign_grant_decision_naming(key, …, &Shown)`, `SignedDecision::from_parts(…).naming(Shown::new(…))` for an external
+  signer, `Shown::from_record`. `SignedDecision` gains `shown: Option<Shown>`; `from_parts` keeps its signature.
+- `mycelium dev consent` names the block from the start (its decisions only ever ran behind the provisional gate).
+
+Revocations are unchanged.
+
+**The one-release opt-out.** Until every decider names the block, set `gateway_accept_unnamed_decisions = true` on the
+gateways: an unnamed decision is then admitted, counted (`/stats` `grant_decisions_unnamed`,
+`mycelium_gateway_decisions_unnamed_total{decision}`) and warned about. **The field is removed in the release after
+the one that adds it**; unset it once the counter stays flat. A consent decider's decision names its block whatever
+the field says.
+
+**What this does not close.** The replay half of #813's review, F1: the node still remembers an answer only in the
+KV, so a member who tombstones `…/issued` can have the same signed body admitted again for the same request, while
+it is fresh — up to 900 s of node time at the default `max_clock_drift_ms` (`CALLER_CONTEXT_MAX_AGE_MS` plus the
+drift behind the decider's clock, the drift ahead of it). That is I7-S's second PR (a spent-decision memory, a start
+fence), not built; `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN` stays `true` and blocks a release until then.
+
+- Test: in `src/agent/grant_shown_tests.rs`,
+  `a_record_another_member_rewrote_after_the_decider_read_it_is_refused_naming_the_field`,
+  `a_record_that_disagrees_with_itself_is_refused_signed_or_not`,
+  `a_decision_naming_nothing_is_refused_by_default_and_admitted_counted_under_the_opt_out`,
+  `an_answered_decision_re_sent_after_the_window_is_told_it_was_answered`; in
+  `src/agent/dev_consent_tests.rs`, `dev_names_what_it_showed_and_a_rewrite_after_its_second_read_is_refused`,
+  `dev_approves_a_request_recorded_under_the_legacy_digest`; the vector,
+  `the_shown_decision_vector_is_the_same_in_every_language` (Rust, jest, pytest).
+
+*Check:* `curl -s $GATEWAY/stats | jq '.grant_decisions_unnamed, .grant_decisions_naming_another'` — the first stays
+`0` once the deciders name the block (then leave `gateway_accept_unnamed_decisions` unset); the second rising is a
+member rewriting grant requests after they were read.

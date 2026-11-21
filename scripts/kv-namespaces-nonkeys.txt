@@ -85,3 +85,4 @@ mycelium-ts/README.md               # adapter_contract.rs: the SDK README's limi
 langgraph-checkpoint-mycelium/README.md  # adapter_contract.rs: the checkpointer README's limits section
 strands-session-mycelium/README.md  # adapter_contract.rs: the Strands store README's limits section
 docs/features/adapter-contract.md   # adapter_contract.rs: the doors' limits section on the feature page
+shown/1                             # grant_decision.rs: Shown::MARKER, the block marker inside a signed grant decision (I7-S), not a key

@@ -64,6 +64,37 @@ export interface SignedDecision {
    * `"service"` there; a consent principal's body names its consent certificate's grade.
    */
   grade?: string;
+  /** What the decider saw of the request (identity-and-lifecycle I7-S), inside the signature after the grade. */
+  shown?: Shown;
+}
+
+/**
+ * What a decider saw of a grant request (identity-and-lifecycle I7-S): the record's tool, resource, arguments digest
+ * (its own string) and expiry. The node the decision is addressed to compares each with its own record and refuses a
+ * difference by name (`decision_names_another_request`).
+ */
+export interface Shown {
+  tool: string;
+  resource: string;
+  arguments_digest: string;
+  request_expires_at_ms: number;
+}
+
+/** The block's marker in the signed message. */
+export const SHOWN_MARKER = "shown/1";
+
+/**
+ * What a decision on `record` names of it — a request as `grantsPending()` lists it or `grantsStream()` reports it:
+ * its `tool`, `resource`, `arguments_digest` and `expires_at_ms` (as `request_expires_at_ms`). Throws when one is
+ * absent or not of its type.
+ */
+export function shownFromRecord(record: Record<string, unknown>): Shown {
+  const { tool, resource, arguments_digest } = record;
+  const expires = typeof record.expires_at_ms === "bigint" ? Number(record.expires_at_ms) : record.expires_at_ms;
+  if (typeof tool !== "string" || typeof resource !== "string" || typeof arguments_digest !== "string" || typeof expires !== "number" || !Number.isSafeInteger(expires) || expires < 0) {
+    throw new Error("a request record names tool, resource and arguments_digest (strings) and expires_at_ms (an integer)");
+  }
+  return { tool, resource, arguments_digest, request_expires_at_ms: expires };
 }
 
 /**
@@ -73,11 +104,13 @@ export interface SignedDecision {
  * its UTF-8 bytes; then `issuedAtMs` as a `u64` little-endian. `grade` (identity-and-lifecycle I7): when given, a
  * `u32` little-endian length and the grade's UTF-8 bytes follow; when left out nothing follows, so a decision naming
  * no grade has the message it had before I7. Pinned, with a grade and without, by
- * `tests/fixtures/decision/vector.json`.
+ * `tests/fixtures/decision/vector.json`. `shown` (identity-and-lifecycle I7-S): when given, after the grade come
+ * `"shown/1"`, the tool, the resource and the digest, each a `u32` little-endian length and its UTF-8 bytes, then
+ * `request_expires_at_ms` as a `u64` little-endian. A block requires a grade. Pinned by the vector's `shown` section.
  */
 export function grantDecisionMessage(
   decider: string, node: string, agent: string, request: string, decision: string,
-  ttlSecs: number | undefined, reason: string | undefined, issuedAtMs: bigint, grade?: string,
+  ttlSecs: number | undefined, reason: string | undefined, issuedAtMs: bigint, grade?: string, shown?: Shown,
 ): Uint8Array {
   const enc = new TextEncoder();
   const chunks: Uint8Array[] = [enc.encode(GRANT_DECISION_TAG)];
@@ -96,6 +129,18 @@ export function grantDecisionMessage(
     const len = new Uint8Array(4);
     new DataView(len.buffer).setUint32(0, g.length, true);
     chunks.push(len, g);
+  }
+  // I7-S: what the decider saw, after the grade.
+  if (shown !== undefined) {
+    for (const part of [SHOWN_MARKER, shown.tool, shown.resource, shown.arguments_digest]) {
+      const b = enc.encode(part);
+      const len = new Uint8Array(4);
+      new DataView(len.buffer).setUint32(0, b.length, true);
+      chunks.push(len, b);
+    }
+    const e = new Uint8Array(8);
+    new DataView(e.buffer).setBigUint64(0, BigInt(shown.request_expires_at_ms), true);
+    chunks.push(e);
   }
   const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
   let off = 0;
@@ -254,17 +299,26 @@ export class ClientSigner {
    * `"service"` is the only grade this signer may name — its key is a client certificate's Ed25519 key, never a
    * consent key. Left out (the default), the body is what it was before I7, which a node before I7 accepts; a body
    * naming a grade is refused by such a node.
+   *
+   * `shown` (identity-and-lifecycle I7-S): what this signer saw of the request ({@link shownFromRecord}), signed after
+   * the grade — which is then `"service"`, named or not. A gateway after I7-S refuses an issue or refusal naming no
+   * block by default (`decision_names_nothing`); a node before I7-S refuses one naming it, so upgrade the gateways
+   * first. A revocation names no block.
    */
   signGrantDecision(
     node: string, agent: string, request: string, decision: "issue" | "refuse" | "revoke",
-    opts?: { ttlSecs?: number; reason?: string; issuedAtMs?: number; grade?: "service" },
+    opts?: { ttlSecs?: number; reason?: string; issuedAtMs?: number; grade?: "service"; shown?: Shown },
   ): SignedDecision {
     if (!["issue", "refuse", "revoke"].includes(decision)) throw new Error('decision must be "issue", "refuse" or "revoke"');
     if (opts?.grade !== undefined && opts.grade !== "service") throw new Error('a service signer names the grade "service" or none: a consent grade is a consent key\'s');
+    if (opts?.shown !== undefined && decision === "revoke") throw new Error("a revocation names the grant at its path, not what was shown");
+    const shown = opts?.shown === undefined ? undefined : shownFromRecord({ ...opts.shown, expires_at_ms: opts.shown.request_expires_at_ms });
+    const grade = shown !== undefined ? "service" : opts?.grade;
     const t = opts?.issuedAtMs ?? Date.now();
-    const msg = grantDecisionMessage(this.principal, node, agent, request, decision, opts?.ttlSecs, opts?.reason, BigInt(t), opts?.grade);
+    const msg = grantDecisionMessage(this.principal, node, agent, request, decision, opts?.ttlSecs, opts?.reason, BigInt(t), grade, shown);
     const signed: SignedDecision = { decider: this.principal, node, agent, request, t, k: this.raw.toString("base64"), sig: sign(null, msg, this.key).toString("base64") };
-    if (opts?.grade !== undefined) signed.grade = opts.grade;
+    if (grade !== undefined) signed.grade = grade;
+    if (shown !== undefined) signed.shown = shown;
     return signed;
   }
 

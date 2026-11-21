@@ -788,17 +788,27 @@ class MyceliumAgent:
 
     def grant_decide(
         self,
-        agent: str,
-        request: str,
-        decision: str,
-        *,
+        *args: Any,
+        record: Optional[Dict[str, Any]] = None,
+        decision: Optional[str] = None,
         ttl_secs: Optional[int] = None,
         reason: Optional[str] = None,
         signer: Optional[Any] = None,
         node: Optional[str] = None,
+        agent: Optional[str] = None,
+        request: Optional[str] = None,
     ) -> Dict[str, Any]:
         """``POST /gateway/grants/{agent}/{request}`` (``grant:issue``, or ``grant:relay`` with ``signer``): answer a
         pending request.
+
+        ``record`` is the request as ``grants_pending()`` lists it or ``grants_stream()`` reports it, and the decision
+        **names what was decided on** (identity-and-lifecycle I7-S): its tool, resource, arguments digest and expiry
+        (:func:`~mycelium.shown_from_record`) — signed inside the decision with ``signer``, sent beside it without.
+        The node compares them with its own record and refuses a difference by name, so a record rewritten after it
+        was read here is not the one decided: ``grant_decide(record, decision)`` (``decision`` positional or by
+        keyword). The ids-only shapes — ``grant_decide(agent, request, decision)``, with ``decision`` or all three by
+        keyword — name nothing and are kept for one release, deprecated: a gateway after I7-S refuses them
+        (``decision_names_nothing``) unless its operator sets ``gateway_accept_unnamed_decisions``.
 
         With ``signer`` (a :class:`~mycelium.ClientSigner` for a principal holding a client certificate and
         ``grant:issue`` at the node), the decision is signed (identity-and-lifecycle I3): the node records the signer
@@ -823,12 +833,49 @@ class MyceliumAgent:
           ``gateway_identity_issuer_unset``; 403 ``decision_grade_mismatch`` (a body naming a grade other than the
           one recorded for its key — a service's is ``service``; identity-and-lifecycle I7); and, unsigned under
           ``grant:relay`` alone, 403 ``decision_unsigned``;
+        - what it names (I7-S): 403 ``decision_names_nothing`` (the ids-only form); 409
+          ``decision_names_another_request`` (the node's record differs, the field named); 409
+          ``unreadable_request`` (the node's record disagrees with itself);
         - the policy: 403 with the evaluator's reason (the actor — the decider of a signed decision — is not
           permitted), or 403 ``no_evaluator`` (no evaluator attached);
         - the answer: 403 ``no_identity`` (the node cannot sign a grant); 409 ``already_revoked`` (a later checkpoint
           stands beside the request); 503 ``not_durable`` (the answer is not on disk; the request is still pending —
           retry); 500 ``serialise``.
         """
+        from .client_sig import shown_from_record
+
+        shown: Optional[Dict[str, Any]] = None
+        if record is not None:
+            if args:
+                raise TypeError("grant_decide(record, decision): the record given once")
+            args = (record,)
+        if args and isinstance(args[0], dict):
+            if len(args) > 2 or (len(args) == 2 and decision is not None) or agent is not None or request is not None:
+                raise TypeError("grant_decide(record, decision): a record names its agent and request")
+            record = args[0]
+            decision = args[1] if len(args) == 2 else decision
+            agent, request, shown = record.get("agent"), record.get("request"), shown_from_record(record)
+            if not isinstance(agent, str) or not isinstance(request, str):
+                raise ValueError("a request record names its agent and request")
+        else:
+            # The deprecated ids-only shapes: positional, partly keyword, or all keyword.
+            ids = list(args) + [None] * (3 - len(args))
+            if len(args) > 3 or (len(args) >= 1 and agent is not None) or (len(args) >= 2 and request is not None) or (len(args) == 3 and decision is not None):
+                raise TypeError("grant_decide(agent, request, decision): each given once")
+            agent = ids[0] if len(args) >= 1 else agent
+            request = ids[1] if len(args) >= 2 else request
+            decision = ids[2] if len(args) == 3 else decision
+            if not isinstance(agent, str) or not isinstance(request, str):
+                raise TypeError("grant_decide(record, decision), or the deprecated grant_decide(agent, request, decision)")
+            import warnings
+
+            warnings.warn(
+                "grant_decide(agent, request, decision) names nothing of what was decided on, and a gateway after "
+                "identity-and-lifecycle I7-S refuses it (decision_names_nothing): pass the pending record, "
+                "grant_decide(record, decision)",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         if decision not in ("issue", "refuse"):
             raise ValueError('decision must be "issue" or "refuse"')
         body: Dict[str, Any] = {"decision": decision}
@@ -841,7 +888,10 @@ class MyceliumAgent:
                 node if node is not None else self.node_id, agent, request, decision,
                 ttl_secs=ttl_secs if decision == "issue" else None,
                 reason=reason if decision == "refuse" else None,
+                shown=shown,
             )
+        elif shown is not None:
+            body["shown"] = shown
         with self._pool.sync() as c:
             resp = c.post(f"/gateway/grants/{path_segment(agent)}/{path_segment(request)}", json=body)
             resp.raise_for_status()

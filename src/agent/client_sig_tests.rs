@@ -801,3 +801,76 @@ fn the_graded_decision_vector_is_the_same_in_every_language() {
         }
     }
 }
+
+/// **What the decider saw is in the signed message, the same in every language** (identity-and-lifecycle I7-S): the
+/// `shown` section of `tests/fixtures/decision/vector.json`, generated once and pinned, read by this test, jest and
+/// pytest.
+/// - Each case's message is the graded message followed by `shown/1`, the tool, the resource and the digest (each
+///   length-prefixed) and the request's expiry as a `u64`; the cases above, naming no block, are unchanged.
+/// - A service naming the block (Ed25519, deterministic) signs exactly the pinned body, through
+///   `sign_grant_decision_naming` (which names the grade `service`) and through `ClientSigner`'s record form.
+/// - A consent principal's pinned P-256 signature verifies with its block and **not with any one field of the block
+///   altered, nor with the block removed**: a relay cannot change what the decider says it saw.
+///
+/// Seen failing first with the block's expiry written before the digest (every message differed from its pin).
+#[test]
+fn the_shown_decision_vector_is_the_same_in_every_language() {
+    let v: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/decision/vector.json")).unwrap();
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let seed: [u8; 32] = (0..32).map(|i| u8::from_str_radix(&v["seed_hex"].as_str().unwrap()[i * 2..i * 2 + 2], 16).unwrap()).collect::<Vec<_>>().try_into().unwrap();
+    let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let (decider, node, agent, t) = (v["decider"].as_str().unwrap(), v["node"].as_str().unwrap(), v["agent"].as_str().unwrap(), v["t"].as_u64().unwrap());
+    let terms = |c: &serde_json::Value| (c["request"].as_str().unwrap().to_string(), c["decision"].as_str().unwrap().to_string(), c["ttl_secs"].as_u64(), c["reason"].as_str().map(str::to_string), c["grade"].as_str().unwrap().to_string());
+    let shown_of = |c: &serde_json::Value| -> crate::Shown { serde_json::from_value(c["shown"].clone()).unwrap() };
+    let service = v["shown"]["service"].as_array().unwrap();
+    assert!(service.len() >= 3);
+    for case in service {
+        let (request, decision, ttl, reason, grade) = terms(case);
+        let shown = shown_of(case);
+        let msg = crate::grant_decision_message_shown(decider, node, agent, &request, &decision, ttl, reason.as_deref(), t, Some(&grade), Some(&shown));
+        assert_eq!(hex(&msg), case["message_hex"].as_str().unwrap(), "{case}");
+        let mut expected = crate::grant_decision_message_graded(decider, node, agent, &request, &decision, ttl, reason.as_deref(), t, Some(&grade));
+        for part in ["shown/1", shown.tool.as_str(), shown.resource.as_str(), shown.arguments_digest.as_str()] {
+            expected.extend_from_slice(&(part.len() as u32).to_le_bytes());
+            expected.extend_from_slice(part.as_bytes());
+        }
+        expected.extend_from_slice(&shown.request_expires_at_ms.to_le_bytes());
+        assert_eq!(msg, expected, "the block follows the graded message: {case}");
+        let signed = crate::sign_grant_decision_naming(&key, decider, node, agent, &request, &decision, ttl, reason.as_deref(), t, &shown);
+        assert_eq!(serde_json::to_value(&signed).unwrap(), case["signed"], "{case}");
+        assert!(signed.verify_signature(&decision, ttl, reason.as_deref()));
+        // The block from a request record names the same four fields.
+        let record = serde_json::json!({ "agent": agent, "request": request, "tool": shown.tool, "resource": shown.resource, "arguments_digest": shown.arguments_digest, "expires_at_ms": shown.request_expires_at_ms });
+        assert_eq!(crate::Shown::from_record(&record), Some(shown.clone()));
+        let from_signer = crate::ClientSigner::new(key.clone(), decider).sign_grant_decision_naming(node, &record, &decision, ttl, reason.as_deref()).unwrap();
+        assert_eq!((from_signer.shown.as_ref(), from_signer.grade.as_deref()), (Some(&shown), Some("service")));
+        assert!(from_signer.verify_signature(&decision, ttl, reason.as_deref()));
+        // A block with no grade verifies as nothing: the block requires one.
+        assert!(!crate::SignedDecision { grade: None, ..signed.clone() }.verify_signature(&decision, ttl, reason.as_deref()));
+    }
+    let consent = &v["shown"]["consent"];
+    for case in consent["cases"].as_array().unwrap() {
+        let (request, decision, ttl, reason, grade) = terms(case);
+        let signed: crate::SignedDecision = serde_json::from_value(case["signed"].clone()).unwrap();
+        assert_eq!((signed.decider.as_str(), signed.request.as_str(), signed.grade.as_deref(), signed.shown.as_ref()), (consent["decider"].as_str().unwrap(), request.as_str(), Some(grade.as_str()), Some(&shown_of(case))));
+        assert_eq!(hex(&signed.message(&decision, ttl, reason.as_deref())), case["message_hex"].as_str().unwrap(), "{case}");
+        if !mycelium_core::tls::consent_grade_oid_open() {
+            assert!(!signed.verify_signature(&decision, ttl, reason.as_deref()), "VERIFIED: a consent signature by a build whose provisional gate is closed: {case}");
+            continue;
+        }
+        assert!(signed.verify_signature(&decision, ttl, reason.as_deref()), "VERIFY: the pinned consent signature: {case}");
+        let s = shown_of(case);
+        let altered = [
+            ("tool", crate::Shown { tool: format!("{}x", s.tool), ..s.clone() }),
+            ("resource", crate::Shown { resource: format!("{}x", s.resource), ..s.clone() }),
+            ("arguments_digest", crate::Shown { arguments_digest: s.arguments_digest.to_uppercase(), ..s.clone() }),
+            ("request_expires_at_ms", crate::Shown { request_expires_at_ms: s.request_expires_at_ms + 1, ..s.clone() }),
+        ];
+        for (field, other) in altered {
+            assert_eq!(s.differs_from(&other), Some(field));
+            let body = crate::SignedDecision { shown: Some(other), ..signed.clone() };
+            assert!(!body.verify_signature(&decision, ttl, reason.as_deref()), "ALTERED: {field} rewritten still verifies: {case}");
+        }
+        assert!(!crate::SignedDecision { shown: None, ..signed.clone() }.verify_signature(&decision, ttl, reason.as_deref()), "REMOVED: the block dropped still verifies: {case}");
+    }
+}

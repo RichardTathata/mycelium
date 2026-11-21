@@ -5,7 +5,7 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { ClientSigner, clientSignatureMessage, grantDecisionMessage, mcpBinding } from "../src/client_sig";
+import { ClientSigner, clientSignatureMessage, grantDecisionMessage, mcpBinding, shownFromRecord } from "../src/client_sig";
 import { argumentsDigest } from "../src/a2a";
 
 const V = JSON.parse(readFileSync(join(__dirname, "..", "..", "tests", "fixtures", "cs", "vector.json"), "utf8"));
@@ -113,6 +113,51 @@ test("the graded decision vector is the same in every language", () => {
       expect(verify("sha256", altered, key, sig)).toBe(false);
     }
   }
+});
+
+test("the shown decision vector is the same in every language", () => {
+  // Identity-and-lifecycle I7-S: what the decider saw, after the grade. A service naming the block (Ed25519,
+  // reproduced exactly) and a consent principal's P-256 decisions (verified, and refused with any one field altered
+  // or the block removed).
+  const v = JSON.parse(readFileSync(join(__dirname, "..", "..", "tests", "fixtures", "decision", "vector.json"), "utf8"));
+  const signer = new ClientSigner(Buffer.from(v.seed_hex, "hex"), v.decider);
+  const enc = new TextEncoder();
+  const lp = (s: string) => { const b = Buffer.from(enc.encode(s)); const l = Buffer.alloc(4); l.writeUInt32LE(b.length); return Buffer.concat([l, b]); };
+  expect(v.shown.service.length).toBeGreaterThanOrEqual(3);
+  for (const c of v.shown.service) {
+    const sh = c.shown;
+    const msg = grantDecisionMessage(v.decider, v.node, v.agent, c.request, c.decision, c.ttl_secs ?? undefined, c.reason ?? undefined, BigInt(v.t), c.grade, sh);
+    expect(Buffer.from(msg).toString("hex")).toBe(c.message_hex);
+    const graded = grantDecisionMessage(v.decider, v.node, v.agent, c.request, c.decision, c.ttl_secs ?? undefined, c.reason ?? undefined, BigInt(v.t), c.grade);
+    const e = Buffer.alloc(8);
+    e.writeBigUInt64LE(BigInt(sh.request_expires_at_ms));
+    expect(Buffer.from(msg)).toEqual(Buffer.concat([Buffer.from(graded), lp("shown/1"), lp(sh.tool), lp(sh.resource), lp(sh.arguments_digest), e]));
+    const record = { tool: sh.tool, resource: sh.resource, arguments_digest: sh.arguments_digest, expires_at_ms: sh.request_expires_at_ms };
+    expect(shownFromRecord(record)).toEqual(sh);
+    const signed = signer.signGrantDecision(v.node, v.agent, c.request, c.decision, { ttlSecs: c.ttl_secs ?? undefined, reason: c.reason ?? undefined, issuedAtMs: v.t, shown: shownFromRecord(record) });
+    expect(signed).toEqual(c.signed);
+  }
+  const key = createPublicKey(v.graded.consent.spki_pem);
+  for (const c of v.shown.consent.cases) {
+    const sh = c.shown;
+    const args = [v.shown.consent.decider, v.node, v.agent, c.request, c.decision, c.ttl_secs ?? undefined, c.reason ?? undefined, BigInt(v.t), c.grade] as const;
+    const msg = grantDecisionMessage(...args, sh);
+    expect([Buffer.from(msg).toString("hex"), c.signed.shown]).toEqual([c.message_hex, sh]);
+    const sig = Buffer.from(c.signed.sig, "base64");
+    expect(verify("sha256", msg, key, sig)).toBe(true);
+    for (const [field, value] of [["tool", sh.tool + "x"], ["resource", sh.resource + "x"], ["arguments_digest", sh.arguments_digest.toUpperCase()], ["request_expires_at_ms", sh.request_expires_at_ms + 1]]) {
+      expect(verify("sha256", grantDecisionMessage(...args, { ...sh, [field as string]: value }), key, sig)).toBe(false);
+    }
+    expect(verify("sha256", grantDecisionMessage(...args), key, sig)).toBe(false);
+  }
+});
+
+test("a signer naming the block names service, and never on a revocation", () => {
+  const signer = new ClientSigner(Buffer.alloc(32, 7), "token:fleet/treasurer");
+  const sh = { tool: "t", resource: "tool:t@n", arguments_digest: "ab", request_expires_at_ms: 9 };
+  expect(signer.signGrantDecision("n", "a", "r", "issue", { issuedAtMs: 1, shown: sh }).grade).toBe("service");
+  expect(() => signer.signGrantDecision("n", "a", "r", "revoke", { issuedAtMs: 1, shown: sh })).toThrow();
+  expect(() => signer.signGrantDecision("n", "a", "r", "issue", { issuedAtMs: 1, shown: { ...sh, request_expires_at_ms: "9" as unknown as number } })).toThrow();
 });
 
 test("a service signer names the grade service or none", () => {

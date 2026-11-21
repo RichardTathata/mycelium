@@ -132,7 +132,7 @@
 //! | `agent/{node}/policy`              | Layer V serialised AgentPolicy (readable by monitors/supervisors) |
 //! | `agent/{node}/task/{id}/turn`      | Layer V turn counter for `max_turns` enforcement              |
 //! | `agent/{node}/task/{id}/calls`     | Layer V tool-call counter for `tool_budget` enforcement       |
-//! | `grant/{agent}/{request}`          | adopter-surface X3 — a grant request the agent's state machine wrote (tool, arguments digest and rendering, policy revision, expiry); route-owned: the raw KV routes refuse the prefix, to read as to write, and leave its names out of the listing |
+//! | `grant/{agent}/{request}`          | adopter-surface X3 — a grant request the agent's state machine wrote (tool, arguments digest and rendering, policy revision, expiry); route-owned: the raw KV routes refuse the prefix, to read as to write, and leave its names out of the listing. Unsigned: a decision names its tool, resource, digest and expiry (`Shown`, identity-and-lifecycle I7-S), and the addressed node refuses one this record contradicts, and a record that disagrees with itself |
 //! | `grant/{agent}/{request}/issued`   | the signed grant (`SignedMandateGrant`, scope `grant:{request}`) written by `POST /gateway/grants/{agent}/{request}` (`grant:issue`) |
 //! | `grant/{agent}/{request}/refused`  | a supervisor's refusal, with the issuer and reason |
 //! | `grant/{agent}/{request}/checkpoint` | the issuing node's revocation checkpoint for the grant's scope — sequence 1 at issue (nothing revoked), sequence 2 at revocation (the term named); every node's authority is fed it from the KV, so a grant issued or revoked at one node is known at every other |
@@ -372,10 +372,11 @@ pub use agent::client_sig::ClientSigner;
 /// Identity-and-lifecycle I3 (D3, D5): a supervisor's signed answer to a grant request. A decider holding a client
 /// certificate signs it ([`ClientSigner::sign_grant_decision`]) and sends it as the decision body's `signed` field;
 /// the node it is addressed to records the decider as the actor. [`grant_decision_message`] is the published format
-/// the SDKs compute too.
-pub use agent::grant_decision::{grant_decision_message, grant_decision_message_graded, recording_grade_accepted_when, SignedDecision, SignedWith, GRADE_SERVICE, GRANT_DECISION_TAG, KNOWN_GRADES};
+/// the SDKs compute too; since identity-and-lifecycle I7-S an issue or refusal names what its decider saw ([`Shown`],
+/// [`grant_decision_message_shown`], [`ClientSigner::sign_grant_decision_naming`]).
+pub use agent::grant_decision::{grant_decision_message, grant_decision_message_graded, grant_decision_message_shown, recording_grade_accepted_when, Shown, SignedDecision, SignedWith, GRADE_SERVICE, GRANT_DECISION_TAG, KNOWN_GRADES};
 #[cfg(feature = "tls")]
-pub use agent::grant_decision::{sign_grant_decision, sign_grant_decision_graded};
+pub use agent::grant_decision::{sign_grant_decision, sign_grant_decision_graded, sign_grant_decision_naming};
 /// The replay seams' install point, re-exported under `sim` so a **companion** on the public API
 /// can record and replay its own runs under the kernel (item 6; first used by CN2).
 /// Re-exported in every build, not only under `sim`: a companion routes its draws and clocks through

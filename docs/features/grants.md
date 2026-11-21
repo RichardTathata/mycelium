@@ -34,7 +34,9 @@ This feature is turned on in code.
 - [`gw_grants_pending`](../../src/agent/http/grants.rs), [`gw_grant_decide`](../../src/agent/http/grants.rs) and
   [`gw_grant_revoke`](../../src/agent/http/grants.rs) — the supervisor's door: `GET /gateway/grants/pending`
   (`grant:read`), `POST /gateway/grants/{agent}/{request}` (`grant:issue`, or `grant:relay` with `signed`) with
-  `{"decision": "issue"|"refuse", "ttl_secs", "reason", "signed"?}`, and `POST /gateway/grants/{agent}/{request}/revoke`
+  `{"decision": "issue"|"refuse", "ttl_secs", "reason", "shown"}` — or `"signed"`, naming the block inside it — (the
+  block is the request record's tool, resource, digest and expiry; a decision naming none is `403
+  decision_names_nothing` by default, below), and `POST /gateway/grants/{agent}/{request}/revoke`
   (`grant:issue`, or `grant:relay` with `signed`) with `{"reason", "signed"?}` at the node that issued (signed decisions
   below). Issuing, refusing and revoking are actions the evaluator sees (`grant.issue` · `grant.refuse` ·
   `grant.revoke` on `tool:{tool}@{agent node}`, the caller as the actor; a `503 not_durable` on revoke means the supervisor
@@ -148,25 +150,62 @@ This feature is turned on in code.
   - An unsigned decision under `grant:issue` is still the bearer's own this release. It is counted once **answered**
     (issued, refused or revoked; never an attempt refused first) on `/stats` (`grant_decisions_unsigned`) and as
     `mycelium_gateway_decisions_unsigned_total{decision}`; a later release refuses it (`deprecations.md` §95).
+  - **A decision names what its decider saw** (identity-and-lifecycle I7-S, PR 1; the maintainer's decisions of
+    2026-11-20). An issue or refusal names the request record's `tool`, `resource`, `arguments_digest` and
+    `expires_at_ms` — a signed one inside the signature, after the grade (`signed.shown`,
+    `grant_decision_message_shown`; a block requires a grade, so a service names `service`), a bearer's unsigned one
+    beside the body (`shown`). The node the decision is addressed to:
+    - checks **its own record against itself, for every decision**, signed or not: its `request` and `agent` are the
+      path's, and its `resource` is `tool:{tool}@{node}` — else `409 unreadable_request`, naming the field;
+    - compares the block with that record field by field — the digest **byte for byte, as the record writes it**, never
+      recomputed (a request recorded under the pre-I3 form is named in that form) — and refuses a difference `409
+      decision_names_another_request`, naming the field, counted (`/stats` `grant_decisions_naming_another`,
+      `mycelium_gateway_decisions_mismatched_total{field}`), before the evaluator is asked; then an answer already
+      written is `409 already_answered` — also for a re-send after the request's window — and only then is a block
+      whose expiry has passed `410 expired`;
+    - refuses a consent decider's issue or refusal with no block `decision_shown_missing`, a block with no grade `400
+      decision_shown_ungraded`, a block on a revocation `400 decision_shown_on_revoke` (a revocation names the grant at
+      its path), and a signed body with `shown` beside `signed` `400 bad_request`;
+    - refuses a service's or a bearer's issue or refusal **naming nothing** `403 decision_names_nothing`, unless the
+      gateway sets `gateway_accept_unnamed_decisions` — one release only, each one answered counted (`/stats`
+      `grant_decisions_unnamed`, `mycelium_gateway_decisions_unnamed_total{decision}`; `deprecations.md` §123).
+
+    So a member who rewrites the request record after the decider read it no longer moves the decision onto another
+    tool, resource, digest or expiry (#813's review, F1, the rewrite half). **The provider is unchanged, and trusts the
+    issuer for the decider's half:** it verifies a grant signed by an entitled issuer and the holder's possession
+    proof, and holds neither the decider's certificate standing, nor `gateway_consent_principals`, nor the grade
+    policy; the issuing node's evidence journal keeps the signed body with its block, which re-verifies from the
+    record alone. The listings (`pending`, the stream, A2A's open-request watch) read the KV and are availability: a
+    rewritten or tombstoned record is listed as the KV says, and the node then refuses to apply a decision to it.
   - A replay of a signed decision inside its window finds the request already answered, or the grant already revoked
     (one at a time or concurrent, above) — **for as long as that answer is on record**. No nonce cache is kept, and
     the answer (`…/issued`) is a KV record any member can tombstone: with it gone, the same signed body is admitted
-    again, within the 300 s freshness window plus drift, and for whatever the request record then says, since the
-    signature names the request's id and terms and not its tool, resource or digest (#813's review, F1; run:
-    two `grant.issue` records from one signature). Closed by identity-and-lifecycle row I7-S (the decider signs
-    what it saw, and a spent-decision memory that is not a deletable KV record); dated on
-    [what is proven](../operations/what-is-proven.md#signed-decision-moved-and-replayed).
-  - From the SDKs: `grant_decide(…, signer=…)` / `grantDecide(…, { signer })` and `grant_revoke(…, signer=…)` /
-    `grantRevoke(…, { signer })`; the node is read from `GET /health` unless given. `ClientSigner.sign_grant_decision`
-    / `signGrantDecision` sign alone. `tests/fixtures/decision/vector.json` pins the message and the signature in Rust,
-    jest and pytest.
+    again, for the same request now, inside its window — up to **900 s of node time** at the default drift (300 s
+    plus the drift behind the decider's clock, the drift ahead of it) — two `grant.issue` records from one signature
+    (#813's review, F1, the replay half). Closed by I7-S's second PR (a spent-decision memory that is not a deletable
+    KV record) — **not built**; `CONSENT_DECISION_DOES_NOT_NAME_WHAT_WAS_SHOWN` stays `true`, so a release is blocked
+    until then. Dated on [what is proven](../operations/what-is-proven.md#signed-decision-moved-and-replayed).
+  - From the SDKs: `grant_decide(record, decision, …, signer=…)` / `grantDecide(record, decision, { signer })`, the
+    record as `grants_pending()` / `grantsPending()` lists it or the stream reports it, naming its block
+    (`shown_from_record` / `shownFromRecord`); the ids-only form is kept for one release, deprecated (a gateway after
+    I7-S refuses it by default). `grant_revoke(…, signer=…)` / `grantRevoke(…, { signer })` are unchanged: a
+    revocation names no block. The node is read from `GET /health` unless given. `ClientSigner.sign_grant_decision(…,
+    shown=…)` / `signGrantDecision(…, { shown })` and Rust's `ClientSigner::sign_grant_decision_naming` /
+    `sign_grant_decision_naming` sign alone. `tests/fixtures/decision/vector.json` pins the message and the signature
+    in Rust, jest and pytest, its `shown` section the block.
   - The tests, in [`src/agent/client_grant_tests.rs`](../../src/agent/client_grant_tests.rs):
     `a_signed_decision_relayed_under_grant_relay_is_the_signers`, `concurrent_copies_of_one_decision_are_answered_once`,
     `a_signed_decision_is_fresh_inside_its_window_and_refused_stale_or_malformed_outside`,
     `a_decision_signed_with_a_superseded_key_is_not_the_deciders`,
     `a_signed_refusal_and_replays_one_at_a_time_are_answered_once_and_the_evidence_kept`,
     `a_signed_decision_at_a_gateway_without_an_identity_issuer_is_refused_by_name`,
-    `an_issue_never_lowers_a_later_checkpoint` and `a_node_without_an_identity_cannot_verify_a_signed_decision`.
+    `an_issue_never_lowers_a_later_checkpoint` and `a_node_without_an_identity_cannot_verify_a_signed_decision`; I7-S's
+    in [`src/agent/grant_shown_tests.rs`](../../src/agent/grant_shown_tests.rs):
+    `a_record_another_member_rewrote_after_the_decider_read_it_is_refused_naming_the_field` (a second member rewrites
+    each field over gossip), `a_record_that_disagrees_with_itself_is_refused_signed_or_not` and
+    `a_decision_naming_nothing_is_refused_by_default_and_admitted_counted_under_the_opt_out` and
+    `an_answered_decision_re_sent_after_the_window_is_told_it_was_answered`; the vector's
+    `the_shown_decision_vector_is_the_same_in_every_language`.
   - **Not built:** M-of-N decisions; an `oidc:` decider (key-less); a decider whose scopes come from anything but this
     gateway's named tokens (OIDC groups, positional tokens); a relay at an un-upgraded gateway, which refuses
     `grant:relay` as an insufficient scope and so admits nothing.
