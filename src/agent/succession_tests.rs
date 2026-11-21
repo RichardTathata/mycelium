@@ -308,12 +308,29 @@ fn put(ctx: &TaskCtx, path: &str, bytes: &[u8]) {
     let _ = mycelium_core::ops::kv_set(ctx, Arc::from(path), bytes::Bytes::copy_from_slice(bytes));
 }
 
-/// Fold until this call ran one itself: a background fold (the identity watcher's) may be running, and `refresh`
-/// then returns at once.
+/// Fold until a fold that started after this call has run to the end: a background fold (the identity watcher's) may
+/// be running, and `refresh` then returns at once and that fold re-runs for this call. Bounded, so a regression of the
+/// livelock this waited in until 2026-11-21 (it accepted only a fold it ran itself, and each retry made the watcher's
+/// fold re-run) fails here in seconds instead of hanging CI. Synchronous on the test's thread, so a `tokio` timeout
+/// around the test could not interrupt it: the bound is here.
 fn refold(ctx: &TaskCtx) {
-    while !revocation::refresh_now(ctx) {
+    let ticket = revocation::fold_ticket(ctx);
+    let t = Instant::now();
+    while !revocation::refresh_answers(ctx, ticket) {
+        assert!(t.elapsed() < Duration::from_secs(30), "refold: no fold answered in 30 s (a livelock between a waiter and a running fold?)");
         std::thread::yield_now();
     }
+}
+
+/// [`IdentityLedger::anchors_durable_for`](revocation::IdentityLedger::anchors_durable_for), bounded: it waits for every
+/// append in flight, so an append that never settled would otherwise hang the test.
+async fn durable_for(ledger: &revocation::IdentityLedger, certs: &[(NodeId, [u8; 32])]) -> bool {
+    tokio::time::timeout(Duration::from_secs(30), ledger.anchors_durable_for(certs)).await.expect("anchors_durable_for answered within 30 s")
+}
+
+/// [`durable_for`] over every certificate the ledger keeps.
+async fn all_durable(ledger: &revocation::IdentityLedger) -> bool {
+    durable_for(ledger, &ledger.kept_certs()).await
 }
 
 async fn started(id: &NodeId, cfg: &GossipConfig) -> Arc<GossipAgent> {
@@ -457,7 +474,7 @@ async fn a_kept_anchor_survives_its_record_hidden_and_an_old_ca_one_is_dropped_a
     put(&a.task_ctx, &path, b"hidden");
     refold(&a.task_ctx);
     assert_eq!(a.task_ctx.trusted_keys(&n), vec![kn], "the record left the store; the kept certificate did not");
-    assert!(a.task_ctx.identity_ledger.anchors_durable_for(&a.task_ctx.identity_ledger.kept_certs()).await, "every kept certificate journaled");
+    assert!(all_durable(&a.task_ctx.identity_ledger).await, "every kept certificate journaled");
     a.shutdown().await;
 
     // Restart on the successor's files (the end state the operator reaches), the record still hidden in the store.
@@ -763,17 +780,17 @@ async fn a_failed_anchor_append_is_retried_by_a_later_fold() {
     });
     let a = started(&ia, &cfg).await;
     let ledger = &a.task_ctx.identity_ledger;
-    assert!(ledger.anchors_durable_for(&ledger.kept_certs()).await, "start settled");
+    assert!(all_durable(ledger).await, "start settled");
     let n = NodeId::new("127.0.0.1", alloc_port()).unwrap();
     let (kn, n1) = member_cert(&base, &ca1, &n, None);
     ledger.hook_appends_for_test(None, Some(ledger.anchor_mark()));
     put(&a.task_ctx, &revocation::cert_record_key(&n, &kn), &n1);
     refold(&a.task_ctx);
     let mine = vec![(n.clone(), <[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(&n1)))];
-    assert!(!ledger.anchors_durable_for(&mine).await, "the first append failed");
+    assert!(!durable_for(ledger, &mine).await, "the first append failed");
     tokio::time::sleep(Duration::from_millis(1_200)).await;
     refold(&a.task_ctx);
-    assert!(ledger.anchors_durable_for(&mine).await, "retried by the later fold, durable");
+    assert!(durable_for(ledger, &mine).await, "retried by the later fold, durable");
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -795,7 +812,7 @@ async fn a_dropped_anchor_takes_its_retry_bookkeeping_with_it() {
     });
     let a = started(&ia, &cfg).await;
     let ledger = &a.task_ctx.identity_ledger;
-    assert!(ledger.anchors_durable_for(&ledger.kept_certs()).await, "start settled");
+    assert!(all_durable(ledger).await, "start settled");
     let n = NodeId::new("127.0.0.1", alloc_port()).unwrap();
     let kn = [0x74u8; 32];
     let until_ms = mycelium_core::sim_seam::wall_now_ms() + 3_000;
@@ -804,7 +821,7 @@ async fn a_dropped_anchor_takes_its_retry_bookkeeping_with_it() {
     put(&a.task_ctx, &revocation::cert_record_key(&n, &kn), &n1);
     refold(&a.task_ctx);
     let mine = vec![(n.clone(), <[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(&n1)))];
-    assert!(!ledger.anchors_durable_for(&mine).await, "the append failed");
+    assert!(!durable_for(ledger, &mine).await, "the append failed");
     assert!(ledger.anchor_bookkeeping_for_test(&n, &n1), "a backoff entry while the certificate is kept");
     put(&a.task_ctx, &revocation::cert_record_key(&n, &kn), b"hidden");
     ledger.hook_appends_for_test(None, Some(u64::MAX - 1));
@@ -863,12 +880,12 @@ async fn an_often_rotated_peer_does_not_exhaust_the_kept_anchor_budget() {
     let t = Instant::now();
     loop {
         refold(&a.task_ctx);
-        if ledger.anchors_durable_for(&ledger.kept_certs()).await || t.elapsed() > Duration::from_secs(15) {
+        if all_durable(&ledger).await || t.elapsed() > Duration::from_secs(15) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(ledger.anchors_durable_for(&ledger.kept_certs()).await, "every kept certificate is durable");
+    assert!(all_durable(&ledger).await, "every kept certificate is durable");
     assert_eq!(ledger.anchor_journal_refused.load(std::sync::atomic::Ordering::Relaxed), 0, "no anchor refused by the budget");
     assert!(ledger.compaction.removed.load(std::sync::atomic::Ordering::Relaxed) >= 8, "dropped anchors left the journal");
     let newest: std::collections::HashSet<[u8; 32]> = keys[24..].iter().copied().collect();
@@ -910,7 +927,7 @@ async fn a_change_of_roots_compacts_the_anchor_journal_before_it_answers() {
         newest = Some(k);
         tokio::time::sleep(Duration::from_millis(3)).await;
     }
-    assert!(ledger.anchors_durable_for(&ledger.kept_certs()).await);
+    assert!(all_durable(&ledger).await);
     assert_eq!(ledger.anchors_journaled_count_for_test(&n), 32, "the budget for N is full, sixteen of its records dead");
     ledger.block_spawned_compaction_for_test();
     // Widen, and N's newest key is re-issued under the successor.
@@ -925,7 +942,7 @@ async fn a_change_of_roots_compacts_the_anchor_journal_before_it_answers() {
     let (_, a2) = member_cert(&base, &ca2, &ia, Some(ka));
     a.change_roots(a2, vec![der2.clone()]).await.unwrap();
     assert!(ledger.anchor_journaled_for_test(&n, &n2), "journaled before the change of roots returned");
-    assert!(ledger.anchors_durable_for(&ledger.kept_certs()).await, "every kept certificate is durable again");
+    assert!(all_durable(&ledger).await, "every kept certificate is durable again");
     assert_eq!(a.task_ctx.trusted_keys(&n), vec![kn]);
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&base);
@@ -954,7 +971,7 @@ async fn a_compaction_then_a_restart_leaves_a_fail_closed_peer_fail_closed() {
         a.task_ctx.peer_keys.pin().insert(n.clone(), vec![kn]);
         refold(&a.task_ctx);
         assert_eq!(a.task_ctx.trusted_keys(&n), vec![kn]);
-        assert!(a.task_ctx.identity_ledger.anchors_durable_for(&a.task_ctx.identity_ledger.kept_certs()).await);
+        assert!(all_durable(&a.task_ctx.identity_ledger).await);
         // A second peer, anchored under CA1 only: its record is dead after the narrow, so the compaction has work.
         let m = NodeId::new("127.0.0.1", alloc_port()).unwrap();
         let (km, m1) = member_cert(&base, &ca1, &m, None);

@@ -11,6 +11,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A change of roots no longer livelocks against a fold already running** (unreleased code: I2's `change_roots`, and the
+  kept-anchor tests built on it; found as a CI hang, the Test job cancelled at six hours twice on
+  `an_often_rotated_peer_does_not_exhaust_the_kept_anchor_budget`). A caller that needed a fold of its own retried
+  until it ran one itself; while the identity watcher's fold was running, each retry made that fold run again, so it
+  never finished and the caller never ran one. A caller now takes a ticket and is answered by any fold that started
+  after it, whichever thread runs it (`revocation::fold_ticket`, `refresh_answers`). The succession tests' fold and
+  durability waits are bounded at 30 s.
 - **The governed-call scaffold waits until both nodes know each other before node B calls node A** (found as a CI flake
   in the Scaffold job: the run ended `Error: Timeout`). It waited for B's connection only. A has no bootstrap peers
   and sends a reply only to a node in its own peer table, so a call made before A had heard of B lost its reply and
