@@ -5711,14 +5711,20 @@ What is different for a caller:
   wrongly. Now every later `sync()` and append is refused until a snapshot repairs the file (the writer tries one at
   once, then on every snapshot it is asked for or its timer brings), and `/health` shows
   `persistence.wal_refusing_appends`. The sync now goes through the replay seam, as the append's sync did.
-- **`gossip_wal_append_failures_total` counts failed batches** (a write or a sync), one per batch, where it counted
-  failed appends; a lone append's failure counts the same as before. New counters: `gossip_wal_syncs_total`,
+- **`gossip_wal_append_failures_total` still counts appends**: a failed batch adds every member, each an append with
+  no WAL record, so the total is what the one-at-a-time writer's failed append and refusals behind it summed to; a
+  failed `sync()` with no append in its batch counts one. New counters: `gossip_wal_syncs_total`,
   `gossip_wal_batches_total`, `gossip_wal_batch_appends_total`.
+- **The byte cap is exact this way:** it counts each record's key and value only (not the frame's length prefix, the
+  codec's fields or a cipher's expansion), and the record that reaches 4 MiB is included — so a batch is under 4 MiB of
+  keys and values plus one whole record, and a record over the cap is a batch of one.
 
 The inbound reader under `flush` still awaits a sync for each record it receives; that is O11's PR 2.
 
 **What you do.** Nothing to change. A dashboard that alerted on `gossip_wal_append_failures_total` still fires on its
-first increase. Operators who saw a transient `fsync` error once and the node carry on will now see the node refuse
+first increase, and one that summed it with `gossip_wal_appends_refused_total` as "appends with no WAL record" still
+reads the same total (the members of a failed batch are in the first, where the appends refused behind a failed one
+were in the second). Operators who saw a transient `fsync` error once and the node carry on will now see the node refuse
 appends until a snapshot succeeds: that is the point — check the disk.
 
 *Check:* `curl -s $NODE/metrics | grep -E 'gossip_wal_(syncs|batches|batch_appends)_total'` — under load,

@@ -1159,8 +1159,8 @@ async fn the_memory_a_held_call_window_takes_is_measured_on_each_node() {
 /// `Flush`, 1.25 s under the default `Async`, where the collector's deletes hold nothing: 15 ms). This test pins the
 /// one trigger the soak met.
 ///
-/// Asserted — **structure, not a wall clock**: the cancel is on disk within ten times what one asked just before the
-/// pass took (and 25 ms), so a disk that syncs in a millisecond does not pass it unfixed. **It was not, before O11's
+/// Asserted — **structure, not a wall clock**: the cancel is on disk within ten times the least of five asked just
+/// before the pass (and 25 ms), so a disk that syncs in a millisecond does not pass it unfixed. **It was not, before O11's
 /// PR 1** — 4.3 s on one run and 13.7 s on another against 5 and 8 ms quiet, on the machine of the dated run — during
 /// which the call ran on, to its window if that came first. That is why the 10⁵ soak failed over a `Flush` gateway.
 /// **It is the test of the WAL's group commit (the plan's §9 O11), not of O10's fix** (#816's confirm round, R2): the
@@ -1191,10 +1191,16 @@ async fn a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlo
     // Past every window + 2·skew + `max_drain_secs` (1 s): the whole backlog is the collector's to delete.
     let floor = n.now() + 1_000 + 2 * SKEW_MS + 1_000;
     assert!(until(|| n.now() > floor, Duration::from_secs(10)).await);
-    let (before, during) = (mint().await, mint().await);
-    let asked = Instant::now();
-    assert_eq!(call_issuer::revoke_call(n.ctx(), &before).await, Ok(true));
-    let quiet = asked.elapsed();
+    // The quiet write is the **least** of five (#824's review): one sample can be an fsync spike — one run saw 758 ms
+    // against about 5 ms — and an allowance of ten times a spike is one the old writer also met.
+    let mut quiet = Duration::MAX;
+    for _ in 0..5 {
+        let before = mint().await;
+        let asked = Instant::now();
+        assert_eq!(call_issuer::revoke_call(n.ctx(), &before).await, Ok(true));
+        quiet = quiet.min(asked.elapsed());
+    }
+    let during = mint().await;
     // The collector's pass: every expired pair deleted, the two fresh calls kept.
     let collected = call_issuer::collect(n.ctx(), n.now());
     assert_eq!(collected.call_records, 2 * BACKLOG, "the backlog is collected in one pass");

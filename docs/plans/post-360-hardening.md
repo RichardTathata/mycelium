@@ -2554,6 +2554,14 @@ upgrade notes `deprecations.md` §34–§39. **v2.34.0 is cut on 2026-10-16** (b
 maintainer's word) with F2, S and T, the follow-ups #627–#629 and #625; upgrade notes §40–§43. Recorded by F2 as not
 built: an authenticated anti-entropy entry (a wire change).
 
+**Observed once, not reproduced (2026-11-21, #824's review): the 10³ call soak's "two records a call were
+collected".** `agent::call_soak_tests::a_thousand_cancellable_calls_half_cancelled_while_running_all_reconcile` failed
+once on the reviewer's local `compliance,a2a` lib line — *"two records a call were collected: 1453"* — and passed in
+its other runs and in the author's. That soak runs with `persist: false` on both nodes, so no WAL is involved, and it is
+not O11's (inferred; not re-run on `main`). The line runs strict in CI (`CI_RETEST_STRICT=1`), so a recurrence there
+turns `main` red: if it does, the count the collector reports at the pass against the records it should hold is where
+to start. **Open, a flake to watch.**
+
 ## 4 · Decisions taken
 
 | # | Decision | Recorded |

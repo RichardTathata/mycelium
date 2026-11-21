@@ -3943,7 +3943,18 @@ Items found while building a row that the row does not own. Each names its home,
       and passing (22.3 ms behind the pass against 18.0 ms quiet, release, 2026-11-21; 5.92 s, 399 times its 14.8 ms quiet write, on the writer before it, the same machine and day).
     - The bursts re-measured, `the_wal_bursts_ahead_of_a_revoke_are_measured`: on
       [the ledger](../operations/what-is-proven.md#call-cancel-behind-collector).
-    - **Not built here:** O11-2 (the reader), so I4's exit 14 stays open; O12.
+    - **Not built here:** O11-2 (the reader), so I4's exit 14 stays open; O12; and the scoping note's §5.3 item —
+      the storage fault sweep (`a_fault_at_any_storage_effect_leaves_the_acknowledged_record_recoverable`) extended
+      to a run **through the writer** with a multi-record batch (it still drives `wal_append` and `do_snapshot`
+      directly).
+    - **From #824's review (2026-11-21):** the pinned test's quiet write is now the least of five (one sample was a
+      758 ms spike, which made the allowance 7.6 s against the 3.6 s the reviewer's planted-out writer measured) —
+      with group commit planted out (`BATCH_MAX_RECORDS = 1`) it fails, 4.13 s against 3.9 ms (1 057×), and restored
+      it passes three runs in three (6.9 to 9.3 ms against 3.7 to 4.6 ms; release, 2026-11-21);
+      `gossip_wal_append_failures_total` counts members, not batches; the byte cap's wording made exact; the
+      reviewer's five witnesses adopted (`async_acked_members_wait_for_a_later_members_sync`,
+      `a_sync_ending_a_failed_batch_is_err_with_every_member_and_poisons`, `a_record_over_the_byte_cap_is_a_batch_of_one`,
+      `exactly_the_record_cap_queued_makes_one_batch`, `appends_queued_after_a_shutdown_are_never_acknowledged_ok`).
 - **O12 · The evidence and identity journals sync one record at a time, on a runtime worker** *(open; a row of its
   own by the maintainer's decision of 2026-11-21, from O11's scoping; **wave 1b**; not built)*. `src/agent/journal.rs`'s
   writer — the evidence journal, the identity journals (`identity/client-certs`, `identity/revocations`), the
