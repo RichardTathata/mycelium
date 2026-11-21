@@ -399,8 +399,11 @@ pub const RECLAIM_PER_HOLD: usize = 1_024;
 /// The most `call:` scopes a node holds windows for at once (identity-and-lifecycle I4). A call whose window
 /// would be one more is not established (and counted, `call_windows_refused`): under a cancellable rule it is
 /// refused, so memory is bounded and nothing runs uncancellable for want of room. With the term capped at
-/// [`CALL_TERM_MAX_BYTES`](crate::mandate::grant::CALL_TERM_MAX_BYTES) a held scope is under 1 KiB, so the cap is
-/// under 256 MiB.
+/// [`CALL_TERM_MAX_BYTES`](crate::mandate::grant::CALL_TERM_MAX_BYTES) a held scope was **measured at about 1.4 KiB
+/// of resident memory** in this view (I4's PR 4, 2026-11-20, 60 000 scopes, release, Apple M2 Max; counted by
+/// structure it is under 1 KiB), so the cap is about 345 MiB here — and the two records of each call in the node's
+/// KV are about 1.7 KiB more until their gateway collects them
+/// (`docs/operations/what-is-proven.md#call-window-memory`).
 pub const MAX_CALL_WINDOWS: usize = 262_144;
 
 /// The most `call:` scopes held for one issuing gateway — the envelope replay window's size, so one gateway cannot
@@ -810,14 +813,33 @@ impl WorkGuard {
 
 impl Drop for WorkGuard {
     fn drop(&mut self) {
-        let was = self.authority.running.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
-        if self.is_cancelled() {
+        // **A cancelled guard keeps its stop record before its registration goes; an uncancelled one goes in the same
+        // hold that saw it uncancelled** (#816's review and its confirm round, R1). A reader that finds no registration
+        // under a term reads the stop record next (`call_cancel::answer`): with the registration removed first, a
+        // cancel-forward between the two steps found neither and answered a stopped call `not_running`. And the
+        // cancelled flag is set only by `sweep`, under row 48 — so the guard reads it and, if it is clear, removes the
+        // registration in that one hold: no sweep can cancel work that has already ended, and the provider never says
+        // it stopped work it did not ask to stop. When a cancel and a completion race, whichever takes row 48 first
+        // decides: the guard (the call completed: no record, and a forward answers `not_running`), or the sweep (the
+        // stop was asked before the work ended: a record, and `stopped` — the rung `CancelClass::Stopped` names, "the
+        // work promised to stop and has ended", #799's L4). Flat acquisitions (rows 48, 49, 48), none held across another.
+        #[cfg(test)]
+        call_hooks::fire(&self.authority, call_hooks::Stage::BeforeEndingCheck);
+        let mandate = {
+            let mut running = self.authority.running.lock().unwrap_or_else(|e| e.into_inner());
+            if self.is_cancelled() {
+                Some(running.get(&self.id).and_then(|r| r.work.mandate.clone()))
+            } else {
+                running.remove(&self.id);
+                None
+            }
+        };
+        if let Some(mandate) = mandate {
             let at = |v: &std::sync::atomic::AtomicU64| match v.load(std::sync::atomic::Ordering::Acquire) {
                 0 => None,
                 t => Some(t),
             };
             let now = (self.now_ms)();
-            let mandate = was.and_then(|r| r.work.mandate);
             let record = NamedStop {
                 established_by: mandate.as_ref().map(|m| m.established_by.as_str().to_string()),
                 scope: mandate.as_ref().map(|m| m.scope.clone()),
@@ -835,6 +857,10 @@ impl Drop for WorkGuard {
                 stops.pop_front();
             }
             stops.push_back(record);
+            drop(stops);
+            #[cfg(test)]
+            call_hooks::fire(&self.authority, call_hooks::Stage::StopRecordedBeforeRemoval);
+            self.authority.running.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
         }
         // A cancel-forward waiting for this work to end is woken (identity-and-lifecycle I4, PR 3).
         self.authority.ended.notify_waiters();
@@ -1730,6 +1756,10 @@ pub(crate) mod call_hooks {
         BeforeLocalRead,
         /// The local copy has been read; nothing is offered yet.
         AfterLocalRead,
+        /// In a cancelled work guard's drop: its stop record is kept, its registration not yet removed (#816's review).
+        StopRecordedBeforeRemoval,
+        /// In any work guard's drop, before it reads whether it was cancelled (#816's confirm round, R1).
+        BeforeEndingCheck,
     }
 
     pub(crate) type Hook = Arc<dyn Fn(Stage) + Send + Sync>;
@@ -2820,6 +2850,77 @@ mod call_cancel_tests {
         drop(guard);
         assert_eq!(a.call_stop_recorded(&p(A), "call:c42", "c42"), Some(true), "A's own record");
         assert_eq!(a.call_stop_recorded(&p(B), "call:c42", "c42"), None, "never B's");
+    }
+
+    /// **A reader never finds a stopped call with neither its registration nor its stop record** (#816's review, a race
+    /// since PR 3a). The provider's answer to a cancel-forward reads the registrations under the term and then the
+    /// stop record (`call_cancel::answer`); a cancelled guard's drop does two things under two locks. Between them —
+    /// where the hook reads as the answer does — the call is still registered **and** its record is kept, so the
+    /// answer waits for the end or reads `stopped`, never `not_running`. Seen failing first with the drop's old order
+    /// planted back (the registration removed before the record was pushed): at the hook the registration was
+    /// already gone, `(0, 0)` — in that order a reader landing before the push found no registration and no record.
+    #[test]
+    fn a_stopped_calls_registration_is_removed_only_after_its_stop_record_is_kept() {
+        let a = provider();
+        let c = mint(&key_a(), A, "c43", OP, RES, &args(), 1_000, 60_000);
+        let s = a.assess_call(A, OP, RES, &args(), &c, 2_000, &members(), |_| None);
+        assert_eq!(s.binding.map(|b| b.state), Some(MandateState::Established));
+        let m = &c.grant.mandate;
+        let guard = a.begin(AuthorizedWork::new(mandate_operation(OP, RES), Some(m.clone()), m.valid_until_ms), Arc::new(|| 3_000));
+        let revoking = checkpoint(&key_a(), A, "call:c43", 2, 2_500, &["c43"]);
+        assert_eq!(a.hold_call_revocation(&p(A), &revoking, 2_600, &members()), CallRevocationHeld::Held { registered: true });
+        assert_eq!(a.sweep(2_700), 1);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (a2, seen2) = (Arc::clone(&a), Arc::clone(&seen));
+        call_hooks::HOOKS.pin().insert(
+            call_hooks::key(&a),
+            Arc::new(move |stage| {
+                if stage == call_hooks::Stage::StopRecordedBeforeRemoval {
+                    seen2.lock().unwrap().push((a2.call_registrations(&p(A), "call:c43"), a2.call_stop_recorded(&p(A), "call:c43", "c43")));
+                }
+            }),
+        );
+        drop(guard);
+        call_hooks::HOOKS.pin().remove(&call_hooks::key(&a));
+        assert_eq!(*seen.lock().unwrap(), vec![((1, 0), Some(true))], "between the drop's two steps: still registered, and the stop already on record");
+        assert_eq!((a.call_registrations(&p(A), "call:c43"), a.call_stop_recorded(&p(A), "call:c43", "c43")), ((0, 0), Some(true)), "after it: ended, and stopped");
+    }
+
+    /// **A sweep never cancels work that has already ended, and a cancelled guard always leaves a stop record**
+    /// (#816's confirm round, R1). Work ending on its own is dropped while its term's revocation is held; a sweep lands
+    /// at the start of the drop (the hook), before the guard reads its flag — the sweep `call_cancel::answer` runs. The
+    /// sweep finds the registration and cancels it, so the stop was asked before the work ended: the guard must keep a
+    /// record, and a reader must find it. Seen failing first with the drop's previous shape planted back (the flag read
+    /// before the hook, the registration removed after it): the sweep cancelled the registration, which was then
+    /// removed with no record — and a forward's answer would have said `stopped` for a call it never saw stop. The
+    /// other order — the guard first — is the plain drop: no record, nothing to sweep.
+    #[test]
+    fn a_sweep_never_cancels_ended_work_and_a_cancelled_guard_always_leaves_a_record() {
+        let a = provider();
+        let c = mint(&key_a(), A, "c44", OP, RES, &args(), 1_000, 60_000);
+        let s = a.assess_call(A, OP, RES, &args(), &c, 2_000, &members(), |_| None);
+        assert_eq!(s.binding.map(|b| b.state), Some(MandateState::Established));
+        let m = &c.grant.mandate;
+        let guard = a.begin(AuthorizedWork::new(mandate_operation(OP, RES), Some(m.clone()), m.valid_until_ms), Arc::new(|| 3_000));
+        let revoking = checkpoint(&key_a(), A, "call:c44", 2, 2_500, &["c44"]);
+        assert_eq!(a.hold_call_revocation(&p(A), &revoking, 2_600, &members()), CallRevocationHeld::Held { registered: true });
+        let swept = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (a2, swept2) = (Arc::clone(&a), Arc::clone(&swept));
+        call_hooks::HOOKS.pin().insert(
+            call_hooks::key(&a),
+            Arc::new(move |stage| {
+                if stage == call_hooks::Stage::BeforeEndingCheck {
+                    swept2.fetch_add(a2.sweep(2_700), std::sync::atomic::Ordering::SeqCst);
+                }
+            }),
+        );
+        drop(guard);
+        call_hooks::HOOKS.pin().remove(&call_hooks::key(&a));
+        assert_eq!(swept.load(std::sync::atomic::Ordering::SeqCst), 1, "the sweep found the work still registered and asked it to stop");
+        assert_eq!(a.call_registrations(&p(A), "call:c44"), (0, 0));
+        assert_eq!(a.call_stop_recorded(&p(A), "call:c44", "c44"), Some(true), "a stop asked before the work ended has its record");
+        // Once ended, nothing is left for a sweep to cancel.
+        assert_eq!(a.sweep(2_800), 0);
     }
 
     /// **M3: holds from cancel-forwards have a budget of their own, per sender, and take nothing admitted calls need.**

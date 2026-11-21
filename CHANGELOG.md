@@ -499,6 +499,49 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     2b-4; the split is in the plan's §8).
   - **Check:** `mycelium tls commit --ca-dir ./fleet-ca --successor ./fleet-ca-2` on a release binary exits 2 naming
     the provisional OID, and neither `./fleet-ca-2` nor `./fleet-ca/ca-commit.pem` exists afterwards.
+- **The `call:` mandate's soak and its figures — and a defect the soak found** (identity-and-lifecycle I4, PR 4;
+  no behaviour changes, so no `deprecations.md` entry; ledger:
+  [the soak](docs/operations/what-is-proven.md#call-soak),
+  [the costs](docs/operations/what-is-proven.md#call-mandate-carried-checkpoint-cost),
+  [the memory](docs/operations/what-is-proven.md#call-window-memory)). `src/agent/call_soak_tests.rs` runs cancellable
+  calls through a minting gateway to an enforcing provider — six in ten through `/a2a`, two through `/mcp`, two under
+  a grant and a `call:` mandate together — cancels half of them while they run, each through its own door, and
+  reconciles every one: the registrations counted, each cancelled call stopped inside bound 1 (from the gateway's
+  revocation to the provider's confirmed stop), a stop record for every cancelled call and for no other, both nodes'
+  `call:` views and records back to nothing. 10³ calls run on every merge; **10⁵ were run once, over a gateway with
+  no `[persistence]`**, and are dated on the ledger with the costs re-measured on the shipped code (a provider's
+  `assess` of a `call:` mandate 117.5 µs, the gateway's mint 63 µs and its two durable writes 9.14 ms, the worst-case
+  envelope computed at its most against the 8 192 B cap) and the memory a held window takes (about 2.1 KiB per call at a gateway and
+  3.2 KiB per window at a provider, at the 64-byte term cap).
+  **Found, open — a cancel waits its turn at the gateway's WAL.** The WAL's writer syncs one record at a time in
+  arrival order — every append under `sync_mode = "flush"`, every required-sync write under any mode — and a
+  cancel's revocation is a required-sync write that is neither gossiped nor forwarded until its own sync returns. So
+  under `flush` any burst of writes holds a cancel from reaching the provider (the collector's minute pass is how
+  the soak met it: 13.7 s behind 1 000 deletes), and under any mode a cancel queues behind the mints in flight (the
+  reviewer measured 1.7 s behind 300 under `flush`, 1.25 s under the default `async`); a new call's mint waits the
+  same way. The call runs on meanwhile, at most to its mandate's window (`call_mandate_ttl_secs`); work on the
+  gateway node itself stops at once. The 10⁵ soak fails over a `flush` gateway, a test pins the defect (ignored: it
+  fails today). **Decided (the maintainer, 2026-11-20), not in this release's change:** the gateway will forward a
+  cancel at once and hold only the caller's acknowledgement for the durable write — a cancel the disk then refuses has
+  still stopped the call, and the caller is told it was not durable — in a later change; WAL group commit is planned
+  separately ([ledger](docs/operations/what-is-proven.md#call-cancel-behind-collector)). The same queue already serves, in
+  2.40.0, a grant's revocation, grant and use-marker records, `KvHandle`'s required-sync writes and consensus's
+  appends (read, not run).
+  **Fixed — a stopped call could be answered `not_running`** (a race since I4's PR 3a, unreleased; found by #816's
+  review): a cancelled work guard removed its registration before it kept its stop record, and a cancel-forward
+  landing between the two found neither. The record is now kept first, and an uncancelled guard reads its flag and
+  removes its registration in one hold, so no sweep can cancel work that has begun to end and a provider never answers
+  `stopped` for a call that completed (#816's confirm round;
+  `a_stopped_calls_registration_is_removed_only_after_its_stop_record_is_kept`,
+  `a_sweep_never_cancels_ended_work_and_a_cancelled_guard_always_leaves_a_record`). The soak asserts the receipt's
+  class on every lane.
+  **Also found, each a ledger row:** an execution authority never forgets a `grant:` scope it was fed (about 430 B
+  each; [ledger](docs/operations/what-is-proven.md#authority-grant-scopes-not-reclaimed)); and a node's memory for
+  the compliance audit chain grows by 2.6 records a cancellable call at every node until an operator prunes it — most
+  of what the soak's process held ([ledger](docs/operations/what-is-proven.md#audit-chain-grows-per-call); predates
+  I4). `MAX_CALL_WINDOWS`' doc comment said a held scope is under 1 KiB; measured, it is about 1.4 KiB, and the
+  comment says so.
+  *Check:* `cargo test --lib --features compliance,a2a call_soak_tests`.
 
 - **Developer consent certificates: the certificate and its principal** (identity-and-lifecycle I7, PR 1 of 3;
   `deprecations.md` §112; [feature page](docs/features/consent-certificates.md)). `mycelium tls issue --client <name>

@@ -90,7 +90,16 @@ work.
   ([ledger](../operations/what-is-proven.md#call-checkpoint-replay))
   ([§100](../guide/deprecations.md#100-the-execution-authority-verifies-a-call-mandate-a-call-mandate-in-the-first-slot-is-never-established-the-call-key-family-is-owned-2410-identity-and-lifecycle-i4-pr-1a)).
 - **Evidence:** the ledger rows [running work stops](../operations/what-is-proven.md#running-work-stops) and
-  [after a revocation every door runs nothing](../operations/what-is-proven.md#revocation-every-door-runs-nothing).
+  [after a revocation every door runs nothing](../operations/what-is-proven.md#revocation-every-door-runs-nothing);
+  for the `call:` mandate, [the soak](../operations/what-is-proven.md#call-soak) (10⁵ cancellable calls over two
+  nodes, half cancelled while running, run once over a gateway with no `[persistence]`; 10³ on every merge,
+  [`src/agent/call_soak_tests.rs`](../../src/agent/call_soak_tests.rs)), [its costs](../operations/what-is-proven.md#call-mandate-carried-checkpoint-cost)
+  and [the memory a held window takes](../operations/what-is-proven.md#call-window-memory).
+- **A known defect, for the `call:` mandate** (found by the soak, 2026-11-20): a cancel waits its turn at the
+  gateway's WAL, and until its revocation is on disk it is neither gossiped nor forwarded, so the call runs on, at
+  most to its window. Under `sync_mode = "flush"` any burst of writes ahead of it holds it (the collector's minute
+  pass: seconds for a thousand records); under any mode it queues behind the mints in flight. Work on the gateway
+  node itself stops at once ([ledger](../operations/what-is-proven.md#call-cancel-behind-collector)).
 
 ## Go deeper
 
