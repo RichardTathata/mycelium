@@ -186,6 +186,48 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **A revoke revokes the grant its path names, never another one copied there** (the owner-signed rule's (b), the
+  body against the key). `POST /gateway/grants/{agent}/{request}/revoke` checked that the record at
+  `grant/{agent}/{request}/issued` was signed by this node and held by the path's agent, and never that it was the
+  grant issued for `{request}`. Any admitted member could copy another genuine grant of the same issuing node and
+  holder there: a supervisor's revoke of the request then revoked **the other grant's term**, left the request's own
+  grant live, and wrote `…/revoked`, so the status route reported it `revoked` while every door still admitted it.
+  The same copy was taken by the agent's wait as the answer to a request nobody had answered, and handed to a client by
+  `GET /gateway/grants/request/{request}`. **Released in 2.38.0, 2.39.0 and 2.40.0**; in 2.38.0 and 2.39.0 the revoke
+  route checked neither the signature nor the holder, so any record naming this node as issuer was revoked on.
+
+  Now the revoke route, the agent's wait and the status route read the record only as a grant whose term is the
+  path's request, whose scope is `grant:{request}` and whose holder is the path's agent. Anything else is absent: the
+  revoke is refused `409 unreadable_grant`, naming the term the record carries, and nothing is written; the wait waits
+  on and its expiry names what it saw; the status route answers `pending`. **Counted:** `GET /stats`
+  `grant_issued_refused` — `revoke` (this mismatch, and the route's existing signature and holder refusals),
+  `agent_wait`, `status`. An honest caller sees no change: a genuine grant always answers the key it was written at.
+  No wire-frame change (v12), no on-disk change, no public API change. Tests, each seen failing first:
+  `a_revoke_refuses_a_genuine_grant_copied_under_another_request` (two nodes, the copy written by the second member
+  and gossiped), `the_agents_wait_reads_a_grant_copied_from_another_request_as_absent`,
+  `the_status_route_reads_a_grant_copied_from_another_request_as_no_answer`.
+
+  **Revoking can still be denied, now by name.** A member who writes a copy, garbage or a tombstone to a request's
+  `…/issued` stops the issuing node revoking that request: the revoke is refused, and the grant stays live until its
+  `valid_until`. Refusing is the right answer here, because the alternative was to revoke the wrong term. Closing it
+  needs the issuing node's own memory of what it issued, which is identity-and-lifecycle I7-S's decision journal (PR 2).
+
+  **Check:** `curl -s http://NODE:PORT/stats | jq .grant_issued_refused` shows the three counts. They count **reads**,
+  not records: the SDKs poll the status route every 0.5 s and the wait re-reads on every wake. A non-zero count on an
+  upgraded node means a read under `grant/` found a record that did not answer its key.
+
+  For a revoke made under 2.38.0–2.40.0, an `already_revoked` answer and the status route's `revoked` prove nothing:
+  the copied revoke wrote `…/revoked` at the request's own key too, and any member can plant that marker. The only
+  evidence that a request's own grant was revoked is the issuing node's signed checkpoint at
+  `grant/{agent}/{request}/checkpoint`, with scope `grant:{request}` and `{request}` in its `revoked` set. Without it,
+  the grant stayed live until its `valid_until_ms`, at most 3 600 s after its issue in 2.38.0–2.40.0. So only grants
+  issued in the last hour before the upgrade can still matter.
+
+  You can re-send such a revoke to the upgraded issuing node. Where the key holds the request's own grant and no
+  `…/revoked` marker, the re-send revokes it; otherwise it is refused and nothing is written. A signed decision older
+  than 300 s plus drift is refused as stale, so it must be re-signed. In the attack, the grant whose record was copied
+  **was really revoked**, and revocation is monotonic.
+
 - **A member can no longer re-arm a used grant** (critique plan row CR2, first PR; the owner-signed rule;
   `deprecations.md` §106). A grant admits one call at each enforcement point, and the only durable record of that
   use was the marker `grant/{holder}/{term}/used/{door}` in the gossip KV: an unsigned timestamp, read for

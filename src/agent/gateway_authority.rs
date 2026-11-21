@@ -510,6 +510,40 @@ pub(crate) fn grant_checkpoint_key(grant: &crate::mandate::Mandate) -> String {
     format!("grant/{}/{}/checkpoint", grant_holder_segment(grant.holder.as_str()), grant.term.as_str())
 }
 
+/// Does the grant read at `{base}/issued` — `base` is `grant/{holder segment}/{request}` — answer that request? It is a
+/// grant, its term is the key's request, its scope is `grant:{request}` and its holder's segment is the key's. Every grant is signed for the request it answers, so a genuine grant copied under another request's key
+/// fails here: the owner-signed rule's (b), the body against the key, which a signature alone does not give. Read by
+/// the revoke route, the agent's wait and the status route; I4's collector makes the same comparison
+/// (`call_issuer::verified_grant`).
+///
+/// A term holding `/` never answers: the request is one key segment at both decision routes, and without the rule a
+/// holder `node:x/y` with term `r1` and a holder `node:x` with term `y/r1` would answer the same key (#819's review).
+pub(crate) fn grant_answers_key(grant: &crate::mandate::Mandate, base: &str) -> bool {
+    !grant.term.as_str().contains('/')
+        && grant.is_grant()
+        && grant.scope == format!("{}{}", crate::mandate::grant::GRANT_SCOPE_PREFIX, grant.term.as_str())
+        && base == format!("grant/{}/{}", grant_holder_segment(grant.holder.as_str()), grant.term.as_str())
+}
+
+/// The reads of `…/issued` records — reads, not records: a client polls — that a reader treated as absent because they did not answer the key they were read at, or (at
+/// the revoke route) did not verify — counted where an operator reads them (`grant_issued_refused` on `/stats`). In
+/// memory, so zero again after a restart.
+#[derive(Default)]
+pub(crate) struct IssuedRefused {
+    /// The revoke route: not this node's signature, another holder, or another request's grant.
+    pub(crate) revoke: std::sync::atomic::AtomicU64,
+    /// The agent's wait: another request's grant, read as no answer yet.
+    pub(crate) agent_wait: std::sync::atomic::AtomicU64,
+    /// `GET /gateway/grants/request/{request}`: another request's grant, read as no answer.
+    pub(crate) status: std::sync::atomic::AtomicU64,
+}
+
+impl IssuedRefused {
+    pub(crate) fn note(counter: &std::sync::atomic::AtomicU64) {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// A grant holder as one `grant/` key segment (identity-and-lifecycle I1): a node principal (`node:{ip}:{port}`) is
 /// written as it is, as every grant before I1 was; any other principal — a client's `token:{issuer}/{name}`, which
 /// holds a `/` — as the lowercase hex of its bytes. The two never collide: hex has no `:`.
@@ -1833,6 +1867,34 @@ pub(crate) mod tests {
             term: TermId::new("t1").unwrap(),
             valid_from_ms: 0,
             valid_until_ms: until,
+        }
+    }
+
+    /// **A grant answers only the key its own term and holder name** (#819). The genuine node and client grants
+    /// answer their keys; another term, another scope, a non-grant scope, another holder, the raw client principal in
+    /// place of its hex, and a term holding `/` (which would let two grants share a key) do not. Seen failing first
+    /// with the `/` rule removed: the `node:x` grant with term `y/r1` answered `grant/node:x/y/r1`.
+    #[test]
+    fn a_grant_answers_only_the_key_its_term_and_holder_name() {
+        let grant = |holder: &str, term: &str, scope: &str| Mandate {
+            holder: PrincipalId::new(holder).unwrap(),
+            scope: scope.into(),
+            term: TermId::new(term).unwrap(),
+            ..mandate(1, 10)
+        };
+        let client = "token:fleet/forecaster";
+        let hex = grant_holder_segment(client);
+        assert!(grant_answers_key(&grant("node:127.0.0.1:9", "r1", "grant:r1"), "grant/node:127.0.0.1:9/r1"));
+        assert!(grant_answers_key(&grant(client, "r1", "grant:r1"), &format!("grant/{hex}/r1")));
+        for (g, base) in [
+            (grant("node:127.0.0.1:9", "r2", "grant:r2"), "grant/node:127.0.0.1:9/r1".to_string()),
+            (grant("node:127.0.0.1:9", "r1", "grant:r2"), "grant/node:127.0.0.1:9/r1".to_string()),
+            (grant("node:127.0.0.1:9", "r1", "call:r1"), "grant/node:127.0.0.1:9/r1".to_string()),
+            (grant("node:127.0.0.1:8", "r1", "grant:r1"), "grant/node:127.0.0.1:9/r1".to_string()),
+            (grant(client, "r1", "grant:r1"), format!("grant/{client}/r1")),
+            (grant("node:x", "y/r1", "grant:y/r1"), "grant/node:x/y/r1".to_string()),
+        ] {
+            assert!(!grant_answers_key(&g, &base), "ANSWERED: holder {} term {} scope {} at {base}", g.holder.as_str(), g.term.as_str(), g.scope);
         }
     }
 

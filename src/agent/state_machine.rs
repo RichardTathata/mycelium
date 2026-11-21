@@ -636,42 +636,49 @@ impl AgentStateMachine {
             if let Some(bytes) = mycelium_core::ops::kv_get(&self.ctx, &issued_key) {
                 let grant: SignedMandateGrant = serde_json::from_slice(&bytes)
                     .map_err(|e| PolicyViolation::GrantRefused(format!("{tool}: the issued grant does not parse: {e}")))?;
-                // Possession: this node signs the request it is about to make with its identity key.
-                let Some(tls) = self.ctx.tls.get() else {
-                    return Err(PolicyViolation::GrantRefused(format!("{tool}: a grant needs this node's identity ([tls]) to prove possession")));
-                };
-                let resource = format!("tool:{tool}@{}", self.ctx.node_id);
-                let request_bytes = possession_request("tools/call", &resource, &digest);
-                let proof = mycelium_core::tls::sign_bytes(&tls.signing_key(), &possession_message(&grant.mandate, &request_bytes));
-                let presented = PresentedMandate { grant, possession: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, proof) };
-                // Verified here, by this node's own authority, before the transition commits.
-                let Some(authority) = self.ctx.execution_authority.get() else {
-                    return Err(PolicyViolation::GrantRefused(format!("{tool}: no execution authority is attached to verify the grant")));
-                };
-                let now = self.ctx.hlc.decision_now_ms();
-                // The grant's checkpoint, written beside it by the issuing node — this one or another — so the
-                // standing is known here before the grant is assessed (adopter-surface X3, second PR).
-                super::gateway_authority::feed_grant_checkpoint(&self.ctx, authority, &presented.grant.mandate, now);
-                // From the arguments, so a grant from a request asked before identity-and-lifecycle I3 (bound to the
-                // legacy digest) is established for the window. A legacy match is counted here, at its own point: a
-                // provider without `with_provider_enforcement` never assesses the call, and this wait writes no
-                // evidence record, so without it an operator could see zero while legacy grants run (#750's round 2).
-                let (assessment, _form) = authority.assess_arguments_at(super::gateway_authority::CountAt::Agent, &agent, "tools/call", &resource, arguments, Some(&presented), now, &super::gateway_member_keys(&self.ctx));
-                match assessment.binding.map(|b| b.state) {
-                    Some(super::action_evaluator::MandateState::Established) => {
-                        #[cfg(feature = "metrics")]
-                        metrics::counter!("mycelium_grants_verified_total").increment(1);
-                        return serde_json::to_value(&presented)
-                            .map(|v| (v, request.clone()))
-                            .map_err(|e| PolicyViolation::GrantRefused(format!("{tool}: the grant does not serialise: {e}")));
+                // Another request's grant copied under this one's key is no answer to it (the owner-signed rule's
+                // (b)): read as absent, counted, and waited past — a genuine answer may still overwrite it.
+                if !super::gateway_authority::grant_answers_key(&grant.mandate, &self.grant_key(&request)) {
+                    super::gateway_authority::IssuedRefused::note(&self.ctx.grant_issued_refused.agent_wait);
+                    last_unknown = Some(format!("the record at {issued_key} is the grant for term {}, not for request {request}", grant.mandate.term.as_str()));
+                } else {
+                    // Possession: this node signs the request it is about to make with its identity key.
+                    let Some(tls) = self.ctx.tls.get() else {
+                        return Err(PolicyViolation::GrantRefused(format!("{tool}: a grant needs this node's identity ([tls]) to prove possession")));
+                    };
+                    let resource = format!("tool:{tool}@{}", self.ctx.node_id);
+                    let request_bytes = possession_request("tools/call", &resource, &digest);
+                    let proof = mycelium_core::tls::sign_bytes(&tls.signing_key(), &possession_message(&grant.mandate, &request_bytes));
+                    let presented = PresentedMandate { grant, possession: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, proof) };
+                    // Verified here, by this node's own authority, before the transition commits.
+                    let Some(authority) = self.ctx.execution_authority.get() else {
+                        return Err(PolicyViolation::GrantRefused(format!("{tool}: no execution authority is attached to verify the grant")));
+                    };
+                    let now = self.ctx.hlc.decision_now_ms();
+                    // The grant's checkpoint, written beside it by the issuing node — this one or another — so the
+                    // standing is known here before the grant is assessed (adopter-surface X3, second PR).
+                    super::gateway_authority::feed_grant_checkpoint(&self.ctx, authority, &presented.grant.mandate, now);
+                    // From the arguments, so a grant from a request asked before identity-and-lifecycle I3 (bound to the
+                    // legacy digest) is established for the window. A legacy match is counted here, at its own point: a
+                    // provider without `with_provider_enforcement` never assesses the call, and this wait writes no
+                    // evidence record, so without it an operator could see zero while legacy grants run (#750's round 2).
+                    let (assessment, _form) = authority.assess_arguments_at(super::gateway_authority::CountAt::Agent, &agent, "tools/call", &resource, arguments, Some(&presented), now, &super::gateway_member_keys(&self.ctx));
+                    match assessment.binding.map(|b| b.state) {
+                        Some(super::action_evaluator::MandateState::Established) => {
+                            #[cfg(feature = "metrics")]
+                            metrics::counter!("mycelium_grants_verified_total").increment(1);
+                            return serde_json::to_value(&presented)
+                                .map(|v| (v, request.clone()))
+                                .map_err(|e| PolicyViolation::GrantRefused(format!("{tool}: the grant does not serialise: {e}")));
+                        }
+                        Some(super::action_evaluator::MandateState::Refused(r)) => return Err(PolicyViolation::GrantRefused(format!("{tool}: {r}"))),
+                        Some(super::action_evaluator::MandateState::Unknown(why)) if why == super::gateway_authority::GRANT_REVOKED => {
+                            return Err(PolicyViolation::GrantRefused(format!("{tool}: not established — {why}")));
+                        }
+                        // Not established *yet*: the issuer's checkpoint may land after the grant did. Wait on, to the expiry.
+                        Some(super::action_evaluator::MandateState::Unknown(why)) => last_unknown = Some(why),
+                        None => last_unknown = Some("the grant was not established".into()),
                     }
-                    Some(super::action_evaluator::MandateState::Refused(r)) => return Err(PolicyViolation::GrantRefused(format!("{tool}: {r}"))),
-                    Some(super::action_evaluator::MandateState::Unknown(why)) if why == super::gateway_authority::GRANT_REVOKED => {
-                        return Err(PolicyViolation::GrantRefused(format!("{tool}: not established — {why}")));
-                    }
-                    // Not established *yet*: the issuer's checkpoint may land after the grant did. Wait on, to the expiry.
-                    Some(super::action_evaluator::MandateState::Unknown(why)) => last_unknown = Some(why),
-                    None => last_unknown = Some("the grant was not established".into()),
                 }
             }
             let now = self.ctx.hlc.decision_now_ms();
