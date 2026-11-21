@@ -519,8 +519,13 @@ async fn the_mcp_tables_eviction_leaves_a_fresh_call_registered_at_a_stale_key()
 /// What a burst queued at the gateway's WAL ahead of a cancel is made of.
 #[derive(Clone, Copy, Debug)]
 enum Burst {
-    /// Plain owned writes (`kv_set`, an `append_try` each): under `sync_mode = "flush"` the writer syncs each one.
-    PlainWrites,
+    /// Appends handed to the gateway's WAL alone (`append_try`), applied and gossiped nowhere: under `sync_mode =
+    /// "flush"` the writer syncs each one. Not plain `kv_set` writes (#821's CI, 2026-11-21): those are gossiped too,
+    /// and the forward then reaches the provider only after every frame queued ahead of it on the same connection —
+    /// 15 718 of them took the CI runner 24 s — which is the connection's order, not the gateway's disk. With the burst
+    /// gossiped, the stop came when the provider had applied 12 550 of 15 718 burst keys; with it on the WAL alone, in
+    /// 13 ms (`docs/operations/what-is-proven.md#call-cancel-behind-collector`).
+    WalAppends,
     /// Concurrent mints (`call_issuer::record`): two required-sync writes each, synced under any mode.
     Mints,
 }
@@ -528,9 +533,11 @@ enum Burst {
 /// Queue `n` units of `burst` at `g`'s WAL, ahead of whatever is asked next; the mints' tasks, still writing.
 async fn queue_burst(g: &Arc<super::call_mint_tests::N>, target: &NodeId, burst: Burst, n: usize, tag: &str) -> Vec<tokio::task::JoinHandle<()>> {
     match burst {
-        Burst::PlainWrites => {
+        Burst::WalAppends => {
+            let wal = g.ctx().wal.get().expect("persists");
             for i in 0..n {
-                assert!(mycelium_core::ops::kv_set(g.ctx(), Arc::from(format!("o10/{tag}/{i}")), Bytes::from_static(b"burst")), "a burst write is taken");
+                let u = crate::framing::make_gossip_update(g.a.node_id(), 4, Arc::from(format!("o10/{tag}/{i}")), Bytes::from_static(b"burst"), false, &g.ctx().hlc);
+                wal.append_try(crate::framing::sync_entry_from(&u));
             }
             Vec::new()
         }
@@ -633,11 +640,13 @@ async fn the_stop_beats_the_acknowledgement_behind(mode: crate::config::SyncMode
     let _ = std::fs::remove_dir_all(&cert_dir);
 }
 
-/// §9 O10 under `sync_mode = "flush"`, behind plain owned writes — the shape of the collector's minute pass. Seen
-/// failing first on main at 7e9486f7 (the forward sent only after the revocation's sync).
+/// §9 O10 under `sync_mode = "flush"`, behind a burst of synced appends at the gateway's WAL — what O10 promises the
+/// forward does not wait for. Seen failing first on main at 7e9486f7 (the forward sent only after the revocation's
+/// sync), with plain gossiped writes as the burst; with the burst on the WAL alone it fails there the same way (the
+/// revocation's own sync is behind it).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn under_flush_the_providers_stop_beats_the_acknowledgement_behind_a_burst_of_writes() {
-    the_stop_beats_the_acknowledgement_behind(crate::config::SyncMode::Flush, Burst::PlainWrites).await;
+    the_stop_beats_the_acknowledgement_behind(crate::config::SyncMode::Flush, Burst::WalAppends).await;
 }
 
 /// §9 O10 under the default `sync_mode` (`async`), behind concurrent mints — required-sync writes queue behind each
@@ -873,7 +882,11 @@ async fn a_gateway_crash_between_the_forward_and_the_sync_leaves_no_record_and_a
     drop(p);
     tokio::time::sleep(Duration::from_millis(300)).await;
     let p = node(popts).await;
-    assert!(until(|| knows(&g.a, &pid) && knows(&p.a, &gid), Duration::from_secs(20)).await, "the nodes learned each other's keys again");
+    // Structural, not a wait (#821's CI): the gateway still holds the old instance's key, so keys prove nothing. The
+    // restarted provider holds the call's checkpoint only once the gateway has synced its KV to it, and the gateway
+    // counts it connected only once a session to the new instance is up — both facts of the new instance.
+    let reachable = || p.kv(&cp).is_some() && g.a.connected_peers().contains(&pid) && knows(&p.a, &gid);
+    assert!(until(reachable, Duration::from_secs(30)).await, "the restarted provider is reachable from the gateway and holds its records");
     let g = Arc::new(g);
     let (g2, pid2) = (Arc::clone(&g), pid.clone());
     let again = tokio::spawn(async move { g2.send(&pid2, framed).await });
