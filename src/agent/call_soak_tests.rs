@@ -19,9 +19,11 @@
 //! read: it is asserted as **registrations**, one per call and a second for each both-slots call. Then the odd calls
 //! are cancelled and the even ones released. What the soak asserts is in [`soak`]'s doc comment.
 //!
-//! **The gateway's `[persistence]`.** The soak passes over a gateway without it and **fails** over one with it under
-//! `SyncMode::Flush` (what `Soak::persist` sets), at the collector's minute pass: a cancel waits its turn at the WAL,
-//! one sync per synced append. The finding, pinned at the end of this file by a test that fails today
+//! **The gateway's `[persistence]`** (`Soak::persist`, its `sync_mode`). Since §9 O10's fix (2026-11-21) a cancel's
+//! forward no longer waits for the disk, and the 10⁵ soak passes over a durable gateway under the default `async`.
+//! Under `SyncMode::Flush` it still **fails**, at the collector's minute pass, on what §9 O11 owns: the mints wait
+//! their turn at the WAL, and the gateway's connection reader waits on it for each inbound record, so a batch outlives
+//! its windows (bound 1 holds). The finding, pinned at the end of this file by a test that fails today
 //! (`a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog`). The CI run and the dated run are
 //! therefore of a gateway with no `[persistence]`, and say so.
 //!
@@ -64,9 +66,9 @@ struct Soak {
     batch: usize,
     /// `call_mandate_ttl_secs`: every window ends this long after its mint, so it bounds what both nodes hold.
     ttl_secs: u64,
-    /// The gateway's `[persistence]`, under `SyncMode::Flush`: with it, each mint's two records are fsynced before the
-    /// call is sent.
-    persist: bool,
+    /// The gateway's `[persistence]` and its `sync_mode`: with it, each mint's two records are fsynced before the call
+    /// is sent, and each cancel's revocation before the cancel is acknowledged.
+    persist: Option<crate::config::SyncMode>,
     /// The whole soak fails past this.
     within: Duration,
 }
@@ -176,7 +178,7 @@ struct NodeOpts<'a> {
     gateway: &'a NodeId,
     mint: bool,
     ttl_secs: u64,
-    persist: bool,
+    persist: Option<crate::config::SyncMode>,
     /// How many `/mcp`-lane tools the policy names (and, with `tools`, the provider registers).
     mcp_tools: usize,
     tools: Option<Arc<Tools>>,
@@ -200,9 +202,9 @@ async fn soak_node(port: u16, http_port: u16, o: NodeOpts<'_>) -> Node {
         tls_cfg.auto_cert_dir = o.cert_dir.to_path_buf();
         tls_cfg
     });
-    if o.persist {
-        use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
-        cfg.persistence = Some(PersistenceConfig { base_path: dir.join("persist"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
+    if let Some(sync_mode) = o.persist {
+        use crate::config::{OnUnreadable, PersistenceConfig};
+        cfg.persistence = Some(PersistenceConfig { base_path: dir.join("persist"), sync_mode, snapshot_wal_threshold: 1_000_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
     }
     cfg.gateway_mint_call_mandates = o.mint;
     cfg.call_mandate_ttl_secs = o.ttl_secs;
@@ -312,7 +314,7 @@ async fn fleet(s: &Soak, tools: Arc<Tools>) -> (Arc<Node>, Arc<Node>, CertDir) {
     let cert_dir = CertDir(cert_dir);
     let mcp_tools = s.batch / 5;
     let g = soak_node(gport, port(), NodeOpts { cert_dir: &cert_dir.0, bootstrap: vec![], provider: &pid, gateway: &gid, mint: true, ttl_secs: s.ttl_secs, persist: s.persist, mcp_tools, tools: None }).await;
-    let p = soak_node(pport, port(), NodeOpts { cert_dir: &cert_dir.0, bootstrap: vec![gid.clone()], provider: &pid, gateway: &gid, mint: false, ttl_secs: s.ttl_secs, persist: false, mcp_tools, tools: Some(tools) }).await;
+    let p = soak_node(pport, port(), NodeOpts { cert_dir: &cert_dir.0, bootstrap: vec![gid.clone()], provider: &pid, gateway: &gid, mint: false, ttl_secs: s.ttl_secs, persist: None, mcp_tools, tools: Some(tools) }).await;
     let knows = |x: &GossipAgent, n: &NodeId| x.task_ctx.peer_keys.pin().get(n).is_some_and(|k| !k.is_empty());
     assert!(until(|| knows(&g.a, &pid) && knows(&p.a, &gid), Duration::from_secs(20)).await, "the nodes learned each other's keys");
     for k in 0..mcp_tools {
@@ -791,7 +793,7 @@ fn print(name: &str, s: &Soak, r: &Report) {
     let phases: Vec<String> = r.phases.iter().map(|(phase, l)| format!("{phase} {}", ms(l))).collect();
     let by_lane: Vec<String> = r.cancel_to_answer.iter().map(|(lane, l)| format!("{lane} {}", dist(l))).collect();
     eprintln!(
-        "i4-pr4 {name}: {} calls ({} cancelled while running; {} under both slots), batches of {}, window {} s, gateway persistence {}, F = {F_MS} ms, in {:?}. \
+        "i4-pr4 {name}: {} calls ({} cancelled while running; {} under both slots), batches of {}, window {} s, gateway persistence {:?}, F = {F_MS} ms, in {:?}. \
          Bound 1 and its neighbours, ms, {}. The caller's wait, cancel sent -> caller answered, {}; by door: {}; the longest: {}. cancel_call receipts {:?}; forwards not answered: {:?}. Every cancel-forward's receipt, as the gateway counted it: {:?}. The slowest batch by phase (and its first call): {:?}. Transport drops (gateway frames, signals; provider frames, signals): {:?}. \
          Peak held: {} call: windows (provider), {} issued (gateway). Records collected {}. grant: scopes left at the provider {}. \
          The mint's two durable writes under this load, {}. \
@@ -814,7 +816,7 @@ fn print(name: &str, s: &Soak, r: &Report) {
 /// (2.03 s against *F*), and the gateway's collector (the finding).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_thousand_cancellable_calls_half_cancelled_while_running_all_reconcile() {
-    let s = Soak { n: 1_000, batch: 20, ttl_secs: 30, persist: false, within: Duration::from_secs(420) };
+    let s = Soak { n: 1_000, batch: 20, ttl_secs: 30, persist: None, within: Duration::from_secs(420) };
     let r = soak(s).await;
     print("soak (CI, 10^3)", &s, &r);
 }
@@ -823,16 +825,21 @@ async fn a_thousand_cancellable_calls_half_cancelled_while_running_all_reconcile
 /// once, in release, and dated on `docs/operations/what-is-proven.md`; not run in CI. Bounded: the soak fails past
 /// two hours, and each batch has its own deadlines.
 ///
-/// **The dated run is of a gateway with no `[persistence]`.** With it under `SyncMode::Flush` (`I4_SOAK_PERSIST=1`) the soak **fails** at
-/// one of the gateway's collection passes with a backlog — it first stalled 60 to 130 s in, between calls 1 100 and
-/// 2 600, in every run made: the finding pinned by [`a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog`]. Exit 14 as the
-/// plan states it — over a fleet whose gateway keeps the promise of exit 11 — is therefore **not met**.
+/// **The first dated run is of a gateway with no `[persistence]`.** After §9 O10's fix (2026-11-21) it was re-run over a
+/// durable gateway: with `I4_SOAK_PERSIST=async` (the default `sync_mode`) it **passes**; with `I4_SOAK_PERSIST=flush`
+/// it **fails** at batch 4 000, the batch outliving its windows behind the WAL (§9 O11's, not the cancel's: bound 1
+/// held). Exit 14 is therefore met under the default and not under `flush` (`docs/operations/what-is-proven.md#call-soak`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "the 10^5 soak, run once and dated: cargo test --release --lib --features compliance,a2a a_hundred_thousand_cancellable_calls -- --ignored --nocapture"]
 async fn a_hundred_thousand_cancellable_calls_half_cancelled_while_running_all_reconcile() {
-    // The dated run uses these. `I4_SOAK_N`, `I4_SOAK_BATCH`, `I4_SOAK_TTL` and `I4_SOAK_PERSIST=1` shape another.
+    // The dated run uses these. `I4_SOAK_N`, `I4_SOAK_BATCH`, `I4_SOAK_TTL` and `I4_SOAK_PERSIST` (`flush` or `1`,
+    // `async` — the default `sync_mode`) shape another.
     let env = |name: &str, default: u64| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
-    let s = Soak { n: env("I4_SOAK_N", 100_000) as usize, batch: env("I4_SOAK_BATCH", 100) as usize, ttl_secs: env("I4_SOAK_TTL", 30), persist: env("I4_SOAK_PERSIST", 0) == 1, within: Duration::from_secs(7_200) };
+    let s = Soak { n: env("I4_SOAK_N", 100_000) as usize, batch: env("I4_SOAK_BATCH", 100) as usize, ttl_secs: env("I4_SOAK_TTL", 30), persist: match std::env::var("I4_SOAK_PERSIST").as_deref() {
+            Ok("1" | "flush") => Some(crate::config::SyncMode::Flush),
+            Ok("async") => Some(crate::config::SyncMode::Async),
+            _ => None,
+        }, within: Duration::from_secs(7_200) };
     let r = soak(s).await;
     print("soak (10^5)", &s, &r);
 }
@@ -849,7 +856,7 @@ async fn lone_with(persist: bool, ttl_secs: u64) -> Node {
     let (port, http_port) = (crate::test_util::alloc_port(), crate::test_util::alloc_port());
     let id = NodeId::new("127.0.0.1", port).unwrap();
     let dir = std::env::temp_dir().join(format!("i4-soak-{port}"));
-    soak_node(port, http_port, NodeOpts { cert_dir: &dir.join("tls"), bootstrap: vec![], provider: &id, gateway: &id, mint: true, ttl_secs, persist, mcp_tools: 0, tools: None }).await
+    soak_node(port, http_port, NodeOpts { cert_dir: &dir.join("tls"), bootstrap: vec![], provider: &id, gateway: &id, mint: true, ttl_secs, persist: persist.then_some(crate::config::SyncMode::Flush), mcp_tools: 0, tools: None }).await
 }
 
 /// An execution authority as `soak_node` attaches one, standing alone, and the member table that names `gateway`'s key.

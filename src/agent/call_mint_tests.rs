@@ -38,6 +38,9 @@ pub(super) struct Opts {
     pub(super) http_port: Option<u16>,
     /// `[persistence]` under the node's directory.
     pub(super) persist: bool,
+    /// With `persist`: its `sync_mode` and `snapshot_wal_threshold`, when not `Flush` and 1 000 (§9 O10's tests: a
+    /// burst of appends that no inline snapshot interrupts and the WAL's queue, four times the threshold, holds).
+    pub(super) wal: Option<(crate::config::SyncMode, usize)>,
     /// This node serves the tools (`slow`, 30 s; `quick`, at once).
     pub(super) tools: bool,
     /// `collect_expired_records`.
@@ -87,7 +90,8 @@ pub(super) async fn node(opts: Opts) -> N {
     });
     if opts.persist {
         use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
-        cfg.persistence = Some(PersistenceConfig { base_path: dir.join("persist"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
+        let (sync_mode, snapshot_wal_threshold) = opts.wal.unwrap_or((SyncMode::Flush, 1_000));
+        cfg.persistence = Some(PersistenceConfig { base_path: dir.join("persist"), sync_mode, snapshot_wal_threshold, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
     }
     cfg.gateway_mint_call_mandates = opts.mint;
     cfg.collect_expired_records = opts.collect;
@@ -158,8 +162,10 @@ pub(super) async fn node(opts: Opts) -> N {
                 let (a3, s, f) = (Arc::clone(&a2), Arc::clone(&s), Arc::clone(&f));
                 tokio::spawn(async move {
                     s.fetch_add(1, Ordering::SeqCst);
+                    // `soon` completes on its own in 2 s (#821's review, F1: a completion racing its cancel); else 30 s.
+                    let secs = if req.payload().as_ref() == b"soon" { 2 } else { 30 };
                     tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                        _ = tokio::time::sleep(Duration::from_secs(secs)) => {
                             f.fetch_add(1, Ordering::SeqCst);
                             a3.service().rpc_respond(&req, b"dispatched".to_vec());
                         }
