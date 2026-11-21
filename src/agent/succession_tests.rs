@@ -1009,3 +1009,153 @@ async fn a_compaction_then_a_restart_leaves_a_fail_closed_peer_fail_closed() {
         let _ = std::fs::remove_dir_all(&base);
     }
 }
+
+/// **A fold's ticket is answered only by a fold that started after it, under roots no older than the waiter's**
+/// (#822's review, A). Six waiters take 150 tickets each while a thread folds without pause and another re-activates
+/// the roots every 15 ms (each activation cuts the folds running across it), the fold slowed by a varying plant.
+/// Every ticket is answered within 20 s, by a fold that started after it was taken, and the standing it leaves was
+/// judged under a roots generation no older than the one when it was taken. Seen failing first with the fold reading
+/// the ticket after its run instead of at its start ("answered with no fold started after the ticket"), and with the
+/// old waiter (a waiter not answered in 20 s).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tickets_are_answered_under_a_busy_fold_and_changing_roots() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+    let base = fresh_dir("tickets");
+    let ((ca1, der1), _) = two_cas(&base);
+    let (ia, cfg) = node_cfg(&base, "a", &ca1, &ca1.join("ca-cert.pem"), vec![]);
+    let a = started(&ia, &cfg).await;
+    let ctx = Arc::clone(&a.task_ctx);
+    let t = Arc::clone(ctx.tls.get().unwrap());
+    for i in 0..8 {
+        let n = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+        let (k, c) = member_cert(&base.join(format!("m{i}")), &ca1, &n, None);
+        put(&ctx, &revocation::cert_record_key(&n, &k), &c);
+    }
+    let starts = Arc::new(AtomicU64::new(0));
+    let s = Arc::clone(&starts);
+    ctx.identity_ledger.fold_plant.store(Some(Arc::new(Box::new(move || {
+        let n = s.fetch_add(1, SeqCst);
+        std::thread::sleep(Duration::from_micros((n * 7919) % 1500));
+    }))));
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut threads = Vec::new();
+    {
+        let (c, st) = (Arc::clone(&ctx), Arc::clone(&stop));
+        threads.push(std::thread::spawn(move || {
+            while !st.load(SeqCst) {
+                revocation::refresh(&c);
+                std::thread::yield_now();
+            }
+        }));
+    }
+    let changes = Arc::new(AtomicU64::new(0));
+    {
+        let (tt, st, d, g) = (Arc::clone(&t), Arc::clone(&stop), der1.clone(), Arc::clone(&changes));
+        threads.push(std::thread::spawn(move || {
+            while !st.load(SeqCst) {
+                tt.activate(tt.reroot_material(tt.node_cert_der(), vec![d.clone()]).unwrap()).unwrap();
+                g.fetch_add(1, SeqCst);
+                std::thread::sleep(Duration::from_millis(15));
+            }
+        }));
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<Result<u64, String>>();
+    for w in 0..6 {
+        let (c, sts, tt, tx) = (Arc::clone(&ctx), Arc::clone(&starts), Arc::clone(&t), tx.clone());
+        std::thread::spawn(move || {
+            let mut worst = 0u128;
+            for i in 0..150 {
+                let starts_before = sts.load(SeqCst);
+                let generation = tt.roots_generation();
+                let ticket = revocation::fold_ticket(&c);
+                let t0 = Instant::now();
+                while !revocation::refresh_answers(&c, ticket) {
+                    if t0.elapsed() > Duration::from_secs(20) {
+                        let _ = tx.send(Err(format!("waiter {w}, ticket {i}: not answered in 20 s")));
+                        return;
+                    }
+                    std::thread::yield_now();
+                }
+                worst = worst.max(t0.elapsed().as_micros());
+                if sts.load(SeqCst) <= starts_before {
+                    let _ = tx.send(Err(format!("waiter {w}, ticket {i}: answered with no fold started after the ticket")));
+                    return;
+                }
+                match c.key_standing.judged_under() {
+                    Some(j) if j >= generation => {}
+                    other => {
+                        let _ = tx.send(Err(format!("waiter {w}, ticket {i}: judged under {other:?}, older than {generation} at the ticket")));
+                        return;
+                    }
+                }
+            }
+            let _ = tx.send(Ok(worst as u64));
+        });
+    }
+    drop(tx);
+    let mut outcome = Ok(0);
+    for _ in 0..6 {
+        match rx.recv_timeout(Duration::from_secs(120)) {
+            Ok(Ok(w)) => outcome = outcome.map(|m: u64| m.max(w)),
+            Ok(Err(e)) => outcome = Err(e),
+            Err(e) => outcome = Err(format!("a waiter did not finish in 120 s: {e:?}")),
+        }
+        if outcome.is_err() {
+            break;
+        }
+    }
+    stop.store(true, SeqCst);
+    for h in threads {
+        h.join().unwrap();
+    }
+    ctx.identity_ledger.fold_plant.store(None);
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+    let worst = outcome.unwrap_or_else(|e| panic!("{e}"));
+    eprintln!("tickets: {} folds, {} changes of roots, worst wait {worst} µs", starts.load(SeqCst), changes.load(SeqCst));
+}
+
+/// **A fold cut short by a change of roots answers no ticket** (#822's review, A). A ticket is taken; the first fold
+/// meets a narrowing of the roots inside its merge (the `MERGE_PLANT`), so it merges nothing and runs again. At the
+/// second fold's start the ticket is not answered; after it, it is. Seen failing first with every fold answering,
+/// whole or not: the cut fold answered the ticket.
+#[cfg(feature = "provisional-ca-generation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fold_cut_short_by_a_change_of_roots_answers_no_ticket() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+    let base = fresh_dir("cut-fold");
+    let ((ca1, der1), (ca2, der2)) = ca_and_successor(&base);
+    let (ia, cfg) = node_cfg(&base, "a", &ca1, &ca1.join("ca-cert.pem"), vec![]);
+    let a = started(&ia, &cfg).await;
+    let ctx = Arc::clone(&a.task_ctx);
+    let t = Arc::clone(ctx.tls.get().unwrap());
+    a.change_roots(t.node_cert_der(), vec![der1, der2.clone()]).await.unwrap();
+    // No watcher from here: every fold is this test's, on this thread, where the merge plant runs.
+    a.shutdown().await;
+    let n = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+    let (kn, n1) = member_cert(&base, &ca1, &n, None);
+    put(&ctx, &revocation::cert_record_key(&n, &kn), &n1);
+    let (_, a2) = member_cert(&base, &ca2, &ia, Some(t.verifying_key_bytes()));
+    let ticket = revocation::fold_ticket(&ctx);
+    let narrow = Arc::clone(&t);
+    revocation::MERGE_PLANT.with(|p| {
+        *p.borrow_mut() = Some(Box::new(move || {
+            narrow.activate(narrow.reroot_material(a2.clone(), vec![der2.clone()]).unwrap()).unwrap();
+        }))
+    });
+    let folds = Arc::new(AtomicU64::new(0));
+    let early = Arc::new(AtomicBool::new(false));
+    let (f, e, c) = (Arc::clone(&folds), Arc::clone(&early), Arc::downgrade(&ctx));
+    ctx.identity_ledger.fold_plant.store(Some(Arc::new(Box::new(move || {
+        if f.fetch_add(1, SeqCst) == 1 && let Some(c) = c.upgrade() {
+            // At the second fold's start the first, cut by the change of roots, must not have answered.
+            e.store(revocation::refresh_answers(&c, ticket), SeqCst);
+        }
+    }))));
+    revocation::refresh(&ctx);
+    ctx.identity_ledger.fold_plant.store(None);
+    assert!(folds.load(SeqCst) >= 2, "the cut fold ran again ({} folds)", folds.load(SeqCst));
+    assert!(!early.load(SeqCst), "a fold cut short by a change of roots answered the ticket");
+    assert!(revocation::refresh_answers(&ctx, ticket), "the whole fold after it did");
+    let _ = std::fs::remove_dir_all(&base);
+}

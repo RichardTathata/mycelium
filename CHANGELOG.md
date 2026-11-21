@@ -17,7 +17,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   until it ran one itself; while the identity watcher's fold was running, each retry made that fold run again, so it
   never finished and the caller never ran one. A caller now takes a ticket and is answered by any fold that started
   after it, whichever thread runs it (`revocation::fold_ticket`, `refresh_answers`). The succession tests' fold and
-  durability waits are bounded at 30 s.
+  durability waits are bounded at 30 s. A change of roots also waits the same way for the client-certificate fold,
+  which it documented and did not do.
+- **An identity or client-certificate change that arrives just as a fold ends is folded** (2.40.0 and earlier; found
+  by #822's review). A call made while a fold was ending could see the fold running, and the fold could then finish
+  without seeing the call's request. The change was then applied only at the next trigger: another record, or the
+  maintenance tick, 60 s or more later. A call now records its request before it checks for a running fold, and a
+  fold that ends checks for requests after it stops (`src/agent/single_flight.rs`). A panic in a fold no longer
+  leaves the fold marked running.
 - **The governed-call scaffold waits until both nodes know each other before node B calls node A** (found as a CI flake
   in the Scaffold job: the run ended `Error: Timeout`). It waited for B's connection only. A has no bootstrap peers
   and sends a reply only to a node in its own peer table, so a call made before A had heard of B lost its reply and

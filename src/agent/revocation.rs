@@ -641,13 +641,8 @@ pub(crate) struct IdentityLedger {
     /// Each verdict also carries the certificate's `notAfter` (ms): a verdict is a miss once the wall clock reaches
     /// it, so a certificate's expiry is judged in-process as a restart judges it (I2, #805's review F3).
     cert_cache: papaya::HashMap<[u8; 32], (u64, u64, Option<CertFacts>)>,
-    running: AtomicBool,
-    again: AtomicBool,
-    /// Tickets handed out by [`fold_ticket`]: a caller that must see a fold that started after its call takes one.
-    fold_asked: AtomicU64,
-    /// The newest ticket a fold has answered: a fold that read `fold_asked` at its start and ran to the end under one
-    /// roots generation answers every ticket up to what it read, whichever thread ran it.
-    fold_done: AtomicU64,
+    /// The fold runs one at a time, and answers tickets ([`fold_ticket`], [`refresh_answers`]).
+    fold: super::single_flight::SingleFlight,
     /// A test's plant, run at the start of every fold (the livelock test slows the fold with it).
     #[cfg(test)]
     pub(super) fold_plant: arc_swap::ArcSwapOption<Box<dyn Fn() + Send + Sync>>,
@@ -821,12 +816,20 @@ impl IdentityLedger {
         }
         let (seen, tally) = (Arc::clone(&self.anchors_seen), Arc::clone(&self.anchor_tally));
         rt.spawn(async move {
+            // Cleared on every exit — a panic, or the task dropped at a runtime's shutdown, included — so a budget
+            // check after it can spawn the next compaction (#822's review: the guard).
+            struct Spawned(Arc<Compaction>);
+            impl Drop for Spawned {
+                fn drop(&mut self) {
+                    self.0.spawned.store(false, Ordering::Release);
+                }
+            }
+            let _spawned = Spawned(Arc::clone(&c));
             let failed_before = c.failed.load(Ordering::Relaxed);
             compact(j, seen, tally, Arc::clone(&c)).await;
             if c.failed.load(Ordering::Relaxed) != failed_before {
                 c.not_before.store(mycelium_core::sim_seam::wall_now_ms().saturating_add(60_000), Ordering::Release);
             }
-            c.spawned.store(false, Ordering::Release);
         });
     }
 
@@ -1474,29 +1477,7 @@ fn nodes_with_records(ctx: &TaskCtx) -> Vec<NodeId> {
 /// or `sys/revocation/` change, after the startup identity prewarm, periodically (to re-judge a
 /// certificate issued in the future), and by [`revoke_key`].
 pub(crate) fn refresh(ctx: &TaskCtx) {
-    let ledger = &ctx.identity_ledger;
-    loop {
-        if ledger.running.swap(true, Ordering::AcqRel) {
-            ledger.again.store(true, Ordering::Release);
-            return;
-        }
-        loop {
-            ledger.again.store(false, Ordering::Release);
-            // Acquire pairs with the ticket's AcqRel: a fold that reads a ticket sees what its taker wrote before taking it
-            // (a record put, the roots changed). Release on `fold_done` pairs with the waiter's Acquire: it sees the fold.
-            let asked = ledger.fold_asked.load(Ordering::Acquire);
-            if refresh_once(ctx) {
-                ledger.fold_done.fetch_max(asked, Ordering::Release);
-            }
-            if !ledger.again.load(Ordering::Acquire) {
-                break;
-            }
-        }
-        ledger.running.store(false, Ordering::Release);
-        if !ledger.again.swap(false, Ordering::AcqRel) {
-            return;
-        }
-    }
+    ctx.identity_ledger.fold.run(|| refresh_once(ctx));
 }
 
 /// A ticket for a fold that **starts after** this call: a caller that must see the fold's result before it goes on —
@@ -1504,7 +1485,7 @@ pub(crate) fn refresh(ctx: &TaskCtx) {
 /// [`refresh_answers`] until it is `true`. A fold that ran under the old roots and re-runs on its own would otherwise
 /// finish after the caller had returned.
 pub(crate) fn fold_ticket(ctx: &TaskCtx) -> u64 {
-    ctx.identity_ledger.fold_asked.fetch_add(1, Ordering::AcqRel) + 1
+    ctx.identity_ledger.fold.ticket()
 }
 
 /// [`refresh`], then whether `ticket` is answered: a fold that started after it was taken has run to the end, **this
@@ -1514,7 +1495,20 @@ pub(crate) fn fold_ticket(ctx: &TaskCtx) -> u64 {
 /// CI) for six hours whenever the identity watcher's fold had started first.
 pub(crate) fn refresh_answers(ctx: &TaskCtx, ticket: u64) -> bool {
     refresh(ctx);
-    ctx.identity_ledger.fold_done.load(Ordering::Acquire) >= ticket
+    ctx.identity_ledger.fold.answered(ticket)
+}
+
+/// Fold until a fold that started after this call has run whole (the tests' one-call `refresh` returned at once
+/// while the identity watcher's fold ran, and asserted on a fold that had not happened yet; #822's review, D).
+/// Bounded at 30 s: synchronous, so no `tokio` timeout could interrupt it.
+#[cfg(test)]
+pub(crate) fn refresh_through_for_test(ctx: &TaskCtx) {
+    let ticket = fold_ticket(ctx);
+    let t = std::time::Instant::now();
+    while !refresh_answers(ctx, ticket) {
+        assert!(t.elapsed() < std::time::Duration::from_secs(30), "no identity fold answered in 30 s");
+        std::thread::yield_now();
+    }
 }
 
 /// The keys a node has revoked that this node has ever counted — in this process, or journaled
@@ -1550,7 +1544,7 @@ fn refresh_once(ctx: &TaskCtx) -> bool {
     let g0 = tls.roots_generation();
     for node in nodes_with_records(ctx) {
         let Some(folded) = fold_node(ctx, tls, &node, g0) else {
-            ledger.again.store(true, Ordering::Release);
+            ledger.fold.ask_again();
             return false;
         };
         let mut now = HashSet::new();
@@ -1581,7 +1575,7 @@ fn refresh_once(ctx: &TaskCtx) -> bool {
         };
         let standing = NodeStanding { anchored, revoked, counted };
         if tls.roots_generation() != g0 {
-            ledger.again.store(true, Ordering::Release);
+            ledger.fold.ask_again();
             return false;
         }
         if ctx.key_standing.get(&node).as_deref() != Some(&standing) {

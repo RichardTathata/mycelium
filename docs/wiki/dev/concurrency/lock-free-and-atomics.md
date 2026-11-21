@@ -72,8 +72,16 @@ the waiter never ran one: a livelock, broken only if the waiter's thread was des
 identity watcher's fold started first. The rule: **a waiter takes a ticket before it asks and accepts any run that read
 the ticket at its start** (`revocation::fold_ticket` / `refresh_answers`; the run records the newest ticket it read when
 it ends whole). Gate: `a_waiter_is_answered_by_a_fold_another_thread_is_running` (a fold slowed by a plant, the waiter on
-another thread; seen failing first with the old waiter). The client-certificate fold has no waiter that retries, so it
-has no such loop.
+another thread; seen failing first with the old waiter), with `a_fold_cut_short_by_a_change_of_roots_answers_no_ticket`
+and `tickets_are_answered_under_a_busy_fold_and_changing_roots` (#822's review).
+
+**Ask, then try; release, then look** (the same review). The request flag must be set **before** the caller tries to
+claim the run, and the holder must read it **after** it releases the run. Otherwise the caller sees the run held, the
+holder releases it, finds no request and returns, and only then does the caller's request land, so nobody runs it.
+Each side stores one variable and then reads the other, which is the two-variable handshake of the ordering policy
+below: `SeqCst` on all four operations. A guard releases the run on every exit, a panic included. Both folds share
+the one implementation, `src/agent/single_flight.rs` (`SingleFlight::{run, ticket, answered}`); gate
+`a_request_made_while_a_run_ends_is_run`.
 
 ## Memory-ordering policy for atomics
 

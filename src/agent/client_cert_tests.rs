@@ -348,10 +348,10 @@ async fn many_junk_principals_cost_one_scan_and_one_chain_check_per_certificate(
     tokio::time::sleep(Duration::from_millis(300)).await;
     let ledger = &a.task_ctx.client_certs;
     let s0 = ledger.scans.load(Relaxed);
-    super::client_cert::refresh(&a.task_ctx);
+    super::client_cert::refresh_through_for_test(&a.task_ctx);
     let scans = ledger.scans.load(Relaxed) - s0;
     let c1 = ledger.chain_checks.load(Relaxed);
-    super::client_cert::refresh(&a.task_ctx);
+    super::client_cert::refresh_through_for_test(&a.task_ctx);
     let rechecked = ledger.chain_checks.load(Relaxed) - c1;
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
@@ -817,7 +817,7 @@ mod consent {
         for (_, path, der) in &forged {
             let _ = crate::agent::helpers::kv_set(&a.task_ctx, Arc::from(path.as_str()), bytes::Bytes::from(der.clone()));
         }
-        super::super::client_cert::refresh(&a.task_ctx);
+        super::super::client_cert::refresh_through_for_test(&a.task_ctx);
         let standings = (
             a.consent_key_standing(CONSENT, &c_point),
             a.consent_key_standing(CONSENT, &other_point),

@@ -699,7 +699,7 @@ async fn a_consent_key_is_refused_or_ignored_wherever_an_ed25519_key_is_read() {
     let authorities = crate::membership::MembershipAuthorities::new([consent.clone()], fed.clone());
     assert!(authorities.verify(&signed, &members).is_err(), "REMOVAL: a consent key entitled a removal");
     // ProviderBudget: a cohort declaration the consent key signed, from the consent principal it is told to trust.
-    crate::agent::client_cert::refresh(&a.task_ctx);
+    crate::agent::client_cert::refresh_through_for_test(&a.task_ctx);
     let declaration = crate::knowledge::cohort::CohortDeclaration { operator: consent.clone(), cohort: "night".into(), seq: 1, members: Default::default(), valid_from_ms: 0, valid_until_ms: u64::MAX };
     let signed = crate::knowledge::cohort::SignedCohortDeclaration { signature: mycelium_core::tls::sign_consent_p256_in_test_build(&key.pkcs8, &declaration.canonical_bytes()).unwrap(), declaration };
     let offer = budget.offer(&signed, &members);

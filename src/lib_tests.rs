@@ -2588,7 +2588,7 @@ async fn junk_revocation_records_keep_a_fold_bounded() {
     }
     tokio::time::sleep(Duration::from_millis(500)).await;
     let t = std::time::Instant::now();
-    crate::agent::revocation::refresh(&b.task_ctx);
+    crate::agent::revocation::refresh_through_for_test(&b.task_ctx);
     let took = t.elapsed();
     let k0_trusted = crate::agent::helpers::known_verifying_keys(&b.task_ctx, &nc).contains(&k0);
     a.shutdown().await; b.shutdown().await; c.shutdown().await;
@@ -2718,7 +2718,7 @@ async fn a_thiefs_revocation_judged_before_the_successors_certificate_does_not_l
     let der = a.kv().get(&k1_cert_key).map(|v| v.to_vec()).expect("k1's certificate at A");
     let _ = b.kv().set(k1_cert_key.clone(), der);
     tokio::time::sleep(Duration::from_millis(500)).await;
-    crate::agent::revocation::refresh(&b.task_ctx);
+    crate::agent::revocation::refresh_through_for_test(&b.task_ctx);
     let k1_trusted = within_3s(|| b.task_ctx.trusted_keys(&nc).contains(&k1)).await;
     let landed = plant_lands(&c, &b, "q5/after").await;
     a.shutdown().await; b.shutdown().await; c.shutdown().await;
@@ -2767,7 +2767,7 @@ async fn a_planted_record_does_not_refuse_a_start_whose_own_certificate_record_i
     let (path, bytes) = revocation_v2_by(&id, k2, &k0_sk, vec![k0_cert]);
     let _ = a.kv().set(path, bytes);
     tokio::time::sleep(Duration::from_millis(300)).await;
-    crate::agent::revocation::refresh(&a.task_ctx);
+    crate::agent::revocation::refresh_through_for_test(&a.task_ctx);
     tokio::time::sleep(Duration::from_millis(300)).await;
     a.shutdown().await;
     drop(a);
@@ -2916,7 +2916,7 @@ async fn two_compromise_rotations_learned_out_of_order_leave_the_oldest_key_revo
     let rec = c.kv().scan_prefix(&prefix);
     for (k, v) in &rec { let _ = b.kv().set(k.to_string(), v.to_vec()); }
     tokio::time::sleep(Duration::from_millis(500)).await;
-    crate::agent::revocation::refresh(&b.task_ctx);
+    crate::agent::revocation::refresh_through_for_test(&b.task_ctx);
     let k0_trusted = b.task_ctx.trusted_keys(&nc).contains(&k0);
     a.shutdown().await; b.shutdown().await; c.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);

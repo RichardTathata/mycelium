@@ -12,3 +12,9 @@ start ran to the end, on any thread. The succession tests' fold and durability w
 
 Pages: `concurrency/lock-free-and-atomics.md` (the waiter rule, beside the papaya rules); the plan's §3.6 entry
 (`docs/plans/post-360-hardening.md`, *Known hang, closed (2026-11-21)*) holds the evidence and the siblings checked.
+
+#822's review added three of the same family, fixed in the PR. A cut fold answering a ticket had no test (two tests
+added). A lost request, released in 2.40.0, in both folds, because the request flag was set after the run was tried:
+both folds now use `src/agent/single_flight.rs` (ask then try, release then look, `SeqCst`, a guard on `running`).
+`change_roots`' client-mark promise now waits on a client ticket. Tests that read after one `refresh` now wait on a
+ticket. `Compaction::spawned` gained a drop guard.

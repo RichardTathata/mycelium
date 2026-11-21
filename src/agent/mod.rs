@@ -190,6 +190,9 @@ pub(crate) mod audit;
 /// row Q); issued under `compliance`.
 #[cfg(feature = "tls")]
 pub(crate) mod revocation;
+/// One run at a time, with tickets: the identity and client-certificate folds' discipline (#822).
+#[cfg(feature = "tls")]
+pub(crate) mod single_flight;
 /// Identity-and-lifecycle I2 (PR 2b): the CA's commitment to its successor on a node — pinned from the operator's
 /// file only, persisted; KV copies compared with the pin for detection.
 #[cfg(feature = "tls")]
@@ -2761,7 +2764,11 @@ impl GossipAgent {
         while !revocation::refresh_answers(&self.task_ctx, ticket) {
             tokio::task::yield_now().await;
         }
-        client_cert::refresh(&self.task_ctx);
+        // The client marks too, by a client fold that started after the roots changed (#822's review, C).
+        let ticket = client_cert::fold_ticket(&self.task_ctx);
+        while !client_cert::refresh_answers(&self.task_ctx, ticket) {
+            tokio::task::yield_now().await;
+        }
         // R4: every certificate this node keeps after the re-fold is settled before this returns — journaled, or known not
         // to be (#805's review F2, N1): one whose append was already in flight is waited for too. What I2's PR 2b relies
         // on before it persists a Narrowed phase. A failed append leaves its certificate in memory, counted, and a later

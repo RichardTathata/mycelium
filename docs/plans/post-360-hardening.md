@@ -2299,11 +2299,26 @@ whichever thread ran it; the running fold re-runs for it a bounded number of tim
 `refold` fails after 30 s, and every `anchors_durable_for` wait there goes through `durable_for` / `all_durable`, a
 30 s `tokio::time::timeout`. **Siblings (rule 1):** `grep -rn "\.swap(true" src mycelium-core/src mycelium-*/src` for
 single-flight flags, and `grep -rn -B2 "yield_now()" src mycelium-core/src | grep "while !"` for waiters that retry:
-`client_cert::refresh` has the same `running` / `again` pair, and no caller retries it (one call each), so no
-livelock; `Compaction::spawned` (the budget's compaction) is reset on every return of `compact` — it would stay set
-only if `compact` panicked; the other flags (`call_issuer`'s collector and watcher, `capability_handle`'s registry,
+`client_cert::refresh` has the same `running` / `again` pair, and no caller retried it (one call each), so no
+livelock — but `change_roots` called it once while documenting that the client marks are re-judged, so a client fold
+already running made it return before they were (#822's review, C; it now waits on a client ticket);
+`Compaction::spawned` (the budget's compaction) was reset on every return of `compact` — it stayed set if `compact`
+panicked or the task was dropped at a runtime's shutdown (harmless: the ledger is per agent), and a drop guard now
+clears it on every exit; the other flags (`call_issuer`'s collector and watcher, `capability_handle`'s registry,
 `llm_dispatch_spawned`, `a2a_mounted`, the tuple space's metrics writer, the wiki sink's push) are spawn-once, with no
 waiter. The only retrying waiters were the two in `change_roots` and the test's `refold`, all three moved to tickets.
+**#822's review found three more of the family, fixed in the PR.** (A) Nothing tested that a fold cut short by a
+change of roots answers no ticket: `a_fold_cut_short_by_a_change_of_roots_answers_no_ticket` (a narrowing planted in
+the first fold's merge) and `tickets_are_answered_under_a_busy_fold_and_changing_roots` (six waiters, 150 tickets
+each, a continuous folder, the roots re-activated every 15 ms), which catches a fold that reads its ticket late.
+(B) A lost request, released in 2.40.0, in both folds: a call tried `running` and then set `again`; between the two
+the holder could release `running`, find `again` clear and return, and the request waited for the next trigger (60 s
+or more). Both folds now share `src/agent/single_flight.rs`: ask first, then try `running`; release `running`, then
+read `again`; `SeqCst` on that two-variable handshake; a guard clears `running` on every exit, a panic included.
+`single_flight::tests::a_request_made_while_a_run_ends_is_run` plants the window. (D) Tests that called `refresh` or
+`client_cert::refresh` once and then read the result (`lib_tests.rs` ×4, `client_grant_tests.rs`, `client_cert_tests.rs`
+×3, `consent_decision_tests.rs`) could read before any fold had run while the watcher's fold held `running`. They now
+use `refresh_through_for_test`, a bounded ticket wait.
 In `revocation.rs`'s own tests the `anchors_durable_for` waits behind a planted hold were already bounded
 (`tokio::time::timeout`); the rest wait on an unplanted append, which settles within the journal's 5 s `ACK_TIMEOUT`
 (`SettleAppend` settles it on every exit), and none of them retries a fold.
