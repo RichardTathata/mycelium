@@ -1103,8 +1103,10 @@ impl WriterState {
              counted, and the writer refuses every later append until a snapshot truncates the torn tail (it \
              tries one now, then on every snapshot it is asked for or its timer brings)"
         );
+        // Members, not batches (#824's review): each is an append with no WAL record, as on the writer before group
+        // commit; a failed `Sync` alone counts one.
         #[cfg(feature = "metrics")]
-        metrics::counter!("gossip_wal_append_failures_total").increment(1);
+        metrics::counter!("gossip_wal_append_failures_total").increment(appends.max(1) as u64);
         self.poison(e.to_string());
     }
 
@@ -1507,8 +1509,10 @@ const WAL_DRAIN: &str = "wal/drain";
 /// The most appends one batch commits (identity-and-lifecycle §9 O11). It bounds the one write a
 /// batch is, and so how long a record queued behind a batch in progress waits for its own.
 const BATCH_MAX_RECORDS: usize = 4096;
-/// The most key and value bytes one batch commits — about 4 MiB of frames, the same bound by size.
-/// The first append of a batch is always taken, however large.
+/// The byte bound on a batch, by size as `BATCH_MAX_RECORDS` is by count. It counts each record's key and value
+/// only — not the 4-byte length prefix, the codec's fields or a cipher's expansion — and **the record that reaches it
+/// is included**, so a batch holds under 4 MiB of keys and values plus one whole record. The first append of a batch
+/// is always taken, however large: a record over the cap is a batch of one.
 const BATCH_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// The WAL tail read the snapshot merges before truncating — its own stream, because *this* read
 /// returning different bytes is the v2.4.3 failure and deserves to be legible on its own line.
@@ -2654,6 +2658,134 @@ mod durability_tests {
         assert_eq!(seen[2], BatchSeen { appends: 2, ended_by: "Sync", synced: true }, "{:?}", &seen[1..]);
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    // ── #824's review: the witnesses its adversarial reviewer added, adopted ───────────────
+
+    /// Async: append_acked members that need no sync, then one append_sync at the end. With the batch's
+    /// sync held, no append_acked member may be answered.
+    #[tokio::test]
+    async fn async_acked_members_wait_for_a_later_members_sync() {
+        let (dir, _state, handle, faults) = faulted_writer("o11-async-acked", SyncMode::Async);
+        let mut log = batch_log(&faults);
+        let first = hold_the_writer(&handle, &faults, entry("r/first", b"v", 1, false)).await;
+        let mut acked = Vec::new();
+        for i in 0..5u64 {
+            let h = Arc::clone(&handle);
+            acked.push(tokio::spawn(async move { h.append_acked(entry(&format!("r/a{i}"), b"v", 10 + i, false)).await }));
+            wait_queued(&handle, i as usize + 1).await;
+        }
+        let h = Arc::clone(&handle);
+        let last = tokio::spawn(async move { h.append_sync(entry("r/last", b"v", 50, false)).await });
+        wait_queued(&handle, 6).await;
+        faults.release.notify_one();
+        first.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), faults.reached.notified()).await.expect("second batch at its sync");
+        for _ in 0..50 { tokio::task::yield_now().await; }
+        assert!(acked.iter().all(|t| !t.is_finished()), "an append_acked member was answered before its batch's sync");
+        assert!(!last.is_finished());
+        faults.hold_sync.store(false, Ordering::SeqCst);
+        faults.release.notify_one();
+        for t in acked { t.await.unwrap().unwrap(); }
+        last.await.unwrap().unwrap();
+        let seen = drain_log(&mut log);
+        assert_eq!(seen[1], BatchSeen { appends: 6, ended_by: "queue", synced: true }, "{seen:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A batch ended by a `Sync` whose sync fails: the `Sync` and every member are `Err`, all counted,
+    /// poisoned; the next Sync and append refused; frames whole on disk.
+    #[tokio::test]
+    async fn a_sync_ending_a_failed_batch_is_err_with_every_member_and_poisons() {
+        let (dir, _state, handle, faults) = faulted_writer("o11-sync-boundary-fail", SyncMode::Async);
+        std::fs::create_dir(dir.join("snapshot.tmp")).unwrap();
+        let first = hold_the_writer(&handle, &faults, entry("q/first", b"v", 1, false)).await;
+        let a = { let h = Arc::clone(&handle); tokio::spawn(async move { h.append_acked(entry("q/0", b"v", 10, false)).await }) };
+        wait_queued(&handle, 1).await;
+        handle.append_try(entry("q/1", b"v", 11, false));
+        let s = queue_a_sync(&handle, 3).await;
+        faults.release.notify_one();
+        first.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), faults.reached.notified()).await.unwrap();
+        faults.fail_sync.store(true, Ordering::SeqCst);
+        faults.hold_sync.store(false, Ordering::SeqCst);
+        faults.release.notify_one();
+        assert!(a.await.unwrap().is_err());
+        assert!(s.await.unwrap().is_err(), "the Sync ending the failed batch");
+        assert_eq!(handle.dropped_appends(), 2);
+        assert!(handle.refusing_appends().is_some());
+        assert!(handle.sync().await.is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// One record larger than the byte cap is a batch of its own, and the next record starts a new one.
+    #[tokio::test]
+    async fn a_record_over_the_byte_cap_is_a_batch_of_one() {
+        let (dir, _state, handle, faults) = faulted_writer("o11-big", SyncMode::Async);
+        let mut log = batch_log(&faults);
+        let first = hold_the_writer(&handle, &faults, entry("big/first", b"v", 1, false)).await;
+        handle.append_try(SyncEntry { key: Arc::from("big/0"), value: Bytes::from(vec![1u8; BATCH_MAX_BYTES + 10]), timestamp: 10, is_tombstone: false });
+        handle.append_try(entry("big/1", b"v", 11, false));
+        handle.append_try(entry("big/2", b"v", 12, false));
+        let s = queue_a_sync(&handle, 4).await;
+        faults.hold_sync.store(false, Ordering::SeqCst);
+        faults.release.notify_one();
+        first.await.unwrap().unwrap();
+        s.await.unwrap().unwrap();
+        let seen = drain_log(&mut log);
+        assert_eq!(&seen[1..], &[
+            BatchSeen { appends: 1, ended_by: "queue", synced: false },
+            BatchSeen { appends: 2, ended_by: "Sync", synced: true },
+        ], "{seen:?}");
+        let (keys, end) = keys_on_disk(&dir);
+        assert_eq!(keys, ["big/first", "big/0", "big/1", "big/2"]);
+        assert!(matches!(end, WalEnd::Clean));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Exactly BATCH_MAX_RECORDS - 1 queued behind the first: one batch of the cap, ended by "cap"
+    /// (the cap-reaching append is included); then the Sync alone.
+    #[tokio::test]
+    async fn exactly_the_record_cap_queued_makes_one_batch() {
+        let (dir, _state, handle, faults) = faulted_writer("o11-cap-exact", SyncMode::Async);
+        let mut log = batch_log(&faults);
+        let first = hold_the_writer(&handle, &faults, entry("x/first", b"v", 1, false)).await;
+        for i in 0..BATCH_MAX_RECORDS {
+            handle.append_try(SyncEntry { key: Arc::from(format!("x/{i}").as_str()), value: Bytes::from_static(b"v"), timestamp: 10 + i as u64, is_tombstone: false });
+        }
+        let s = queue_a_sync(&handle, BATCH_MAX_RECORDS + 1).await;
+        faults.hold_sync.store(false, Ordering::SeqCst);
+        faults.release.notify_one();
+        first.await.unwrap().unwrap();
+        s.await.unwrap().unwrap();
+        let seen = drain_log(&mut log);
+        assert_eq!(&seen[1..], &[
+            BatchSeen { appends: BATCH_MAX_RECORDS, ended_by: "cap", synced: false },
+            BatchSeen { appends: 0, ended_by: "Sync", synced: true },
+        ], "{seen:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Shutdown mid-queue: appends queued AFTER the Shutdown are never acked Ok.
+    #[tokio::test]
+    async fn appends_queued_after_a_shutdown_are_never_acknowledged_ok() {
+        let (dir, _state, handle, faults) = faulted_writer("o11-shutdown", SyncMode::Flush);
+        let first = hold_the_writer(&handle, &faults, entry("z/first", b"v", 1, false)).await;
+        let before = { let h = Arc::clone(&handle); tokio::spawn(async move { h.append_sync(entry("z/0", b"v", 10, false)).await }) };
+        wait_queued(&handle, 1).await;
+        { let h = Arc::clone(&handle); tokio::spawn(async move { h.shutdown().await }); }
+        wait_queued(&handle, 2).await;
+        let after = { let h = Arc::clone(&handle); tokio::spawn(async move { h.append_sync(entry("z/1", b"v", 11, false)).await }) };
+        wait_queued(&handle, 3).await;
+        faults.hold_sync.store(false, Ordering::SeqCst);
+        faults.release.notify_one();
+        first.await.unwrap().unwrap();
+        before.await.unwrap().expect("queued before shutdown: committed");
+        assert!(after.await.unwrap().is_err(), "queued after shutdown: never Ok");
+        let (keys, _) = keys_on_disk(&dir);
+        assert!(!keys.contains(&"z/1".to_string()), "{keys:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
 
     // ── Group commit under the kernel (§9 O11): the drain is a recorded choice ──────────────
 
