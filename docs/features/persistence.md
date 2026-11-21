@@ -7,7 +7,14 @@ log and a periodic snapshot, and a restart recovers both. A write is applied to 
 log, never the reverse. What a write's acknowledgement means is the sync mode: under `Flush` the record is
 `fdatasync`ed first, while the other modes buffer. Consensus commits and leases are synced in every mode. A node
 refuses to start over persisted state it cannot read (under `on_unreadable = "refuse"`, the default), and a failed append stops the writer until a snapshot has
-repaired the log, so an acknowledged record never sits behind a torn one.
+repaired the log, so an acknowledged record never sits behind a torn one. A failed sync stops it the same way.
+
+The log's writer **commits what is queued under one sync**: it takes the records already waiting behind the one it
+is handed (at most 4 096, or about 4 MiB), writes them in one write, syncs once if any of them needs it, and only then
+acknowledges each. So a write that must be synced waits for the batch in progress and its own, not for one sync per
+record ahead of it. No acknowledgement means anything different, the files are byte for byte what one-at-a-time
+writing produced, and a failure fails every record in its batch. There is no setting: the writer never waits for more
+records to arrive.
 
 ## When to use it, and when not
 
@@ -34,7 +41,8 @@ CI's two-domains job starts, sets `[persistence]` with `sync_mode = "Flush"`.
 No runnable example exists: the [example index](../../examples/README.md#the-capability-matrix) has no row for it;
 [`receipt_ladder`](../../examples/README.md#the-capability-matrix) shows what each sync rung means to a write. The
 end-to-end run is a test in [`mycelium-core/src/persistence.rs`](../../mycelium-core/src/persistence.rs):
-`a_failed_append_poisons_the_writer_until_a_snapshot_truncates_the_torn_tail`.
+`a_failed_append_poisons_the_writer_until_a_snapshot_truncates_the_torn_tail`; group commit's are beside it, among
+them `concurrent_append_syncs_share_one_sync_and_none_is_acknowledged_before_it`.
 
 ## What it guarantees, and what it does not
 
@@ -45,7 +53,9 @@ end-to-end run is a test in [`mycelium-core/src/persistence.rs`](../../mycelium-
   state the node could not read.
 - **Not built:** directory fsync is assumed honoured (ext4, XFS, btrfs); on macOS `fsync` does not force the drive's
   write cache, so a laptop is development only; a plain `set` under `Flush` logs a writer failure rather than
-  returning it, and a receipt is the way to ask ([deployment § Persistence modes](../operations/deployment.md#persistence-modes)).
+  returning it, and a receipt is the way to ask ([deployment § Persistence modes](../operations/deployment.md#persistence-modes));
+  under `Flush` a node's inbound reader still waits for each received record's own sync before it reads the next
+  frame (identity-and-lifecycle §9 O11, PR 2), so a burst of gossip is not yet batched on the receive path.
 - **Evidence:** the ledger rows
   [persisted state is repaired before the first acknowledged append](../operations/what-is-proven.md#persisted-state-repaired-before-first-acknowledged)
   and [a failed WAL append is never followed by an acknowledged one](../operations/what-is-proven.md#failed-wal-append-never-followed-acknowledged).

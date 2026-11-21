@@ -26,6 +26,28 @@
 //! 3. **An ack is a durability claim.** `append` (Flush), `append_sync` and
 //!    `trigger_snapshot` return `Err` when the writer task is gone (channel closed) —
 //!    never `Ok` by default. `append_sync` forces `fdatasync` in every `SyncMode`.
+//!
+//! # Group commit (identity-and-lifecycle §9 O11, 2026-11-21)
+//!
+//! The writer commits **what is already queued** under one write and one sync: an append starts a
+//! batch, the writer drains the channel behind it (at most `BATCH_MAX_RECORDS` appends or about
+//! `BATCH_MAX_BYTES` of keys and values) with **no batching window** — it never waits for more —
+//! writes every frame in one `write_all`, syncs once if any member needs it, and only then answers
+//! each member. So **no acknowledgement changes meaning**: each is still sent after the sync that
+//! covers its record, and a failed encode, write or sync fails, counts (`dropped_appends`) and
+//! poisons for every member of the batch. `Sync`, `TriggerSnapshot`, `Shutdown` and the test poison
+//! **end a batch** — a `Sync` is answered by its batch's sync, so "everything before this is durable"
+//! still holds. The threshold snapshot runs at the end of a batch. A lone append is a batch of one:
+//! the same bytes, the same effects, the same trace. The on-disk bytes of any batch are its frames
+//! concatenated, so the format and replay do not know batches exist.
+//!
+//! **Why this does not widen the apply-to-append window**, which is what sank the group commit tried
+//! in #602 (its round 3, removed in round 5): that was **caller-side** — the anti-entropy path
+//! collected records and appended them together, so a record sat applied in the store and not yet
+//! handed to the WAL for as long as its batch took to collect. Here the callers are unchanged: each
+//! applies, then hands its record to the writer's channel at once, and the window
+//! `WalHandle::begin_inbound` measures still closes at that enqueue. Batching happens **behind** the
+//! channel, where every record is already the writer's.
 
 use crate::config::SyncMode;
 use crate::framing::SyncEntry;
@@ -430,7 +452,9 @@ impl WalHandle {
     /// operating system when they may never have left this process (found by review, 2026-09-15).
     ///
     /// `Ok` means the writer's `write` returned — and, in `Flush` mode, its `fdatasync` too, since
-    /// the writer syncs whenever `force_sync || sync_mode == Flush`. `Err` means the record's
+    /// the writer syncs whenever `force_sync || sync_mode == Flush`. Under group commit an `Async`/`Os`
+    /// record whose batch also holds a required-sync record is answered after that batch's sync: later,
+    /// never weaker — `Buffered` under-claims it. `Err` means the record's
     /// durability is **not established**: the writer is gone, the queue closed, or the write failed.
     /// It never means the record is absent.
     pub async fn append_acked(&self, entry: SyncEntry) -> io::Result<()> {
@@ -445,8 +469,12 @@ impl WalHandle {
     /// checks its store for that exact stamp and content, calls this, and answers on the result
     /// (contracts axis item 1 PR 4b, `docs/design/contracts-receipts.md` §2.1).
     ///
-    /// `Err` means durability is **not established** — the writer is gone or the `fdatasync`
-    /// failed. As everywhere else on this path, it never means the records are absent.
+    /// `Err` means durability is **not established** — the writer is gone, it is poisoned by an
+    /// earlier failed write or sync, or this `fdatasync` failed. As everywhere else on this path, it
+    /// never means the records are absent. **A failed sync poisons the writer** (2026-11-21,
+    /// deprecations §125): after an `fsync` error a later one can succeed without the data, so every
+    /// later `sync` and append is refused until a snapshot repairs the file. The `Sync` ends the
+    /// writer's batch and is answered by that batch's one sync (group commit, module doc).
     pub async fn sync(&self) -> io::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(WalMsg::Sync { ack: tx }).await.map_err(|_| writer_gone())?;
@@ -866,7 +894,11 @@ pub fn spawn_wal_writer(
     cipher:                 Option<Arc<dyn DataAtRestCipher>>,
     defer_snapshot:         Option<SnapshotDeferHook>,
 ) -> WalHandle {
-    spawn_wal_writer_inner(dir, sync_mode, snapshot_wal_threshold, snapshot_interval_secs, kv_state, node_id, hlc, default_ttl, cipher, defer_snapshot, None)
+    #[cfg(test)]
+    let faults: Faults = None;
+    #[cfg(not(test))]
+    let faults: Faults = ();
+    spawn_wal_writer_inner(dir, sync_mode, snapshot_wal_threshold, snapshot_interval_secs, kv_state, node_id, hlc, default_ttl, cipher, defer_snapshot, faults)
 }
 
 /// A writer whose next append fails **after writing part of its frame** whenever `fault` is set
@@ -888,8 +920,68 @@ pub(crate) fn spawn_wal_writer_with_fault(
     defer_snapshot:         Option<SnapshotDeferHook>,
     fault:                  Arc<std::sync::atomic::AtomicBool>,
 ) -> WalHandle {
-    spawn_wal_writer_inner(dir, sync_mode, snapshot_wal_threshold, snapshot_interval_secs, kv_state, node_id, hlc, default_ttl, cipher, defer_snapshot, Some(fault))
+    let faults = Arc::new(WalFaults { tear: fault, ..WalFaults::default() });
+    spawn_wal_writer_inner(dir, sync_mode, snapshot_wal_threshold, snapshot_interval_secs, kv_state, node_id, hlc, default_ttl, cipher, defer_snapshot, Some(faults))
 }
+
+/// A writer with every test fault and witness of [`WalFaults`] — a failed sync, a held sync, a tear
+/// inside a batch, and the counts of syncs and batches. Test builds only.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_wal_writer_with_faults(
+    dir:                    PathBuf,
+    sync_mode:              SyncMode,
+    snapshot_wal_threshold: usize,
+    kv_state:               Arc<KvState>,
+    node_id:                NodeId,
+    hlc:                    Arc<crate::hlc::Hlc>,
+    faults:                 Arc<WalFaults>,
+) -> WalHandle {
+    spawn_wal_writer_inner(dir, sync_mode, snapshot_wal_threshold, 3_600, kv_state, node_id, hlc, 1, None, None, Some(faults))
+}
+
+/// The writer's test faults and witnesses (identity-and-lifecycle §9 O11). Each fault fires once
+/// and clears itself; the witnesses only count. Test builds only — a shipped writer is spawned with
+/// none, and every hook below is `#[cfg(test)]`.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct WalFaults {
+    /// Tear the next write: the frames before member [`tear_at`](Self::tear_at) of its batch reach
+    /// the file whole, then that member's length prefix and one byte of its body, then the write
+    /// fails — a short write followed by an error, which is what `ENOSPC` or `EIO` leaves.
+    pub(crate) tear:     Arc<std::sync::atomic::AtomicBool>,
+    /// Which member of the batch the tear falls in (0 = the first; past the end = the last).
+    pub(crate) tear_at:  std::sync::atomic::AtomicUsize,
+    /// Fail the next sync the writer runs for appends or a `Sync` (not a snapshot's): the sync is not
+    /// made, and the writer is told `Err`.
+    pub(crate) fail_sync: std::sync::atomic::AtomicBool,
+    /// While set, every such sync waits at a gate: [`reached`](Self::reached) is notified, and the
+    /// sync goes on only after [`release`](Self::release).
+    pub(crate) hold_sync: std::sync::atomic::AtomicBool,
+    pub(crate) reached:  tokio::sync::Notify,
+    pub(crate) release:  tokio::sync::Notify,
+    /// Syncs the writer ran for appends or a `Sync` (counted before the gate and the fault).
+    pub(crate) syncs:    std::sync::atomic::AtomicU64,
+    /// Each batch the writer committed, as it ends: how many appends it held, what ended it, whether
+    /// it synced. A channel, not a lock.
+    pub(crate) batches:  std::sync::OnceLock<mpsc::UnboundedSender<BatchSeen>>,
+}
+
+/// One committed batch, as [`WalFaults::batches`] reports it.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BatchSeen {
+    pub(crate) appends:  usize,
+    pub(crate) ended_by: &'static str,
+    pub(crate) synced:   bool,
+}
+
+/// The writer's faults: `Some` only in a test that asked for them.
+#[cfg(test)]
+type Faults = Option<Arc<WalFaults>>;
+/// No faults in a shipped writer.
+#[cfg(not(test))]
+type Faults = ();
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_wal_writer_inner(
@@ -903,7 +995,7 @@ fn spawn_wal_writer_inner(
     default_ttl:            u8,
     cipher:                 Option<Arc<dyn DataAtRestCipher>>,
     defer_snapshot:         Option<SnapshotDeferHook>,
-    fault:                  Option<Arc<std::sync::atomic::AtomicBool>>,
+    faults:                 Faults,
 ) -> WalHandle {
     let channel_depth = (snapshot_wal_threshold * 4).max(1024);
     let (tx, rx) = mpsc::channel::<WalMsg>(channel_depth);
@@ -932,7 +1024,7 @@ fn spawn_wal_writer_inner(
         defer_snapshot,
         dropped_appends,
         refusing_tx,
-        fault,
+        faults,
     ));
 
     handle
@@ -952,8 +1044,17 @@ fn spawn_wal_writer_inner(
 /// file (nothing was appended behind it), and step 4 truncates it. The writer tries that snapshot
 /// at once, then on every snapshot it is asked for or its timer brings, and un-poisons only when
 /// one succeeds.
+///
+/// **A failed sync poisons it too** (2026-11-21, identity-and-lifecycle §9 O11; deprecations §125).
+/// After an `fsync` error a later `fsync` can return `Ok` without the data having reached the disk —
+/// the page cache may have dropped the dirty pages the failed one could not write — so a writer that
+/// carried on after a failed `Sync` let a later replica-sync answer claim `Persisted` for records
+/// that were never durable. A batch's failed sync and a lone `Sync`'s failed sync both poison; the
+/// repairing snapshot writes and syncs a fresh `snapshot.bin` from the store and the WAL tail, which
+/// is what makes the records durable again. With group commit (§9 O11) a failure is a **batch's**:
+/// every member of the batch is answered `Err` and counted (`commit_batch`).
 struct WriterState {
-    /// `Some(reason)` after a failed append, until a snapshot truncates the torn tail.
+    /// `Some(reason)` after a failed write or sync, until a snapshot truncates the torn tail.
     poison: Option<String>,
     /// The handle's copy of `poison`, for `/health` (`WalHandle::refusing_appends`).
     refusing_tx: tokio::sync::watch::Sender<Option<String>>,
@@ -988,15 +1089,19 @@ impl WriterState {
     /// The error a poisoned writer answers an append or a sync with.
     fn poisoned_err(reason: &str) -> io::Error {
         io::Error::other(format!(
-            "the WAL writer refuses appends after a failed write ({reason}) until a snapshot truncates the torn tail"
+            "the WAL writer refuses appends after a failed write or sync ({reason}) until a snapshot truncates the torn tail"
         ))
     }
 
-    /// Record a failed append: the writer is poisoned from here until a snapshot succeeds.
-    fn note_failed_append(&mut self, e: &io::Error) {
+    /// Record a failed batch — its encode, its write or its sync: the writer is poisoned from here
+    /// until a snapshot succeeds. `appends` is how many members the batch held, each answered `Err`
+    /// and counted (0 for a `Sync` alone).
+    fn note_failed_batch(&mut self, e: &io::Error, appends: usize) {
         error!(
-            "persistence: a WAL append failed ({e}); the writer refuses every later append until a snapshot \
-             truncates the torn tail (it tries one now, then on every snapshot it is asked for or its timer brings)"
+            appends,
+            "persistence: a WAL write or sync failed ({e}); every append in its batch was answered `Err` and \
+             counted, and the writer refuses every later append until a snapshot truncates the torn tail (it \
+             tries one now, then on every snapshot it is asked for or its timer brings)"
         );
         #[cfg(feature = "metrics")]
         metrics::counter!("gossip_wal_append_failures_total").increment(1);
@@ -1057,7 +1162,7 @@ async fn wal_writer_task(
     defer_snapshot:         Option<SnapshotDeferHook>,
     dropped_appends:        Arc<std::sync::atomic::AtomicU64>,
     refusing_tx:            tokio::sync::watch::Sender<Option<String>>,
-    fault:                  Option<Arc<std::sync::atomic::AtomicBool>>,
+    faults:                 Faults,
 ) {
     let wal_path = dir.join("wal.bin");
     let mut wal_file = match open_wal(&wal_path).await {
@@ -1085,67 +1190,99 @@ async fn wal_writer_task(
             biased;
 
             msg = rx.recv() => {
+                // Group commit (identity-and-lifecycle §9 O11). An append starts a batch, and the
+                // writer takes what is **already queued** behind it — no waiting for more — up to the
+                // cap, and up to the first message that must not be reordered past (a `Boundary`).
+                // The batch is written in one write and synced once, and only then is each member
+                // answered. A lone append is a batch of one: the same write, the same sync, the same
+                // trace as before batching existed.
+                let mut members: Vec<Member> = Vec::new();
+                let mut boundary: Option<Boundary> = None;
+                let mut ended_by = "queue";
                 match msg {
-                    // Channel closed (WalHandle dropped) or explicit Shutdown:
-                    // snapshot and exit.
-                    None | Some(WalMsg::Shutdown) => {
+                    // Channel closed (WalHandle dropped) or explicit Shutdown: snapshot and exit.
+                    None | Some(WalMsg::Shutdown) => boundary = Some(Boundary::Shutdown),
+                    Some(WalMsg::HoldOwnership(lock)) => { _ownership = Some(lock); continue; }
+                    #[cfg(any(test, feature = "test-support"))]
+                    Some(WalMsg::PoisonForTest { reason, ack }) => boundary = Some(Boundary::PoisonForTest { reason, ack }),
+                    Some(WalMsg::TriggerSnapshot { ack }) => boundary = Some(Boundary::TriggerSnapshot(ack)),
+                    Some(WalMsg::Sync { ack }) => boundary = Some(Boundary::Sync(ack)),
+                    Some(WalMsg::Append { entry, ack, force_sync }) => members.push(Member { entry, ack, force_sync }),
+                }
+                if let Some(first) = members.first() {
+                    let mut records = 1usize;
+                    let mut bytes = batch_bytes(&first.entry);
+                    if records < BATCH_MAX_RECORDS && bytes < BATCH_MAX_BYTES {
+                        // How many were queued is a scheduling fact, so the drain is a recorded choice.
+                        let drained = crate::sim_seam::chan_drain(WAL_DRAIN, &mut rx, |m| match m {
+                            WalMsg::Append { entry, .. } => {
+                                records += 1;
+                                bytes += batch_bytes(entry);
+                                records < BATCH_MAX_RECORDS && bytes < BATCH_MAX_BYTES
+                            }
+                            // No I/O: taken where it sits.
+                            WalMsg::HoldOwnership(_) => true,
+                            // `Sync`, `TriggerSnapshot`, `Shutdown` and the test's poison end a batch.
+                            _ => false,
+                        }).await;
+                        for m in drained {
+                            match m {
+                                WalMsg::Append { entry, ack, force_sync } => members.push(Member { entry, ack, force_sync }),
+                                WalMsg::HoldOwnership(lock) => _ownership = Some(lock),
+                                WalMsg::Sync { ack } => boundary = Some(Boundary::Sync(ack)),
+                                WalMsg::TriggerSnapshot { ack } => boundary = Some(Boundary::TriggerSnapshot(ack)),
+                                #[cfg(any(test, feature = "test-support"))]
+                                WalMsg::PoisonForTest { reason, ack } => boundary = Some(Boundary::PoisonForTest { reason, ack }),
+                                WalMsg::Shutdown => boundary = Some(Boundary::Shutdown),
+                            }
+                        }
+                        if records >= BATCH_MAX_RECORDS || bytes >= BATCH_MAX_BYTES {
+                            ended_by = "cap";
+                        }
+                    }
+                }
+                if let Some(b) = &boundary {
+                    ended_by = b.name();
+                }
+
+                // A `Sync` that ends the batch is answered by the batch's one sync: everything
+                // queued before it is in the batch, so "everything before this is durable" is what
+                // that sync establishes.
+                let sync_ack = match boundary.take() {
+                    Some(Boundary::Sync(ack)) => Some(ack),
+                    other => { boundary = other; None }
+                };
+                if !members.is_empty() || sync_ack.is_some() {
+                    let committed = commit_batch(&mut wal_file, members, sync_ack, sync_mode, cipher.as_ref(), &mut state, &dropped_appends, &faults, ended_by).await;
+                    wal_entry_count += committed.written;
+                    if (committed.written > 0 || committed.failed)
+                        && (state.poison.is_some() || wal_entry_count >= snapshot_wal_threshold)
+                    {
+                        // The threshold snapshot, at the end of the batch — or, after a failure, the
+                        // repairing one, tried at once.
                         let result = do_snapshot(&dir, &kv_state, &node_id, &hlc, default_ttl, &mut wal_file, cipher.as_ref()).await;
                         state.note_snapshot(&result);
-                        break;
+                        wal_entry_count = 0;
                     }
-                    Some(WalMsg::HoldOwnership(lock)) => {
-                        _ownership = Some(lock);
-                    }
-                    #[cfg(any(test, feature = "test-support"))]
-                    Some(WalMsg::PoisonForTest { reason, ack }) => {
-                        state.poison(reason);
-                        let _ = ack.send(());
-                    }
-                    Some(WalMsg::Append { entry, ack, force_sync }) => {
-                        if let Some(reason) = state.poison.clone() {
-                            // Poisoned: nothing is appended behind the torn frame. Every refusal is
-                            // counted; a caller awaiting an ack is told (`LocalDurability::Failed`).
-                            state.refuse(&dropped_appends);
-                            if let Some(ack) = ack { let _ = ack.send(Err(WriterState::poisoned_err(&reason))); }
-                            continue;
-                        }
-                        let sync = force_sync || sync_mode == SyncMode::Flush;
-                        let result = if fault.as_ref().is_some_and(|f| f.swap(false, std::sync::atomic::Ordering::SeqCst)) {
-                            wal_append_torn(&mut wal_file, &entry, cipher.as_ref()).await
-                        } else {
-                            wal_append(&mut wal_file, &entry, sync, cipher.as_ref()).await
-                        };
-                        if let Err(e) = &result {
-                            // The store already holds this record (apply first, then the WAL), with no
-                            // WAL record behind it: the same hole a dropped append is, counted the same.
-                            dropped_appends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            state.note_failed_append(e);
-                        }
-                        wal_entry_count += 1;
-                        if let Some(ack) = ack { let _ = ack.send(result); }
-                        if state.poison.is_some() || wal_entry_count >= snapshot_wal_threshold {
-                            // The threshold snapshot — or, after a failure, the repairing one, tried at once.
-                            let result = do_snapshot(&dir, &kv_state, &node_id, &hlc, default_ttl, &mut wal_file, cipher.as_ref()).await;
-                            state.note_snapshot(&result);
-                            wal_entry_count = 0;
-                        }
-                    }
-                    Some(WalMsg::TriggerSnapshot { ack }) => {
+                }
+
+                match boundary {
+                    None | Some(Boundary::Sync(_)) => {}
+                    Some(Boundary::TriggerSnapshot(ack)) => {
                         let result = do_snapshot(&dir, &kv_state, &node_id, &hlc, default_ttl, &mut wal_file, cipher.as_ref()).await;
                         state.note_snapshot(&result);
                         wal_entry_count = 0;
                         let _ = ack.send(result);
                     }
-                    Some(WalMsg::Sync { ack }) => {
-                        // Nothing is appended: this syncs what is already there. Handled in the
-                        // same loop as Append so it cannot race a concurrent write — the ordering
-                        // is what makes "everything before this is durable" true. A poisoned
-                        // writer establishes nothing: the file ends in a torn frame.
-                        let reply = match state.poison.as_deref() {
-                            Some(reason) => Err(WriterState::poisoned_err(reason)),
-                            None => wal_file.sync_data().await,
-                        };
-                        let _ = ack.send(reply);
+                    #[cfg(any(test, feature = "test-support"))]
+                    Some(Boundary::PoisonForTest { reason, ack }) => {
+                        state.poison(reason);
+                        let _ = ack.send(());
+                    }
+                    Some(Boundary::Shutdown) => {
+                        let result = do_snapshot(&dir, &kv_state, &node_id, &hlc, default_ttl, &mut wal_file, cipher.as_ref()).await;
+                        state.note_snapshot(&result);
+                        break;
                     }
                 }
             }
@@ -1166,6 +1303,189 @@ async fn wal_writer_task(
     }
 }
 
+/// One append in a batch.
+struct Member {
+    entry:      SyncEntry,
+    ack:        Option<oneshot::Sender<io::Result<()>>>,
+    force_sync: bool,
+}
+
+/// A message that ends a batch: it is handled after the appends queued before it are committed, and
+/// nothing queued after it joins them. `Sync` is answered by the batch's own sync.
+enum Boundary {
+    Sync(oneshot::Sender<io::Result<()>>),
+    TriggerSnapshot(oneshot::Sender<io::Result<()>>),
+    #[cfg(any(test, feature = "test-support"))]
+    PoisonForTest { reason: String, ack: oneshot::Sender<()> },
+    Shutdown,
+}
+
+impl Boundary {
+    fn name(&self) -> &'static str {
+        match self {
+            Boundary::Sync(_) => "Sync",
+            Boundary::TriggerSnapshot(_) => "TriggerSnapshot",
+            #[cfg(any(test, feature = "test-support"))]
+            Boundary::PoisonForTest { .. } => "PoisonForTest",
+            Boundary::Shutdown => "Shutdown",
+        }
+    }
+}
+
+/// What a committed batch did.
+struct Committed {
+    /// Appends the writer tried to write (0 when a poisoned writer refused them).
+    written: usize,
+    /// Whether its write or its sync failed — and so poisoned the writer.
+    failed:  bool,
+}
+
+/// A record's share of a batch's byte cap: its key and value, the frame's bulk.
+fn batch_bytes(entry: &SyncEntry) -> usize {
+    entry.key.len() + entry.value.len()
+}
+
+/// Commit one batch: refuse it if the writer is poisoned; otherwise write every member's frame in one
+/// write, sync once if any member needs it (`force_sync`, `Flush`, or a `Sync` ending the batch), and
+/// then answer every member and the `Sync`. **No answer is sent before the sync that covers it.** A
+/// failed encode, write or sync fails every member — the complete frames before a tear too, which is
+/// why `Err` never means absent — counts each in `dropped_appends` (the store holds those values with
+/// no durable record), and poisons the writer.
+#[allow(clippy::too_many_arguments)]
+async fn commit_batch(
+    file:            &mut tfs::File,
+    members:         Vec<Member>,
+    sync_ack:        Option<oneshot::Sender<io::Result<()>>>,
+    sync_mode:       SyncMode,
+    cipher:          Cipher<'_>,
+    state:           &mut WriterState,
+    dropped_appends: &std::sync::atomic::AtomicU64,
+    faults:          &Faults,
+    ended_by:        &'static str,
+) -> Committed {
+    #[cfg(not(test))]
+    let _ = ended_by;
+    if let Some(reason) = state.poison.clone() {
+        // Poisoned: nothing is appended behind the torn frame. Every refusal is counted; a caller
+        // awaiting an ack is told (`LocalDurability::Failed`), and a `Sync` establishes nothing.
+        #[cfg(test)]
+        let refused = members.len();
+        for m in members {
+            state.refuse(dropped_appends);
+            if let Some(ack) = m.ack { let _ = ack.send(Err(WriterState::poisoned_err(&reason))); }
+        }
+        if let Some(ack) = sync_ack { let _ = ack.send(Err(WriterState::poisoned_err(&reason))); }
+        #[cfg(test)]
+        report_batch(faults, refused, ended_by, false);
+        return Committed { written: 0, failed: false };
+    }
+    let sync = sync_ack.is_some()
+        || members.iter().any(|m| m.force_sync)
+        || (sync_mode == SyncMode::Flush && !members.is_empty());
+    let written = members.len();
+    match write_batch(file, &members, sync, cipher, faults).await {
+        Ok(()) => {
+            #[cfg(feature = "metrics")]
+            if written > 0 {
+                metrics::counter!("gossip_wal_batches_total").increment(1);
+                metrics::counter!("gossip_wal_batch_appends_total").increment(written as u64);
+            }
+            for m in members {
+                if let Some(ack) = m.ack { let _ = ack.send(Ok(())); }
+            }
+            if let Some(ack) = sync_ack { let _ = ack.send(Ok(())); }
+            #[cfg(test)]
+            report_batch(faults, written, ended_by, sync);
+            Committed { written, failed: false }
+        }
+        Err(e) => {
+            // The store already holds each of these records (apply first, then the WAL) — or, on the
+            // required-sync path, holds none of them — with no durable WAL record: the same hole a
+            // dropped append is, counted the same.
+            dropped_appends.fetch_add(written as u64, std::sync::atomic::Ordering::Relaxed);
+            state.note_failed_batch(&e, written);
+            let copy = |e: &io::Error| io::Error::new(e.kind(), e.to_string());
+            if let Some(ack) = sync_ack { let _ = ack.send(Err(copy(&e))); }
+            let mut e = Some(e);
+            let last = members.len().saturating_sub(1);
+            for (i, m) in members.into_iter().enumerate() {
+                let err = if i == last { e.take().expect("the original error, once") } else { copy(e.as_ref().expect("held until the last member")) };
+                if let Some(ack) = m.ack { let _ = ack.send(Err(err)); }
+            }
+            #[cfg(test)]
+            report_batch(faults, written, ended_by, false);
+            Committed { written, failed: true }
+        }
+    }
+}
+
+/// The batch's I/O: every member's frame, concatenated, in **one** `write_all` (one write and one
+/// flush through the seam — separate writes cost several times more), then one sync when asked.
+/// Nothing is written for a `Sync` alone. The bytes are the members' frames in order, exactly what
+/// they would have been written as one at a time: the on-disk format does not know about batches.
+async fn write_batch(
+    file:    &mut tfs::File,
+    members: &[Member],
+    sync:    bool,
+    cipher:  Cipher<'_>,
+    faults:  &Faults,
+) -> io::Result<()> {
+    if let Some((first, rest)) = members.split_first() {
+        // A lone member's frame is written as it is, with no copy.
+        let mut buf = wal_frame(&first.entry, cipher)?;
+        #[cfg(test)]
+        let mut ends = vec![buf.len()];
+        for m in rest {
+            buf.extend_from_slice(&wal_frame(&m.entry, cipher)?);
+            #[cfg(test)]
+            ends.push(buf.len());
+        }
+        #[cfg(test)]
+        if let Some(f) = faults
+            && f.tear.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            // The injected tear: the frames before member `tear_at` whole, then that member's length
+            // prefix and one byte of its body, then the failure.
+            let at = f.tear_at.load(std::sync::atomic::Ordering::SeqCst).min(members.len() - 1);
+            let start = if at == 0 { 0 } else { ends[at - 1] };
+            crate::sim_seam::fs_write_all(file, WAL_FILE, &buf[..start + 5]).await?;
+            return Err(io::Error::other("injected write failure after a partial frame"));
+        }
+        crate::sim_seam::fs_write_all(file, WAL_FILE, &buf).await?;
+    }
+    if sync {
+        // The sync for appends and for a `Sync`, **through the seam** (`fs_sync_data`, stream
+        // `wal.bin`): `Sync`'s arm used to call `sync_data` on the file directly, which the sim seam
+        // did not see. Counted, and in a test subject to `WalFaults`' gate and fault.
+        #[cfg(feature = "metrics")]
+        metrics::counter!("gossip_wal_syncs_total").increment(1);
+        #[cfg(test)]
+        if let Some(f) = faults {
+            use std::sync::atomic::Ordering::SeqCst;
+            f.syncs.fetch_add(1, SeqCst);
+            if f.hold_sync.load(SeqCst) {
+                f.reached.notify_one();
+                f.release.notified().await;
+            }
+            if f.fail_sync.swap(false, SeqCst) {
+                return Err(io::Error::other("injected sync failure"));
+            }
+        }
+        crate::sim_seam::fs_sync_data(file, WAL_FILE).await?;
+    }
+    #[cfg(not(test))]
+    let _ = faults;
+    Ok(())
+}
+
+/// Report a committed batch to a test's batch log, if it asked for one.
+#[cfg(test)]
+fn report_batch(faults: &Faults, appends: usize, ended_by: &'static str, synced: bool) {
+    if let Some(log) = faults.as_ref().and_then(|f| f.batches.get()) {
+        let _ = log.send(BatchSeen { appends, ended_by, synced });
+    }
+}
+
 // ── WAL I/O ──────────────────────────────────────────────────────────────────
 
 /// Trace stream names for the storage seams. One place, so a trace written today and a reader
@@ -1180,6 +1500,16 @@ const SNAP_FILE: &str = "snapshot.bin";
 /// The WAL's bounded append channel. A full queue here skips a record, which the inventory names
 /// as one of the three things channel fullness decides.
 const WAL_CHAN: &str = "wal/append";
+/// How many messages the writer drained into a batch past the one that started it — a recorded
+/// choice (`sim_seam::chan_drain`; inventory §2): how many were queued at that instant is scheduling,
+/// and it decides what one `write_all` carries.
+const WAL_DRAIN: &str = "wal/drain";
+/// The most appends one batch commits (identity-and-lifecycle §9 O11). It bounds the one write a
+/// batch is, and so how long a record queued behind a batch in progress waits for its own.
+const BATCH_MAX_RECORDS: usize = 4096;
+/// The most key and value bytes one batch commits — about 4 MiB of frames, the same bound by size.
+/// The first append of a batch is always taken, however large.
+const BATCH_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// The WAL tail read the snapshot merges before truncating — its own stream, because *this* read
 /// returning different bytes is the v2.4.3 failure and deserves to be legible on its own line.
 const WAL_TAIL: &str = "wal.bin#tail";
@@ -1199,8 +1529,10 @@ async fn open_wal(path: &std::path::Path) -> io::Result<tfs::File> {
         .await
 }
 
-/// Appends one record; `fdatasync`s it when `sync` is set (Flush mode, or a
-/// forced-sync request such as `append_sync`).
+/// Appends one record; `fdatasync`s it when `sync` is set — the one-record shape the writer's batch
+/// generalises (`write_batch`), kept for the tests and the replay scenario that drive the file
+/// directly. Test builds only.
+#[cfg(test)]
 async fn wal_append(
     file:   &mut tfs::File,
     entry:  &SyncEntry,
@@ -1231,20 +1563,6 @@ fn wal_frame(entry: &SyncEntry, cipher: Cipher<'_>) -> io::Result<BytesMut> {
     buf.put_u32_le(payload.len() as u32);
     buf.extend_from_slice(&payload);
     Ok(buf)
-}
-
-/// The injected failure behind [`spawn_wal_writer_with_fault`]: the frame's length prefix and one
-/// byte of its body reach the file, then the write fails — a short write followed by an error, which
-/// is what `ENOSPC` or `EIO` leaves. Reached only when a test set the fault; the production writer
-/// is spawned with none.
-async fn wal_append_torn(
-    file:   &mut tfs::File,
-    entry:  &SyncEntry,
-    cipher: Cipher<'_>,
-) -> io::Result<()> {
-    let buf = wal_frame(entry, cipher)?;
-    crate::sim_seam::fs_write_all(file, WAL_FILE, &buf[..5]).await?;
-    Err(io::Error::other("injected write failure after a partial frame"))
 }
 
 // ── Snapshot ─────────────────────────────────────────────────────────────────
@@ -1991,6 +2309,447 @@ mod durability_tests {
         assert!(live_value(&*replay_into_fresh_store(&dir).await, "t/1").is_some());
         drop(handle);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Group commit (identity-and-lifecycle §9 O11) ─────────────────────────────────────────
+
+    /// A writer with test faults over a fresh directory, and the faults.
+    fn faulted_writer(tag: &str, mode: SyncMode) -> (std::path::PathBuf, Arc<KvState>, Arc<WalHandle>, Arc<WalFaults>) {
+        let dir    = unique_dir(tag);
+        let node   = NodeId::new("127.0.0.1", 1).unwrap();
+        let hlc    = Arc::new(crate::hlc::Hlc::new());
+        let state  = KvState::new(0);
+        let faults = Arc::new(WalFaults::default());
+        let handle = Arc::new(spawn_wal_writer_with_faults(dir.clone(), mode, 1_000_000, Arc::clone(&state), node, hlc, Arc::clone(&faults)));
+        (dir, state, handle, faults)
+    }
+
+    /// The batches the writer reported, from a channel the test hands it.
+    fn batch_log(faults: &WalFaults) -> mpsc::UnboundedReceiver<BatchSeen> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        assert!(faults.batches.set(tx).is_ok(), "one batch log per writer");
+        rx
+    }
+
+    fn drain_log(rx: &mut mpsc::UnboundedReceiver<BatchSeen>) -> Vec<BatchSeen> {
+        let mut seen = Vec::new();
+        while let Ok(b) = rx.try_recv() { seen.push(b); }
+        seen
+    }
+
+    /// Wait (bounded: 10 s) until `n` messages sit on the writer's channel — structure, not a sleep.
+    async fn wait_queued(h: &WalHandle, n: usize) {
+        for _ in 0..10_000 {
+            if h.tx.max_capacity() - h.tx.capacity() >= n { return; }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        panic!("{n} messages never queued on the writer's channel (it holds {})", h.tx.max_capacity() - h.tx.capacity());
+    }
+
+    /// Hold the writer at its first sync: `first` is appended with `append_sync` and waits there.
+    /// Returns once the writer is at the gate, so everything sent afterwards queues behind it.
+    async fn hold_the_writer(h: &Arc<WalHandle>, faults: &WalFaults, first: SyncEntry) -> tokio::task::JoinHandle<io::Result<()>> {
+        faults.hold_sync.store(true, Ordering::SeqCst);
+        let h = Arc::clone(h);
+        let task = tokio::spawn(async move { h.append_sync(first).await });
+        tokio::time::timeout(Duration::from_secs(10), faults.reached.notified()).await.expect("the writer reached its first sync");
+        task
+    }
+
+    /// Queue a `Sync` behind what is queued, and wait until `n` messages (it included) are queued.
+    async fn queue_a_sync(h: &Arc<WalHandle>, n: usize) -> tokio::task::JoinHandle<io::Result<()>> {
+        let task = { let h = Arc::clone(h); tokio::spawn(async move { h.sync().await }) };
+        wait_queued(h, n).await;
+        task
+    }
+
+    fn keys_on_disk(dir: &std::path::Path) -> (Vec<String>, WalEnd) {
+        let bytes = std::fs::read(dir.join("wal.bin")).unwrap();
+        let mut keys = Vec::new();
+        let end = decode_wal_records(&bytes, None, |e| keys.push(e.key.to_string()));
+        (keys, end)
+    }
+
+    /// **N concurrent `append_sync` calls take two syncs, not N + 1** — counted, not timed. One call is
+    /// held at the writer's sync while 64 more queue behind it; released, the writer commits all 64
+    /// under one sync. And **no acknowledgement is sent before the sync that covers it**: with the
+    /// second sync held at its gate, none of the 64 has been answered.
+    ///
+    /// Seen failing first, on the writer before group commit: 65 syncs, and the batch held at the
+    /// gate was one record.
+    #[tokio::test]
+    async fn concurrent_append_syncs_share_one_sync_and_none_is_acknowledged_before_it() {
+        const N: usize = 64;
+        let (dir, _state, handle, faults) = faulted_writer("group-count", SyncMode::Async);
+        let mut log = batch_log(&faults);
+        let first = hold_the_writer(&handle, &faults, entry("g/first", b"v", 1, false)).await;
+        let tasks: Vec<_> = (0..N).map(|i| {
+            let h = Arc::clone(&handle);
+            tokio::spawn(async move { h.append_sync(entry(&format!("g/{i}"), b"v", 10 + i as u64, false)).await })
+        }).collect();
+        wait_queued(&handle, N).await;
+
+        faults.release.notify_one(); // the first batch's sync goes on
+        first.await.unwrap().expect("the held append is acknowledged after its sync");
+        tokio::time::timeout(Duration::from_secs(10), faults.reached.notified()).await.expect("the second batch reached its sync");
+        // The second batch is at its sync: written, not synced, and nobody told it is durable.
+        assert!(tasks.iter().all(|t| !t.is_finished()), "an acknowledgement was sent before the sync that covers it");
+
+        faults.hold_sync.store(false, Ordering::SeqCst);
+        faults.release.notify_one();
+        for t in tasks { t.await.unwrap().expect("every queued append is acknowledged after the shared sync"); }
+        assert_eq!(faults.syncs.load(Ordering::SeqCst), 2, "65 required-sync appends, two syncs");
+        let seen = drain_log(&mut log);
+        assert_eq!(seen, vec![
+            BatchSeen { appends: 1, ended_by: "queue", synced: true },
+            BatchSeen { appends: N, ended_by: "queue", synced: true },
+        ], "the held append, then the 64 queued behind it as one batch");
+        let (keys, end) = keys_on_disk(&dir);
+        assert_eq!(keys.len(), N + 1, "every acknowledged record is on disk");
+        assert!(matches!(end, WalEnd::Clean), "{end:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **A failed sync fails, and counts, every append in its batch, and poisons the writer.** Five
+    /// appends — three awaiting a required sync, two fire-and-forget — queue behind a held writer;
+    /// their batch's sync fails. Every awaiting caller is told `Err`, all five are counted in
+    /// `dropped_appends` (the store would hold each with no durable record), the writer refuses what
+    /// follows, and a `Sync` establishes nothing until a snapshot repairs it. Their frames were
+    /// written before the sync failed, so they are in the file: `Err` never meant absent.
+    ///
+    /// Seen failing first, on the writer before group commit: it failed them too, but one by one —
+    /// the first's sync failed and poisoned, the rest were refused unwritten (`["s/first", "s/0"]` on
+    /// disk), so the assertion on what the file holds is what tells the two writers apart.
+    #[tokio::test]
+    async fn a_failed_sync_fails_and_counts_every_append_in_its_batch() {
+        let (dir, _state, handle, faults) = faulted_writer("group-syncfail", SyncMode::Flush);
+        std::fs::create_dir(dir.join("snapshot.tmp")).unwrap(); // the repairing snapshot fails too
+        let first = hold_the_writer(&handle, &faults, entry("s/first", b"v", 1, false)).await;
+        let waiters: Vec<_> = (0..3).map(|i| {
+            let h = Arc::clone(&handle);
+            tokio::spawn(async move { h.append_sync(entry(["s/0", "s/1", "s/2"][i], b"v", 10 + i as u64, false)).await })
+        }).collect();
+        wait_queued(&handle, 3).await;
+        handle.append_try(entry("s/3", b"v", 20, false));
+        handle.append_try(entry("s/4", b"v", 21, false));
+        wait_queued(&handle, 5).await;
+
+        faults.release.notify_one();
+        first.await.unwrap().expect("the first batch synced");
+        tokio::time::timeout(Duration::from_secs(10), faults.reached.notified()).await.expect("the second batch reached its sync");
+        faults.fail_sync.store(true, Ordering::SeqCst);
+        faults.hold_sync.store(false, Ordering::SeqCst);
+        faults.release.notify_one();
+        for w in waiters {
+            let e = w.await.unwrap().expect_err("an append whose batch's sync failed is not acknowledged");
+            assert!(e.to_string().contains("injected sync failure"), "{e}");
+        }
+        assert_eq!(handle.dropped_appends(), 5, "every append in the failed batch is counted, fire-and-forget ones included");
+        assert!(handle.refusing_appends().is_some(), "the writer is poisoned");
+        assert!(handle.sync().await.is_err(), "a later sync establishes nothing: after a failed fsync a later one can succeed without the data");
+        assert!(handle.append_sync(entry("s/5", b"v", 30, false)).await.is_err(), "and the next append is refused");
+        let (keys, _) = keys_on_disk(&dir);
+        assert_eq!(keys, ["s/first", "s/0", "s/1", "s/2", "s/3", "s/4"], "the batch's frames were written before its sync failed — `Err` never meant absent");
+
+        std::fs::remove_dir(dir.join("snapshot.tmp")).unwrap();
+        handle.trigger_snapshot().await.expect("the repairing snapshot");
+        assert!(handle.refusing_appends().is_none());
+        handle.append_sync(entry("s/6", b"v", 40, false)).await.expect("appends resume after the repair");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **A write torn inside a batch fails every member — the complete frames before the tear too —
+    /// and nothing is appended behind it.** Four required-sync appends queue behind a held writer;
+    /// their one write tears in the third frame. All four callers are told `Err` and counted, the
+    /// file ends in the torn frame, and the next append is refused. The two frames before the tear
+    /// are whole, so the repairing snapshot carries them and a restart finds them: a caller told
+    /// `DurabilityNotEstablished` cannot conclude the record is absent (`kv_set_requiring_sync`'s doc).
+    ///
+    /// Seen failing first, on the writer before group commit: the tear fell in the first record
+    /// queued, so only `t/first` was on disk.
+    #[tokio::test]
+    async fn a_write_torn_inside_a_batch_fails_every_member_and_nothing_lands_behind_it() {
+        let (dir, _state, handle, faults) = faulted_writer("group-tear", SyncMode::Flush);
+        std::fs::create_dir(dir.join("snapshot.tmp")).unwrap();
+        let first = hold_the_writer(&handle, &faults, entry("t/first", b"v", 1, false)).await;
+        let waiters: Vec<_> = (0..4).map(|i| {
+            let h = Arc::clone(&handle);
+            tokio::spawn(async move { h.append_sync(entry(["t/0", "t/1", "t/2", "t/3"][i], b"v", 10 + i as u64, false)).await })
+        }).collect();
+        wait_queued(&handle, 4).await;
+        faults.tear_at.store(2, Ordering::SeqCst);
+        faults.tear.store(true, Ordering::SeqCst);
+        faults.hold_sync.store(false, Ordering::SeqCst);
+        faults.release.notify_one();
+        first.await.unwrap().expect("the first batch synced");
+        for w in waiters {
+            let e = w.await.unwrap().expect_err("every member of a torn batch is told its durability was not established");
+            assert!(e.to_string().contains("injected"), "{e}");
+        }
+        assert_eq!(handle.dropped_appends(), 4);
+        assert!(handle.append_sync(entry("t/4", b"v", 30, false)).await.is_err(), "nothing is appended behind the tear");
+        let (keys, end) = keys_on_disk(&dir);
+        assert_eq!(keys, ["t/first", "t/0", "t/1"], "the frames before the tear are whole; nothing follows it");
+        assert!(matches!(end, WalEnd::Torn { .. }), "{end:?}");
+
+        std::fs::remove_dir(dir.join("snapshot.tmp")).unwrap();
+        handle.trigger_snapshot().await.expect("the repairing snapshot");
+        let restored = replay_into_fresh_store(&dir).await;
+        for k in ["t/first", "t/0", "t/1"] {
+            assert!(live_value(&restored, k).is_some(), "{k}: a complete frame is carried by the repairing snapshot");
+        }
+        for k in ["t/2", "t/3", "t/4"] {
+            assert!(live_value(&restored, k).is_none(), "{k} is absent");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **A failed `Sync` poisons the writer** (2026-11-21, deprecations §125). After an `fsync` error a
+    /// later `fsync` can succeed without the data reaching the disk, so a writer that carried on would
+    /// let a later replica-sync answer claim `Persisted` wrongly. Now the failed `Sync` poisons: the
+    /// next `Sync` and the next append are refused until a snapshot repairs the file.
+    ///
+    /// Seen failing first, on the writer before this change: the `Sync` returned `Err`, the writer
+    /// carried on, and the next `Sync` and the next append succeeded.
+    #[tokio::test]
+    async fn a_failed_sync_poisons_the_writer_until_a_snapshot_repairs_it() {
+        let (dir, _state, handle, faults) = faulted_writer("sync-poison", SyncMode::Async);
+        handle.append_acked(entry("p/1", b"v", 1, false)).await.expect("a healthy append");
+        std::fs::create_dir(dir.join("snapshot.tmp")).unwrap(); // the repairing snapshot fails too
+        faults.fail_sync.store(true, Ordering::SeqCst);
+        let e = handle.sync().await.expect_err("the injected sync failure is the caller's answer");
+        assert!(e.to_string().contains("injected sync failure"), "{e}");
+        assert!(handle.refusing_appends().is_some(), "a failed sync poisons the writer");
+        assert!(handle.sync().await.is_err(), "the next sync establishes nothing");
+        let e = handle.append_sync(entry("p/2", b"v", 2, false)).await.expect_err("the next append is refused");
+        assert!(e.to_string().contains("after a failed write or sync"), "the refusal says why: {e}");
+        assert_eq!(handle.dropped_appends(), 1, "the refused append is counted; the sync carried no record of its own");
+
+        std::fs::remove_dir(dir.join("snapshot.tmp")).unwrap();
+        handle.trigger_snapshot().await.expect("the repairing snapshot");
+        assert!(handle.refusing_appends().is_none(), "a successful snapshot repairs it");
+        handle.sync().await.expect("a sync after the repair");
+        handle.append_sync(entry("p/3", b"v", 3, false)).await.expect("appends resume");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **`Sync`, `TriggerSnapshot`, `PoisonForTest` and `Shutdown` each end a batch.** Two
+    /// fire-and-forget appends, the boundary, then a third append queue behind a held writer. The
+    /// first two and the boundary are one batch; the third is a later one, so the boundary's answer
+    /// covers what was queued before it and nothing after.
+    ///
+    /// Not a fail-first test: the writer before group commit took one message at a time, so every
+    /// message ended its own batch.
+    #[tokio::test]
+    async fn each_boundary_message_ends_a_batch() {
+        for boundary in ["Sync", "TriggerSnapshot", "PoisonForTest", "Shutdown"] {
+            let (dir, _state, handle, faults) = faulted_writer(&format!("boundary-{boundary}"), SyncMode::Flush);
+            let mut log = batch_log(&faults);
+            let first = hold_the_writer(&handle, &faults, entry("b/first", b"v", 1, false)).await;
+            handle.append_try(entry("b/0", b"v", 10, false));
+            handle.append_try(entry("b/1", b"v", 11, false));
+            wait_queued(&handle, 2).await;
+            let h = Arc::clone(&handle);
+            let answer = tokio::spawn(async move {
+                match boundary {
+                    "Sync" => h.sync().await,
+                    "TriggerSnapshot" => h.trigger_snapshot().await,
+                    "PoisonForTest" => h.poison_for_test("a test").await,
+                    _ => { h.shutdown().await; Ok(()) }
+                }
+            });
+            wait_queued(&handle, 3).await;
+            let h = Arc::clone(&handle);
+            let after = tokio::spawn(async move { h.append_sync(entry("b/2", b"v", 12, false)).await });
+            wait_queued(&handle, 4).await;
+            faults.hold_sync.store(false, Ordering::SeqCst);
+            faults.release.notify_one();
+            first.await.unwrap().expect("the first batch synced");
+            answer.await.unwrap().unwrap_or_else(|e| panic!("{boundary}: the boundary's answer: {e}"));
+            let after = after.await.unwrap();
+            let seen = drain_log(&mut log);
+            assert_eq!(seen[1], BatchSeen { appends: 2, ended_by: boundary, synced: true }, "{boundary}: the two appends before it and the boundary are one batch: {seen:?}");
+            match boundary {
+                "PoisonForTest" => assert!(after.is_err(), "the append after the poison is refused"),
+                "Shutdown" => assert!(after.is_err(), "the append after the shutdown never reached a writer"),
+                _ => {
+                    after.expect("the append after the boundary");
+                    assert_eq!(seen[2], BatchSeen { appends: 1, ended_by: "queue", synced: true }, "{boundary}: the append after it is a later batch: {seen:?}");
+                }
+            }
+            if boundary == "Sync" {
+                assert_eq!(faults.syncs.load(Ordering::SeqCst), 3, "the `Sync` is answered by its batch's one sync");
+            }
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    /// **A batch's bytes are the bytes its records would have been written as one at a time** — the
+    /// on-disk format is unchanged, so the golden fixtures and every reader need nothing new. Fifty
+    /// records of different sizes, tombstones among them, are committed as one batch through the
+    /// writer, and the same records are written one by one with `wal_append`; the files are equal.
+    #[tokio::test]
+    async fn a_batch_writes_the_same_bytes_as_its_records_written_one_by_one() {
+        let (dir, _state, handle, faults) = faulted_writer("bytes-batched", SyncMode::Async);
+        let mut log = batch_log(&faults);
+        let records: Vec<SyncEntry> = (0..50u64).map(|i| SyncEntry {
+            key: Arc::from(format!("bytes/{i}").as_str()),
+            value: Bytes::from(vec![i as u8; (i as usize * 37) % 300]),
+            timestamp: 100 + i,
+            is_tombstone: i % 7 == 0,
+        }).collect();
+        let first = hold_the_writer(&handle, &faults, records[0].clone()).await;
+        for r in &records[1..] { handle.append_try(r.clone()); }
+        let synced = queue_a_sync(&handle, records.len()).await;
+        faults.hold_sync.store(false, Ordering::SeqCst);
+        faults.release.notify_one();
+        first.await.unwrap().unwrap();
+        synced.await.unwrap().unwrap();
+        assert_eq!(drain_log(&mut log)[1], BatchSeen { appends: 49, ended_by: "Sync", synced: true }, "the 49 were one batch");
+
+        let serial = unique_dir("bytes-serial");
+        let mut file = open_wal(&serial.join("wal.bin")).await.unwrap();
+        for r in &records { wal_append(&mut file, r, false, None).await.unwrap(); }
+        drop(file);
+        assert_eq!(std::fs::read(dir.join("wal.bin")).unwrap(), std::fs::read(serial.join("wal.bin")).unwrap(),
+            "a batch is the concatenation of its records' frames");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&serial).ok();
+    }
+
+    /// **A batch stops at its cap: 4 096 records, or about 4 MiB of keys and values.** The cap bounds
+    /// the one write a batch is, and so how long the acknowledgement of a record queued behind it waits.
+    #[tokio::test]
+    async fn a_batch_stops_at_its_record_and_byte_caps() {
+        let (dir, _state, handle, faults) = faulted_writer("caps", SyncMode::Async);
+        let mut log = batch_log(&faults);
+        let first = hold_the_writer(&handle, &faults, entry("c/first", b"v", 1, false)).await;
+        for i in 0..(BATCH_MAX_RECORDS + 10) {
+            handle.append_try(SyncEntry { key: Arc::from(format!("c/{i}").as_str()), value: Bytes::from_static(b"v"), timestamp: 10 + i as u64, is_tombstone: false });
+        }
+        let synced = queue_a_sync(&handle, BATCH_MAX_RECORDS + 11).await;
+        faults.hold_sync.store(false, Ordering::SeqCst);
+        faults.release.notify_one();
+        first.await.unwrap().unwrap();
+        synced.await.unwrap().unwrap();
+        let seen = drain_log(&mut log);
+        assert_eq!(seen[1], BatchSeen { appends: BATCH_MAX_RECORDS, ended_by: "cap", synced: false }, "{:?}", &seen[1..]);
+        assert_eq!(seen[2], BatchSeen { appends: 10, ended_by: "Sync", synced: true }, "{:?}", &seen[1..]);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let (dir, _state, handle, faults) = faulted_writer("caps-bytes", SyncMode::Async);
+        let mut log = batch_log(&faults);
+        let first = hold_the_writer(&handle, &faults, entry("m/first", b"v", 1, false)).await;
+        let mib = Bytes::from(vec![7u8; 1024 * 1024]);
+        for i in 0..6u64 {
+            handle.append_try(SyncEntry { key: Arc::from(format!("m/{i}").as_str()), value: mib.clone(), timestamp: 10 + i, is_tombstone: false });
+        }
+        let synced = queue_a_sync(&handle, 7).await;
+        faults.hold_sync.store(false, Ordering::SeqCst);
+        faults.release.notify_one();
+        first.await.unwrap().unwrap();
+        synced.await.unwrap().unwrap();
+        let seen = drain_log(&mut log);
+        assert_eq!(seen[1], BatchSeen { appends: 4, ended_by: "cap", synced: false }, "four 1 MiB records reach the byte cap: {:?}", &seen[1..]);
+        assert_eq!(seen[2], BatchSeen { appends: 2, ended_by: "Sync", synced: true }, "{:?}", &seen[1..]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Group commit under the kernel (§9 O11): the drain is a recorded choice ──────────────
+
+    /// `appends` required-sync appends and, for more than one, a `Shutdown`, queued **before** the
+    /// writer runs, so its first batch drains every message behind the first; a lone append has
+    /// nothing behind it, and the `Shutdown` is sent once it is answered. Run through the writer task
+    /// itself, polled on this task, under `kernel`. Returns the trace and every append's answer.
+    #[cfg(feature = "sim")]
+    async fn drained_run(tag: &str, kernel: mycelium_sim::Kernel, appends: usize) -> (mycelium_sim::Trace, Vec<io::Result<()>>) {
+        use mycelium_sim::Sources;
+        let dir  = unique_dir(tag);
+        let node = NodeId::new("127.0.0.1", 1).unwrap();
+        crate::sim_seam::install(crate::sim_seam::SimContext {
+            kernel,
+            sources: Sources::seeded(1, 1_789_000_000_000),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        let hlc   = Arc::new(crate::hlc::Hlc::new());
+        let state = KvState::new(0);
+        let (tx, rx) = mpsc::channel::<WalMsg>(64);
+        let mut answers = Vec::new();
+        for i in 0..appends {
+            let (atx, arx) = oneshot::channel();
+            tx.try_send(WalMsg::Append { entry: entry(&format!("d/{i}"), b"v", 10 + i as u64, false), ack: Some(atx), force_sync: true }).unwrap();
+            answers.push(arx);
+        }
+        let (refusing_tx, _refusing) = tokio::sync::watch::channel(None);
+        let writer = wal_writer_task(rx, dir.clone(), SyncMode::Async, 1_000_000, 3_600, state, node, hlc, 1, None, None,
+            Arc::new(AtomicU64::new(0)), refusing_tx, None);
+        let mut out = Vec::new();
+        if appends > 1 {
+            // Queued before the writer runs: its first batch drains the rest and the `Shutdown`.
+            tx.try_send(WalMsg::Shutdown).unwrap();
+            writer.await;
+            for a in answers { out.push(a.await.unwrap_or_else(|_| Err(writer_gone()))); }
+        } else {
+            // A lone append: nothing behind it until it is answered.
+            let driver = async {
+                for a in answers { out.push(a.await.unwrap_or_else(|_| Err(writer_gone()))); }
+                tx.send(WalMsg::Shutdown).await.unwrap();
+            };
+            tokio::join!(writer, driver);
+        }
+        let ctx = crate::sim_seam::take().expect("kernel installed");
+        std::fs::remove_dir_all(&dir).ok();
+        (ctx.kernel.trace().clone(), out)
+    }
+
+    /// **A lone append records what it recorded before group commit: one write, one sync, no drain
+    /// choice** — so no trace recorded before this change needs re-recording, and a recording of a
+    /// quiet node is unchanged. And **a drained batch records its count as a `chan wal/drain` choice
+    /// and writes once**; replayed, the writer takes exactly that many messages and the run matches.
+    #[cfg(feature = "sim")]
+    #[tokio::test]
+    async fn a_drain_is_a_recorded_choice_and_a_lone_append_records_none() {
+        use mycelium_sim::{ChoiceKind, Kernel};
+        let wal_choices = |t: &mycelium_sim::Trace| -> Vec<(ChoiceKind, String, String)> {
+            t.entries().iter()
+                .filter(|c| c.stream == WAL_FILE || c.stream == WAL_DRAIN)
+                .map(|c| (c.kind, c.stream.clone(), c.request.split(' ').next().unwrap_or("").to_string()))
+                .collect()
+        };
+
+        let (lone, answers) = drained_run("sim-lone", Kernel::recording(), 1).await;
+        assert!(answers.iter().all(|a| a.is_ok()), "{answers:?}");
+        let seen = wal_choices(&lone);
+        assert_eq!(&seen[..2], &[
+            (ChoiceKind::Fs, WAL_FILE.to_string(), "write_all".to_string()),
+            (ChoiceKind::Fs, WAL_FILE.to_string(), "sync_data".to_string()),
+        ], "a lone append: one write, one sync: {seen:?}");
+        assert!(!seen.iter().any(|(_, s, _)| s == WAL_DRAIN), "a lone append records no drain: {seen:?}");
+
+        let (batch, answers) = drained_run("sim-batch-rec", Kernel::recording(), 5).await;
+        assert!(answers.iter().all(|a| a.is_ok()), "{answers:?}");
+        let drains: Vec<_> = batch.entries().iter().filter(|c| c.stream == WAL_DRAIN).collect();
+        assert_eq!(drains.len(), 1, "one drain choice: {drains:?}");
+        assert_eq!(drains[0].result, "5", "four appends and the Shutdown were drained behind the first");
+        let writes = wal_choices(&batch).iter().filter(|(_, _, op)| op == "write_all").count();
+        assert_eq!(writes, 1, "five appends, one write");
+
+        let (replayed, answers) = drained_run("sim-batch-rep", Kernel::replaying(batch.clone()), 5).await;
+        assert!(answers.iter().all(|a| a.is_ok()), "{answers:?}");
+        assert_eq!(replayed.to_text(), batch.to_text(), "the replay makes the recording's choices");
+    }
+
+    /// **A replay whose messages are not the recording's stops at the drain** — the recorded count is
+    /// a check, not a hint. The recording drained four appends and the `Shutdown`; the replay queues
+    /// two appends fewer, so its batch ends at the `Shutdown` before the recorded count.
+    #[cfg(feature = "sim")]
+    #[tokio::test]
+    #[should_panic(expected = "replay diverged at chan wal/drain")]
+    async fn a_replay_that_drains_a_different_batch_diverges() {
+        use mycelium_sim::Kernel;
+        let (batch, _) = drained_run("sim-div-rec", Kernel::recording(), 5).await;
+        let _ = drained_run("sim-div-rep", Kernel::replaying(batch), 3).await;
     }
 
     // ── Invariant 1: a snapshot never discards a WAL record ───────────────────
