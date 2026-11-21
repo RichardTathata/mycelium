@@ -69,7 +69,7 @@
 //! Lock-free (papaya and atomics): no lock-order row.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -232,8 +232,8 @@ pub(crate) struct ClientCertLedger {
     /// The records this gateway published, newest per principal, `(path, der)`: republished when missing or
     /// overwritten, as `revocation.rs` republishes a node's own records.
     published: papaya::HashMap<String, (String, Vec<u8>)>,
-    running: AtomicBool,
-    again: AtomicBool,
+    /// The fold runs one at a time, and answers tickets ([`fold_ticket`], [`refresh_answers`]).
+    fold: super::single_flight::SingleFlight,
     journal: arc_swap::ArcSwapOption<super::journal::Journal>,
     journaled: papaya::HashMap<String, usize>,
     journaled_total: AtomicUsize,
@@ -627,25 +627,35 @@ fn standing(ctx: &TaskCtx, principal: &str, key: &[u8; 32]) -> ClientKeyStanding
 /// record under [`CLIENT_CERT_PREFIX`] changes, at start and periodically, so a newer certificate raises the mark
 /// when it arrives rather than when its key is next asked about. **One** scan of the prefix, grouped by principal,
 /// whatever the number of principals; each distinct certificate's chain checked once while cached. Single-flight: a
-/// call while one runs makes that one run again (the revocation fold's `running` / `again`).
+/// call while one runs makes that one run again ([`super::single_flight::SingleFlight`], as the revocation fold).
 pub(crate) fn refresh(ctx: &TaskCtx) {
-    let ledger = &ctx.client_certs;
-    loop {
-        if ledger.running.swap(true, Ordering::AcqRel) {
-            ledger.again.store(true, Ordering::Release);
-            return;
-        }
-        loop {
-            ledger.again.store(false, Ordering::Release);
-            refresh_once(ctx);
-            if !ledger.again.load(Ordering::Acquire) {
-                break;
-            }
-        }
-        ledger.running.store(false, Ordering::Release);
-        if !ledger.again.swap(false, Ordering::AcqRel) {
-            return;
-        }
+    ctx.client_certs.fold.run(|| {
+        refresh_once(ctx);
+        true
+    });
+}
+
+/// A ticket for a client fold that **starts after** this call; [`refresh_answers`] until it is `true` (what
+/// `GossipAgent::change_roots` waits on, so the client marks are re-judged under the new roots before it returns —
+/// #822's review, C: one `refresh` returned at once while another thread's client fold ran).
+pub(crate) fn fold_ticket(ctx: &TaskCtx) -> u64 {
+    ctx.client_certs.fold.ticket()
+}
+
+/// [`refresh`], then whether `ticket` is answered by a client fold that started after it, on any thread.
+pub(crate) fn refresh_answers(ctx: &TaskCtx, ticket: u64) -> bool {
+    refresh(ctx);
+    ctx.client_certs.fold.answered(ticket)
+}
+
+/// Fold until a client fold that started after this call has run (the tests; bounded at 30 s).
+#[cfg(test)]
+pub(crate) fn refresh_through_for_test(ctx: &TaskCtx) {
+    let ticket = fold_ticket(ctx);
+    let t = std::time::Instant::now();
+    while !refresh_answers(ctx, ticket) {
+        assert!(t.elapsed() < std::time::Duration::from_secs(30), "no client-certificate fold answered in 30 s");
+        std::thread::yield_now();
     }
 }
 

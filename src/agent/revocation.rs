@@ -641,8 +641,11 @@ pub(crate) struct IdentityLedger {
     /// Each verdict also carries the certificate's `notAfter` (ms): a verdict is a miss once the wall clock reaches
     /// it, so a certificate's expiry is judged in-process as a restart judges it (I2, #805's review F3).
     cert_cache: papaya::HashMap<[u8; 32], (u64, u64, Option<CertFacts>)>,
-    running: AtomicBool,
-    again: AtomicBool,
+    /// The fold runs one at a time, and answers tickets ([`fold_ticket`], [`refresh_answers`]).
+    fold: super::single_flight::SingleFlight,
+    /// A test's plant, run at the start of every fold (the livelock test slows the fold with it).
+    #[cfg(test)]
+    pub(crate) fold_plant: arc_swap::ArcSwapOption<Box<dyn Fn() + Send + Sync>>,
     /// Certificate records whose issuance was past `wall_now_ms` plus the skew bound when judged.
     pub(crate) cert_future: AtomicU64,
     /// Records skipped because a per-node or per-key cap was full.
@@ -813,12 +816,20 @@ impl IdentityLedger {
         }
         let (seen, tally) = (Arc::clone(&self.anchors_seen), Arc::clone(&self.anchor_tally));
         rt.spawn(async move {
+            // Cleared on every exit — a panic, or the task dropped at a runtime's shutdown, included — so a budget
+            // check after it can spawn the next compaction (#822's review: the guard).
+            struct Spawned(Arc<Compaction>);
+            impl Drop for Spawned {
+                fn drop(&mut self) {
+                    self.0.spawned.store(false, Ordering::Release);
+                }
+            }
+            let _spawned = Spawned(Arc::clone(&c));
             let failed_before = c.failed.load(Ordering::Relaxed);
             compact(j, seen, tally, Arc::clone(&c)).await;
             if c.failed.load(Ordering::Relaxed) != failed_before {
                 c.not_before.store(mycelium_core::sim_seam::wall_now_ms().saturating_add(60_000), Ordering::Release);
             }
-            c.spawned.store(false, Ordering::Release);
         });
     }
 
@@ -1466,33 +1477,49 @@ fn nodes_with_records(ctx: &TaskCtx) -> Vec<NodeId> {
 /// or `sys/revocation/` change, after the startup identity prewarm, periodically (to re-judge a
 /// certificate issued in the future), and by [`revoke_key`].
 pub(crate) fn refresh(ctx: &TaskCtx) {
-    let _ = refresh_now(ctx);
+    ctx.identity_ledger.fold.run(|| refresh_once(ctx));
 }
 
-/// [`refresh`], saying whether **this call** ran a fold to completion (`true`) or found one running and asked it to run
-/// again (`false`). A caller that must see the fold's result before it goes on — `GossipAgent::change_roots`, after the
-/// roots changed — calls this until it is `true` (identity-and-lifecycle I2): a fold that ran under the old roots and
-/// re-runs on its own would otherwise finish after the caller had returned.
-pub(crate) fn refresh_now(ctx: &TaskCtx) -> bool {
-    let ledger = &ctx.identity_ledger;
-    let mut ran = false;
-    loop {
-        if ledger.running.swap(true, Ordering::AcqRel) {
-            ledger.again.store(true, Ordering::Release);
-            return ran;
-        }
-        loop {
-            ledger.again.store(false, Ordering::Release);
-            refresh_once(ctx);
-            if !ledger.again.load(Ordering::Acquire) {
-                break;
-            }
-        }
-        ran = true;
-        ledger.running.store(false, Ordering::Release);
-        if !ledger.again.swap(false, Ordering::AcqRel) {
-            return ran;
-        }
+/// A ticket for a fold that **starts after** this call: a caller that must see the fold's result before it goes on —
+/// `GossipAgent::change_roots`, after the roots changed (identity-and-lifecycle I2) — takes one, then calls
+/// [`refresh_answers`] until it is `true`. A fold that ran under the old roots and re-runs on its own would otherwise
+/// finish after the caller had returned.
+pub(crate) fn fold_ticket(ctx: &TaskCtx) -> u64 {
+    ctx.identity_ledger.fold.ticket()
+}
+
+/// [`refresh`], then whether `ticket` is answered: a fold that started after it was taken has run to the end, **this
+/// call's or one another thread is running**, which re-runs for it. Until 2026-11-21 the waiter accepted only a fold it
+/// ran itself: while another thread's fold ran, each of its retries set `again`, so that fold re-ran for ever and the
+/// waiter never ran one — a livelock that hung `an_often_rotated_peer_does_not_exhaust_the_kept_anchor_budget` (and
+/// CI) for six hours whenever the identity watcher's fold had started first.
+pub(crate) fn refresh_answers(ctx: &TaskCtx, ticket: u64) -> bool {
+    refresh(ctx);
+    ctx.identity_ledger.fold.answered(ticket)
+}
+
+/// [`refresh`] until a fold that started after this call has run whole, on any thread — for a caller that acts on
+/// the fold's result at once (`revoke_key`: this node's own verifiers stop trusting the revoked key before it
+/// returns; #822's confirm round). Unbounded, as the identity wait in `GossipAgent::change_roots`: only roots that
+/// never stop changing can starve it.
+#[cfg_attr(not(feature = "compliance"), allow(dead_code))]
+pub(crate) fn refresh_through(ctx: &TaskCtx) {
+    let ticket = fold_ticket(ctx);
+    while !refresh_answers(ctx, ticket) {
+        std::thread::yield_now();
+    }
+}
+
+/// Fold until a fold that started after this call has run whole (the tests' one-call `refresh` returned at once
+/// while the identity watcher's fold ran, and asserted on a fold that had not happened yet; #822's review, D).
+/// Bounded at 30 s: synchronous, so no `tokio` timeout could interrupt it.
+#[cfg(test)]
+pub(crate) fn refresh_through_for_test(ctx: &TaskCtx) {
+    let ticket = fold_ticket(ctx);
+    let t = std::time::Instant::now();
+    while !refresh_answers(ctx, ticket) {
+        assert!(t.elapsed() < std::time::Duration::from_secs(30), "no identity fold answered in 30 s");
+        std::thread::yield_now();
     }
 }
 
@@ -1515,16 +1542,22 @@ fn remember_counted(ledger: &IdentityLedger, node: &NodeId, now: &HashSet<[u8; 3
     out
 }
 
-fn refresh_once(ctx: &TaskCtx) {
-    let Some(tls) = ctx.tls.get() else { return };
+/// One fold of every node; whether it ran to the end under one roots generation, and so answers the tickets it read
+/// (`false`: the roots changed during it — mid-fold `again` is set and the caller folds again).
+fn refresh_once(ctx: &TaskCtx) -> bool {
+    #[cfg(test)]
+    if let Some(plant) = ctx.identity_ledger.fold_plant.load_full() {
+        plant();
+    }
+    let Some(tls) = ctx.tls.get() else { return true };
     let ledger = &ctx.identity_ledger;
     // I2, R4 (#768's M3): the whole fold is judged under one roots generation. If the roots change while it runs, the
     // node being folded merges nothing, no standing judged under the old roots is published, and the fold runs again.
     let g0 = tls.roots_generation();
     for node in nodes_with_records(ctx) {
         let Some(folded) = fold_node(ctx, tls, &node, g0) else {
-            ledger.again.store(true, Ordering::Release);
-            return;
+            ledger.fold.ask_again();
+            return false;
         };
         let mut now = HashSet::new();
         for c in &folded.counted {
@@ -1554,16 +1587,20 @@ fn refresh_once(ctx: &TaskCtx) {
         };
         let standing = NodeStanding { anchored, revoked, counted };
         if tls.roots_generation() != g0 {
-            ledger.again.store(true, Ordering::Release);
-            return;
+            ledger.fold.ask_again();
+            return false;
         }
         if ctx.key_standing.get(&node).as_deref() != Some(&standing) {
             ctx.key_standing.set(&node, standing);
         }
     }
-    if tls.roots_generation() == g0 {
-        ctx.key_standing.set_judged_under(g0);
+    // The roots changed after the last node: nothing is marked judged, and the fold did not answer a ticket (a waiter
+    // asks again; the change of roots that moved them asks for its own fold).
+    if tls.roots_generation() != g0 {
+        return false;
     }
+    ctx.key_standing.set_judged_under(g0);
+    true
 }
 
 /// The revocations of `node`'s keys that count at this node (the transparency log's leaves).
@@ -1815,7 +1852,7 @@ pub(crate) fn revoke_key(
         if mycelium_core::ops::kv_get(ctx, &path).as_deref() != Some(bytes.as_slice()) {
             let _ = mycelium_core::ops::kv_set(ctx, Arc::from(path.as_str()), bytes::Bytes::from(bytes));
         }
-        refresh(ctx);
+        refresh_through(ctx);
         return Ok(());
     }
     let mut certs = vec![mycelium_core::ops::kv_get(ctx, &cert_record_key(&ctx.node_id, &current)).map(|b| b.to_vec()).unwrap_or_else(|| tls.node_cert_der())];
@@ -1826,8 +1863,9 @@ pub(crate) fn revoke_key(
     let bytes = encode_v2(event, &tls.signing_key(), certs);
     let _ = mycelium_core::ops::kv_set(ctx, Arc::from(path.as_str()), bytes::Bytes::from(bytes.clone()));
     ctx.identity_ledger.own(path, bytes);
-    // Our own verifiers stop at once, not when the watcher next runs.
-    refresh(ctx);
+    // Our own verifiers stop at once, not when the watcher next runs: a fold that started after the record was
+    // written has run before this returns, even while the watcher's fold (woken by the write) holds the fold.
+    refresh_through(ctx);
     Ok(())
 }
 
@@ -2049,6 +2087,52 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         panic!("timed out: {what}");
+    }
+
+    /// **A caller waiting for a fold is answered by the fold another thread is running** (the CI hang of 2026-11-21:
+    /// `an_often_rotated_peer_does_not_exhaust_the_kept_anchor_budget` ran until the six-hour limit, twice). A fold is
+    /// running on one thread, slowed by a plant, when a caller on another asks for a fold that starts after its call —
+    /// as `change_roots` and the succession tests' `refold` do while the identity watcher folds. The caller is answered,
+    /// and the running fold stops after the one re-run it owes. Seen failing first with the waiter accepting only a
+    /// fold it ran itself (`while !refresh_now(ctx) {}`): each retry set `again`, the running fold re-ran on every
+    /// pass, and neither thread returned (a livelock, the answer timing out here with hundreds of folds run).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_waiter_is_answered_by_a_fold_another_thread_is_running() {
+        let agent = crate::GossipAgent::new(NodeId::new("127.0.0.1", crate::test_util::alloc_port()).unwrap(), crate::config::GossipConfig::default());
+        let ctx = Arc::clone(agent.task_ctx_for_tests());
+        let folds = Arc::new(AtomicU64::new(0));
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let started_tx = std::sync::Mutex::new(Some(started_tx));
+        let f = Arc::clone(&folds);
+        ctx.identity_ledger.fold_plant.store(Some(Arc::new(Box::new(move || {
+            f.fetch_add(1, Ordering::SeqCst);
+            if let Some(tx) = started_tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            // Long beside a waiter's retry, as a fold over forty certificates is.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }))));
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<&'static str>();
+        let (c1, d1) = (Arc::clone(&ctx), done_tx.clone());
+        std::thread::spawn(move || {
+            refresh(&c1);
+            let _ = d1.send("the running fold");
+        });
+        started_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the first fold started");
+        let (c2, d2) = (Arc::clone(&ctx), done_tx);
+        std::thread::spawn(move || {
+            let ticket = fold_ticket(&c2);
+            while !refresh_answers(&c2, ticket) {
+                std::thread::yield_now();
+            }
+            let _ = d2.send("the waiter");
+        });
+        for _ in 0..2 {
+            let who = done_rx.recv_timeout(std::time::Duration::from_secs(10));
+            assert!(who.is_ok(), "both returned within 10 s (folds run: {}): a waiter and a running fold livelocked", folds.load(Ordering::SeqCst));
+        }
+        ctx.identity_ledger.fold_plant.store(None);
+        assert!(folds.load(Ordering::SeqCst) <= 4, "the running fold re-ran for the waiter a bounded number of times, not for ever ({} folds)", folds.load(Ordering::SeqCst));
     }
 
     /// **#805's confirm round N3, under the decision of 2026-11-17: a node keeping more than the budget at once is still

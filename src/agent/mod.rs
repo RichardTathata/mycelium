@@ -190,6 +190,9 @@ pub(crate) mod audit;
 /// row Q); issued under `compliance`.
 #[cfg(feature = "tls")]
 pub(crate) mod revocation;
+/// One run at a time, with tickets: the identity and client-certificate folds' discipline (#822).
+#[cfg(feature = "tls")]
+pub(crate) mod single_flight;
 /// Identity-and-lifecycle I2 (PR 2b): the CA's commitment to its successor on a node — pinned from the operator's
 /// file only, persisted; KV copies compared with the pin for detection.
 #[cfg(feature = "tls")]
@@ -2755,11 +2758,17 @@ impl GossipAgent {
             self.task_ctx.identity_ledger.own(path, presented);
         }
         // The re-fold completes, under the new roots, before this returns: a fold already running re-runs on its own,
-        // and would otherwise finish after the caller went on.
-        while !revocation::refresh_now(&self.task_ctx) {
+        // and would otherwise finish after the caller went on. A fold that started after the ticket answers it, whichever
+        // thread runs it (a waiter that accepted only its own fold livelocked against the identity watcher's).
+        let ticket = revocation::fold_ticket(&self.task_ctx);
+        while !revocation::refresh_answers(&self.task_ctx, ticket) {
             tokio::task::yield_now().await;
         }
-        client_cert::refresh(&self.task_ctx);
+        // The client marks too, by a client fold that started after the roots changed (#822's review, C).
+        let ticket = client_cert::fold_ticket(&self.task_ctx);
+        while !client_cert::refresh_answers(&self.task_ctx, ticket) {
+            tokio::task::yield_now().await;
+        }
         // R4: every certificate this node keeps after the re-fold is settled before this returns — journaled, or known not
         // to be (#805's review F2, N1): one whose append was already in flight is waited for too. What I2's PR 2b relies
         // on before it persists a Narrowed phase. A failed append leaves its certificate in memory, counted, and a later
@@ -2771,7 +2780,8 @@ impl GossipAgent {
         // the journal is compacted, the fold offers the certificate again, and the wait is asked once more — so a
         // long-lived, often-rotated node's answer can be `true` again.
         if !durable && ledger.compact_anchor_journal().await > 0 {
-            while !revocation::refresh_now(&self.task_ctx) {
+            let ticket = revocation::fold_ticket(&self.task_ctx);
+            while !revocation::refresh_answers(&self.task_ctx, ticket) {
                 tokio::task::yield_now().await;
             }
             durable = ledger.anchors_durable_for(&ledger.kept_certs()).await;

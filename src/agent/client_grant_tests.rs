@@ -933,7 +933,7 @@ async fn a_provider_that_does_not_yet_trust_the_gateway_gives_the_grant_back() {
     let first = mcp_call(http_a, &args, Some(presented(&grant, &resource, &args, &key))).await;
     let ran_first = ran.load(Ordering::SeqCst);
     // B learns A's key: its own fold of the store re-anchors it.
-    crate::agent::revocation::refresh(&b.task_ctx);
+    crate::agent::revocation::refresh_through_for_test(&b.task_ctx);
     let trusted = !b.trusted_identity_keys(&a_id).is_empty();
     let again = mcp_call(http_a, &args, Some(presented(&grant, &resource, &args, &key))).await;
     let ran_again = ran.load(Ordering::SeqCst);

@@ -2274,6 +2274,60 @@ wait for a separate debug process to start. Its stderr pipe, unread until exit, 
 nothing to stderr — and a debug stem on this machine took about 5.4 s from launch to its gateway, 3.6 s of it before
 `[authority]` attached, so a 60 s miss is a tenfold slowdown under load. Open, not investigated further.
 
+**Known hang, closed (2026-11-21): a product livelock, a waiter and a running fold.**
+`agent::succession_tests::an_often_rotated_peer_does_not_exhaust_the_kept_anchor_budget` (I2 PR 2b-1, #812) started and
+never finished, so the `Test` job ran to the six-hour limit, twice: `main` at 7e9486f7 (job 136652193426) and PR #820
+(run 44855899111, job 136697921560), both in the second lib binary, the line with `provisional-consent-grade` and
+`provisional-ca-generation` (the test is gated on the latter); `main` at 9d6ae084 passed. Not the compaction and not
+#816. The test's `refold` helper, like `GossipAgent::change_roots`, waited for a fold of its own with
+`while !revocation::refresh_now(ctx) { yield }`, and `refresh_now` answered `true` only when **that call** ran the fold.
+When the identity watcher's fold (woken by the test's record put) took `running` first, every retry set `again`, the
+watcher's fold re-ran on each pass and never released `running`, and the waiter never ran one: a livelock, ended only
+if the waiter's thread is descheduled for a whole fold, which an idle runner never does. Shown deterministically:
+`agent::revocation::tests::a_waiter_is_answered_by_a_fold_another_thread_is_running` slows the fold with a plant (20 ms)
+and waits on another thread; with the old waiter it failed with 382 folds run in 10 s and neither thread returned.
+The full test as shipped did not hang here in 560 runs (200 with 8 parallel and 6 spinning cores, 360 with 24 and 12):
+on this machine the test's thread wins the race to the fold after its put. With a 2 ms sleep planted between the put
+and `refold` (the test's thread descheduled, as a loaded runner does), the shipped code stalled in 4 of 4 parallel runs
+(36–45 s, where a run takes 5 s) and one lone run spun at 199% CPU for 4 min 49 s until killed. `sample` of it: the
+test's main thread in `succession_tests::refold` → `cthread_yield`, a `tokio-rt-worker` in
+`start_identity_watcher` → `revocation::refresh` → `refresh_now` → `refresh_once`, and nothing else running — the CI
+shape (the cancelled jobs' last line is the test's *"has been running for over 60 seconds"*). The fixed code under the
+same plant: 40 of 40 runs (4 parallel) passed in 3–5 s. Fixed: a waiter takes a ticket
+(`revocation::fold_ticket`) and `refresh_answers` is `true` once a fold that read the ticket at its start ran to the end,
+whichever thread ran it; the running fold re-runs for it a bounded number of times (at most three in the test). Bounds added (`src/agent/succession_tests.rs`):
+`refold` fails after 30 s, and every `anchors_durable_for` wait there goes through `durable_for` / `all_durable`, a
+30 s `tokio::time::timeout`. **Siblings (rule 1):** `grep -rn "\.swap(true" src mycelium-core/src mycelium-*/src` for
+single-flight flags, and `grep -rn -B2 "yield_now()" src mycelium-core/src | grep "while !"` for waiters that retry:
+`client_cert::refresh` has the same `running` / `again` pair, and no caller retried it (one call each), so no
+livelock — but `change_roots` called it once while documenting that the client marks are re-judged, so a client fold
+already running made it return before they were (#822's review, C; it now waits on a client ticket);
+`Compaction::spawned` (the budget's compaction) was reset on every return of `compact` — it stayed set if `compact`
+panicked or the task was dropped at a runtime's shutdown (harmless: the ledger is per agent), and a drop guard now
+clears it on every exit; the other flags (`call_issuer`'s collector and watcher, `capability_handle`'s registry,
+`llm_dispatch_spawned`, `a2a_mounted`, the tuple space's metrics writer, the wiki sink's push) are spawn-once, with no
+waiter. The only retrying waiters were the two in `change_roots` and the test's `refold`, all three moved to tickets.
+**#822's review found three more of the family, fixed in the PR.** (A) Nothing tested that a fold cut short by a
+change of roots answers no ticket: `a_fold_cut_short_by_a_change_of_roots_answers_no_ticket` (a narrowing planted in
+the first fold's merge) and `tickets_are_answered_under_a_busy_fold_and_changing_roots` (six waiters, 150 tickets
+each, a continuous folder, the roots re-activated every 15 ms), which catches a fold that reads its ticket late.
+(B) A lost request, released in 2.40.0, in both folds: a call tried `running` and then set `again`; between the two
+the holder could release `running`, find `again` clear and return, and the request waited for the next trigger (60 s
+or more). Both folds now share `src/agent/single_flight.rs`: ask first, then try `running`; release `running`, then
+read `again`; `SeqCst` on that two-variable handshake; a guard clears `running` on every exit, a panic included.
+`single_flight::tests::a_request_made_while_a_run_ends_is_run` plants the window. (D) Tests that called `refresh` or
+`client_cert::refresh` once and then read the result (`lib_tests.rs` ×4, `client_grant_tests.rs`, `client_cert_tests.rs`
+×3, `consent_decision_tests.rs`) could read before any fold had run while the watcher's fold held `running`. They now
+use `refresh_through_for_test`, a bounded ticket wait. **The confirm round added two.** The holder's half of the
+handshake (re-reading `again` after releasing `running`) had no test: a mutant without it passed every test.
+`a_request_that_finds_the_run_held_as_it_ends_is_run_by_the_holder` plants a second call between the holder's last
+pass and its release, and was seen failing first on that mutant. And `revoke_key` folded once after writing the
+record, so with a fold already running, the revoked key stayed trusted on this node until that fold ended. It now
+waits on a ticket (`refresh_through`); `a_revocation_is_in_force_here_when_revoke_returns_while_another_fold_runs`.
+In `revocation.rs`'s own tests the `anchors_durable_for` waits behind a planted hold were already bounded
+(`tokio::time::timeout`); the rest wait on an unplanted append, which settles within the journal's 5 s `ACK_TIMEOUT`
+(`SettleAppend` settles it on every exit), and none of them retries a fold.
+
 **Known flakes, open (seen during the v2.36.0 work, 2026-10-19; not yet investigated):**
 - `agent::exposure::tests::doors::the_shadow_profile_counts_and_holds_nothing` (Y5/Y11, the exposure policy's shadow
   rung) — *"legacy held: … the actor's history kept changing while this decision was made on it"*, once on PR #765's

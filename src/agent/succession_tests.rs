@@ -308,12 +308,29 @@ fn put(ctx: &TaskCtx, path: &str, bytes: &[u8]) {
     let _ = mycelium_core::ops::kv_set(ctx, Arc::from(path), bytes::Bytes::copy_from_slice(bytes));
 }
 
-/// Fold until this call ran one itself: a background fold (the identity watcher's) may be running, and `refresh`
-/// then returns at once.
+/// Fold until a fold that started after this call has run to the end: a background fold (the identity watcher's) may
+/// be running, and `refresh` then returns at once and that fold re-runs for this call. Bounded, so a regression of the
+/// livelock this waited in until 2026-11-21 (it accepted only a fold it ran itself, and each retry made the watcher's
+/// fold re-run) fails here in seconds instead of hanging CI. Synchronous on the test's thread, so a `tokio` timeout
+/// around the test could not interrupt it: the bound is here.
 fn refold(ctx: &TaskCtx) {
-    while !revocation::refresh_now(ctx) {
+    let ticket = revocation::fold_ticket(ctx);
+    let t = Instant::now();
+    while !revocation::refresh_answers(ctx, ticket) {
+        assert!(t.elapsed() < Duration::from_secs(30), "refold: no fold answered in 30 s (a livelock between a waiter and a running fold?)");
         std::thread::yield_now();
     }
+}
+
+/// [`IdentityLedger::anchors_durable_for`](revocation::IdentityLedger::anchors_durable_for), bounded: it waits for every
+/// append in flight, so an append that never settled would otherwise hang the test.
+async fn durable_for(ledger: &revocation::IdentityLedger, certs: &[(NodeId, [u8; 32])]) -> bool {
+    tokio::time::timeout(Duration::from_secs(30), ledger.anchors_durable_for(certs)).await.expect("anchors_durable_for answered within 30 s")
+}
+
+/// [`durable_for`] over every certificate the ledger keeps.
+async fn all_durable(ledger: &revocation::IdentityLedger) -> bool {
+    durable_for(ledger, &ledger.kept_certs()).await
 }
 
 async fn started(id: &NodeId, cfg: &GossipConfig) -> Arc<GossipAgent> {
@@ -457,7 +474,7 @@ async fn a_kept_anchor_survives_its_record_hidden_and_an_old_ca_one_is_dropped_a
     put(&a.task_ctx, &path, b"hidden");
     refold(&a.task_ctx);
     assert_eq!(a.task_ctx.trusted_keys(&n), vec![kn], "the record left the store; the kept certificate did not");
-    assert!(a.task_ctx.identity_ledger.anchors_durable_for(&a.task_ctx.identity_ledger.kept_certs()).await, "every kept certificate journaled");
+    assert!(all_durable(&a.task_ctx.identity_ledger).await, "every kept certificate journaled");
     a.shutdown().await;
 
     // Restart on the successor's files (the end state the operator reaches), the record still hidden in the store.
@@ -763,17 +780,17 @@ async fn a_failed_anchor_append_is_retried_by_a_later_fold() {
     });
     let a = started(&ia, &cfg).await;
     let ledger = &a.task_ctx.identity_ledger;
-    assert!(ledger.anchors_durable_for(&ledger.kept_certs()).await, "start settled");
+    assert!(all_durable(ledger).await, "start settled");
     let n = NodeId::new("127.0.0.1", alloc_port()).unwrap();
     let (kn, n1) = member_cert(&base, &ca1, &n, None);
     ledger.hook_appends_for_test(None, Some(ledger.anchor_mark()));
     put(&a.task_ctx, &revocation::cert_record_key(&n, &kn), &n1);
     refold(&a.task_ctx);
     let mine = vec![(n.clone(), <[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(&n1)))];
-    assert!(!ledger.anchors_durable_for(&mine).await, "the first append failed");
+    assert!(!durable_for(ledger, &mine).await, "the first append failed");
     tokio::time::sleep(Duration::from_millis(1_200)).await;
     refold(&a.task_ctx);
-    assert!(ledger.anchors_durable_for(&mine).await, "retried by the later fold, durable");
+    assert!(durable_for(ledger, &mine).await, "retried by the later fold, durable");
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -795,7 +812,7 @@ async fn a_dropped_anchor_takes_its_retry_bookkeeping_with_it() {
     });
     let a = started(&ia, &cfg).await;
     let ledger = &a.task_ctx.identity_ledger;
-    assert!(ledger.anchors_durable_for(&ledger.kept_certs()).await, "start settled");
+    assert!(all_durable(ledger).await, "start settled");
     let n = NodeId::new("127.0.0.1", alloc_port()).unwrap();
     let kn = [0x74u8; 32];
     let until_ms = mycelium_core::sim_seam::wall_now_ms() + 3_000;
@@ -804,7 +821,7 @@ async fn a_dropped_anchor_takes_its_retry_bookkeeping_with_it() {
     put(&a.task_ctx, &revocation::cert_record_key(&n, &kn), &n1);
     refold(&a.task_ctx);
     let mine = vec![(n.clone(), <[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(&n1)))];
-    assert!(!ledger.anchors_durable_for(&mine).await, "the append failed");
+    assert!(!durable_for(ledger, &mine).await, "the append failed");
     assert!(ledger.anchor_bookkeeping_for_test(&n, &n1), "a backoff entry while the certificate is kept");
     put(&a.task_ctx, &revocation::cert_record_key(&n, &kn), b"hidden");
     ledger.hook_appends_for_test(None, Some(u64::MAX - 1));
@@ -863,12 +880,12 @@ async fn an_often_rotated_peer_does_not_exhaust_the_kept_anchor_budget() {
     let t = Instant::now();
     loop {
         refold(&a.task_ctx);
-        if ledger.anchors_durable_for(&ledger.kept_certs()).await || t.elapsed() > Duration::from_secs(15) {
+        if all_durable(&ledger).await || t.elapsed() > Duration::from_secs(15) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(ledger.anchors_durable_for(&ledger.kept_certs()).await, "every kept certificate is durable");
+    assert!(all_durable(&ledger).await, "every kept certificate is durable");
     assert_eq!(ledger.anchor_journal_refused.load(std::sync::atomic::Ordering::Relaxed), 0, "no anchor refused by the budget");
     assert!(ledger.compaction.removed.load(std::sync::atomic::Ordering::Relaxed) >= 8, "dropped anchors left the journal");
     let newest: std::collections::HashSet<[u8; 32]> = keys[24..].iter().copied().collect();
@@ -910,7 +927,7 @@ async fn a_change_of_roots_compacts_the_anchor_journal_before_it_answers() {
         newest = Some(k);
         tokio::time::sleep(Duration::from_millis(3)).await;
     }
-    assert!(ledger.anchors_durable_for(&ledger.kept_certs()).await);
+    assert!(all_durable(&ledger).await);
     assert_eq!(ledger.anchors_journaled_count_for_test(&n), 32, "the budget for N is full, sixteen of its records dead");
     ledger.block_spawned_compaction_for_test();
     // Widen, and N's newest key is re-issued under the successor.
@@ -925,7 +942,7 @@ async fn a_change_of_roots_compacts_the_anchor_journal_before_it_answers() {
     let (_, a2) = member_cert(&base, &ca2, &ia, Some(ka));
     a.change_roots(a2, vec![der2.clone()]).await.unwrap();
     assert!(ledger.anchor_journaled_for_test(&n, &n2), "journaled before the change of roots returned");
-    assert!(ledger.anchors_durable_for(&ledger.kept_certs()).await, "every kept certificate is durable again");
+    assert!(all_durable(&ledger).await, "every kept certificate is durable again");
     assert_eq!(a.task_ctx.trusted_keys(&n), vec![kn]);
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&base);
@@ -954,7 +971,7 @@ async fn a_compaction_then_a_restart_leaves_a_fail_closed_peer_fail_closed() {
         a.task_ctx.peer_keys.pin().insert(n.clone(), vec![kn]);
         refold(&a.task_ctx);
         assert_eq!(a.task_ctx.trusted_keys(&n), vec![kn]);
-        assert!(a.task_ctx.identity_ledger.anchors_durable_for(&a.task_ctx.identity_ledger.kept_certs()).await);
+        assert!(all_durable(&a.task_ctx.identity_ledger).await);
         // A second peer, anchored under CA1 only: its record is dead after the narrow, so the compaction has work.
         let m = NodeId::new("127.0.0.1", alloc_port()).unwrap();
         let (km, m1) = member_cert(&base, &ca1, &m, None);
@@ -991,4 +1008,154 @@ async fn a_compaction_then_a_restart_leaves_a_fail_closed_peer_fail_closed() {
         a.shutdown().await;
         let _ = std::fs::remove_dir_all(&base);
     }
+}
+
+/// **A fold's ticket is answered only by a fold that started after it, under roots no older than the waiter's**
+/// (#822's review, A). Six waiters take 150 tickets each while a thread folds without pause and another re-activates
+/// the roots every 15 ms (each activation cuts the folds running across it), the fold slowed by a varying plant.
+/// Every ticket is answered within 20 s, by a fold that started after it was taken, and the standing it leaves was
+/// judged under a roots generation no older than the one when it was taken. Seen failing first with the fold reading
+/// the ticket after its run instead of at its start ("answered with no fold started after the ticket"), and with the
+/// old waiter (a waiter not answered in 20 s).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tickets_are_answered_under_a_busy_fold_and_changing_roots() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+    let base = fresh_dir("tickets");
+    let ((ca1, der1), _) = two_cas(&base);
+    let (ia, cfg) = node_cfg(&base, "a", &ca1, &ca1.join("ca-cert.pem"), vec![]);
+    let a = started(&ia, &cfg).await;
+    let ctx = Arc::clone(&a.task_ctx);
+    let t = Arc::clone(ctx.tls.get().unwrap());
+    for i in 0..8 {
+        let n = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+        let (k, c) = member_cert(&base.join(format!("m{i}")), &ca1, &n, None);
+        put(&ctx, &revocation::cert_record_key(&n, &k), &c);
+    }
+    let starts = Arc::new(AtomicU64::new(0));
+    let s = Arc::clone(&starts);
+    ctx.identity_ledger.fold_plant.store(Some(Arc::new(Box::new(move || {
+        let n = s.fetch_add(1, SeqCst);
+        std::thread::sleep(Duration::from_micros((n * 7919) % 1500));
+    }))));
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut threads = Vec::new();
+    {
+        let (c, st) = (Arc::clone(&ctx), Arc::clone(&stop));
+        threads.push(std::thread::spawn(move || {
+            while !st.load(SeqCst) {
+                revocation::refresh(&c);
+                std::thread::yield_now();
+            }
+        }));
+    }
+    let changes = Arc::new(AtomicU64::new(0));
+    {
+        let (tt, st, d, g) = (Arc::clone(&t), Arc::clone(&stop), der1.clone(), Arc::clone(&changes));
+        threads.push(std::thread::spawn(move || {
+            while !st.load(SeqCst) {
+                tt.activate(tt.reroot_material(tt.node_cert_der(), vec![d.clone()]).unwrap()).unwrap();
+                g.fetch_add(1, SeqCst);
+                std::thread::sleep(Duration::from_millis(15));
+            }
+        }));
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<Result<u64, String>>();
+    for w in 0..6 {
+        let (c, sts, tt, tx) = (Arc::clone(&ctx), Arc::clone(&starts), Arc::clone(&t), tx.clone());
+        std::thread::spawn(move || {
+            let mut worst = 0u128;
+            for i in 0..150 {
+                let starts_before = sts.load(SeqCst);
+                let generation = tt.roots_generation();
+                let ticket = revocation::fold_ticket(&c);
+                let t0 = Instant::now();
+                while !revocation::refresh_answers(&c, ticket) {
+                    if t0.elapsed() > Duration::from_secs(20) {
+                        let _ = tx.send(Err(format!("waiter {w}, ticket {i}: not answered in 20 s")));
+                        return;
+                    }
+                    std::thread::yield_now();
+                }
+                worst = worst.max(t0.elapsed().as_micros());
+                if sts.load(SeqCst) <= starts_before {
+                    let _ = tx.send(Err(format!("waiter {w}, ticket {i}: answered with no fold started after the ticket")));
+                    return;
+                }
+                match c.key_standing.judged_under() {
+                    Some(j) if j >= generation => {}
+                    other => {
+                        let _ = tx.send(Err(format!("waiter {w}, ticket {i}: judged under {other:?}, older than {generation} at the ticket")));
+                        return;
+                    }
+                }
+            }
+            let _ = tx.send(Ok(worst as u64));
+        });
+    }
+    drop(tx);
+    let mut outcome = Ok(0);
+    for _ in 0..6 {
+        match rx.recv_timeout(Duration::from_secs(120)) {
+            Ok(Ok(w)) => outcome = outcome.map(|m: u64| m.max(w)),
+            Ok(Err(e)) => outcome = Err(e),
+            Err(e) => outcome = Err(format!("a waiter did not finish in 120 s: {e:?}")),
+        }
+        if outcome.is_err() {
+            break;
+        }
+    }
+    stop.store(true, SeqCst);
+    for h in threads {
+        h.join().unwrap();
+    }
+    ctx.identity_ledger.fold_plant.store(None);
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+    let worst = outcome.unwrap_or_else(|e| panic!("{e}"));
+    eprintln!("tickets: {} folds, {} changes of roots, worst wait {worst} µs", starts.load(SeqCst), changes.load(SeqCst));
+}
+
+/// **A fold cut short by a change of roots answers no ticket** (#822's review, A). A ticket is taken; the first fold
+/// meets a narrowing of the roots inside its merge (the `MERGE_PLANT`), so it merges nothing and runs again. At the
+/// second fold's start the ticket is not answered; after it, it is. Seen failing first with every fold answering,
+/// whole or not: the cut fold answered the ticket.
+#[cfg(feature = "provisional-ca-generation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fold_cut_short_by_a_change_of_roots_answers_no_ticket() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+    let base = fresh_dir("cut-fold");
+    let ((ca1, der1), (ca2, der2)) = ca_and_successor(&base);
+    let (ia, cfg) = node_cfg(&base, "a", &ca1, &ca1.join("ca-cert.pem"), vec![]);
+    let a = started(&ia, &cfg).await;
+    let ctx = Arc::clone(&a.task_ctx);
+    let t = Arc::clone(ctx.tls.get().unwrap());
+    a.change_roots(t.node_cert_der(), vec![der1, der2.clone()]).await.unwrap();
+    // No watcher from here: every fold is this test's, on this thread, where the merge plant runs.
+    a.shutdown().await;
+    let n = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+    let (kn, n1) = member_cert(&base, &ca1, &n, None);
+    put(&ctx, &revocation::cert_record_key(&n, &kn), &n1);
+    let (_, a2) = member_cert(&base, &ca2, &ia, Some(t.verifying_key_bytes()));
+    let ticket = revocation::fold_ticket(&ctx);
+    let narrow = Arc::clone(&t);
+    revocation::MERGE_PLANT.with(|p| {
+        *p.borrow_mut() = Some(Box::new(move || {
+            narrow.activate(narrow.reroot_material(a2.clone(), vec![der2.clone()]).unwrap()).unwrap();
+        }))
+    });
+    let folds = Arc::new(AtomicU64::new(0));
+    let early = Arc::new(AtomicBool::new(false));
+    let (f, e, c) = (Arc::clone(&folds), Arc::clone(&early), Arc::downgrade(&ctx));
+    ctx.identity_ledger.fold_plant.store(Some(Arc::new(Box::new(move || {
+        if f.fetch_add(1, SeqCst) == 1 && let Some(c) = c.upgrade() {
+            // At the second fold's start the first, cut by the change of roots, must not have answered.
+            e.store(revocation::refresh_answers(&c, ticket), SeqCst);
+        }
+    }))));
+    revocation::refresh(&ctx);
+    ctx.identity_ledger.fold_plant.store(None);
+    assert!(folds.load(SeqCst) >= 2, "the cut fold ran again ({} folds)", folds.load(SeqCst));
+    assert!(!early.load(SeqCst), "a fold cut short by a change of roots answered the ticket");
+    assert!(revocation::refresh_answers(&ctx, ticket), "the whole fold after it did");
+    let _ = std::fs::remove_dir_all(&base);
 }
