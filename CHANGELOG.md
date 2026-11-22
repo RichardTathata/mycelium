@@ -466,23 +466,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     reach the saver's loads: **GHSA-wwqv-p2pp-99h5** / CVE-2025-64439 (HIGH, code execution through the `"json"`
     mode's constructor envelope; fixed in 3.0.0) and **GHSA-fjqc-hq36-qh5p** / CVE-2026-48775 (method dispatch in the
     JSON reviver; fixed in 4.1.1). They are reachable because the saver hands a row's own type tag and the blob it
-    names to `loads_typed` (`saver.py:538-544`), and any admitted member, or any client holding `kv:write`, can write
+    names to `loads_typed` (`_assemble`, `saver.py`), and any admitted member, or any client holding `kv:write`, can write
     that row. The floor also clears GHSA-mhr3-j7m5-c7c9 / CVE-2026-27794 (`BaseCache` pickle, fixed in 4.0.0), which
     the saver does not use. The `dev` extra moves to `langgraph>=1.0.10` (GHSA-g48c-2wqr-h844 / CVE-2026-28277,
     fixed in 1.0.10), `pytest>=9.0.3` and `pytest-asyncio>=1.3.0` (the first that installs beside pytest 9).
-    **The saver's default serializer is now safe against a member-written row.** The floor alone did not do that:
-    under LangGraph's default `JsonPlusSerializer()` the `"msgpack"` mode imports and calls any type a payload names
-    unless `LANGGRAPH_STRICT_MSGPACK=true` is set, and a payload naming `os.system` ran on 4.1.1 and 4.3.2. With no
-    `serde` passed, the saver now loads with `default_serde()`, `JsonPlusSerializer(allowed_msgpack_modules=None)`:
-    LangGraph's strict mode whatever the variable says. Only LangGraph's `SAFE_MSGPACK_TYPES` are constructed, and
-    any other type loads as its raw arguments, never called. `tests/test_untrusted_rows.py` forges a channel value,
-    a skeleton and a pending write naming `os.system` or `os.mkdir`, sync and async, and was seen failing on the
-    floor alone (13 of its 15 cases). **Upgrade note:** a graph that checkpoints its own classes (a Pydantic or
-    dataclass state) reads them back as plain dicts unless it names them,
-    `serde=JsonPlusSerializer(allowed_msgpack_modules=[MyState, …])`, or sets `LANGGRAPH_STRICT_MSGPACK=true`, under
-    which LangGraph adds the compiled graph's state-schema types itself. A `serde` the caller passes is used as given.
-    **Not changed:** the rows are still unsigned, so a member can still replace a checkpoint's content with other
-    values of the allowed types. Owner-signed checkpoint rows are *not built*
+    **The saver's default serializer is now safe against a member-written row.** The floor alone did not do that.
+    Under LangGraph's default `JsonPlusSerializer()` the `"msgpack"` mode imports and calls any type a payload names
+    unless `LANGGRAPH_STRICT_MSGPACK=true` is set: a payload naming `os.system` ran on 4.1.1 and 4.3.2. And the
+    `"json"` mode revives about 146 langchain-core classes from an `lc: 1` constructor (`allowed_objects="core"`): a
+    forged row loaded as a real `PromptTemplate` or `RunnableSequence`. With no `serde` passed, the saver now loads
+    with `default_serde()`: `JsonPlusSerializer` with `allowed_msgpack_modules=None` (LangGraph's strict mode whatever
+    the variable says: only `SAFE_MSGPACK_TYPES` are constructed, any other type loads as its raw arguments, never
+    called), and the `"json"` tag refused with `RefusedCheckpointEncoding`, naming the remedy. The saver writes no
+    `"json"`: langgraph-checkpoint 3.0 and later emit only `msgpack`, `null`, `bytes` and `bytearray`. Only 2.x's
+    fallback after a `UnicodeEncodeError` ever wrote `"json"`, and such an old row now fails to load by name rather
+    than silently. `tests/test_untrusted_rows.py` forges a channel value, a skeleton and a pending write naming
+    `os.system` or `os.mkdir`, and `lc: 1` `PromptTemplate` and `RunnableSequence` rows, through `get_tuple`, `list`,
+    `aget_tuple` and `alist`. Each part was seen failing first: the msgpack cases on 0.3.5's floor alone, the json
+    cases on the msgpack-only default. **Upgrade note:** a graph that checkpoints its own classes (a Pydantic or
+    dataclass state) gets them back as plain dicts, silently. Nothing errors at load; the failure shows later in a
+    node. Name them with `serde=default_serde().with_msgpack_allowlist([MyState, …])`, or set
+    `LANGGRAPH_STRICT_MSGPACK=true`, under which LangGraph adds the compiled graph's state-schema types itself. A
+    `serde` the caller passes is used as given. **Encryption does not authenticate rows:** LangGraph's
+    `EncryptedSerializer` decodes a row whose tag names no cipher with its inner serializer, permissive by default, so
+    build it as `EncryptedSerializer(cipher, default_serde())`. **Not changed:** the rows are still unsigned, so a
+    member can still replace a checkpoint's content with values of the allowed types, a forged `Send` or `Command` in
+    its pending writes included. Owner-signed checkpoint rows are *not built*
     (`what-is-proven.md#checkpoint-rows-deserialized-unsigned`; the README's *What the serializer trusts*).
   - **`mycelium-py` 0.2.16** (unreleased; the floors ride in the version already on `main`): the `sign` extra needs
     `cryptography>=50.0.0` (was `>=42`). That covers **GHSA-jwv3-5hgf-82ww** / CVE-2026-69249 (HIGH, exponential
@@ -494,17 +503,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     uses of the same install. The
     `typed` extra needs `pydantic>=2.4` (was `>=2`; **GHSA-mr82-8j83-vxmv** / CVE-2024-3772, a regular-expression
     denial of service in email validation, fixed in 2.4.0). The `dev` extra needs `pytest>=9.0.3` and `pytest-asyncio>=1.3.0`.
-  - **`strands-session-mycelium` 0.1.1** (unreleased): `strands-agents==1.65.0` (was `==1.61.1`). 1.61.1 caps
-    `mcp<2.2`, so no install could reach a fixed `mcp`. 1.65.0 allows `mcp<2.4`, and a fresh install resolves
-    `mcp` 2.3.0. That fixes **GHSA-qx49-fqc8-xw99** / CVE-2026-115563 (HIGH: the OAuth client could send credentials
+  - **`strands-session-mycelium` 0.1.1** (unreleased): `strands-agents==1.65.0` (was `==1.61.1`) and `mcp>=2.2.0`
+    (new). 1.61.1 caps `mcp<2.2`, so no install could reach a fixed `mcp`; 1.65.0 allows `mcp>=1.23.0,<2.4`, which
+    still admits the vulnerable 1.23–1.29 and 2.0–2.1, so the package states the floor itself. An environment that
+    holds `mcp` 2.1.1 is upgraded to 2.3.0 when the package is installed. That fixes **GHSA-qx49-fqc8-xw99** / CVE-2026-115563 (HIGH: the OAuth client could send credentials
     to an authorization server the MCP server chose) and four MODERATE advisories: GHSA-84m7-p3x7-pcfv,
     GHSA-5h93-6whr-6q8j, GHSA-w4fh-qvv9-3v23 and GHSA-rwrf-2pqf-9j8j, all fixed in 2.2.0 and 1.30.0. They are reachable
     only through a Strands agent's own MCP use: the store makes no MCP call. The store's recorded `SessionRepository`
     interface is unchanged at 1.65.0 (`tests/test_interface.py`, the pin moved). The `dev` extra needs
     `pytest>=9.0.3`. The `mycelium-py>=0.2.11` requirement is unchanged.
-  - **`mycelium-ts`** (no version change): `package-lock.json` refreshed by `npm audit fix`. Every package it moves is
-    dev-only (`handlebars`, `brace-expansion`, `browserslist`, `js-yaml`, `baseline-browser-mapping`, `@babel/core`),
-    so the published package does not change.
+  - **`mycelium-ts`** (no version change): `package-lock.json` refreshed by `npm audit fix`. It moves 25 packages,
+    every one dev-only, including the six the audit flagged (`handlebars`, `brace-expansion`, `browserslist`,
+    `js-yaml`, `baseline-browser-mapping`, `@babel/core`), so the published package does not change.
 
 ### Added
 

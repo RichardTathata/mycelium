@@ -12,6 +12,9 @@ requires-python = ">=3.10"
 # `mcp` range (`<2.4`) admits `mcp` 2.2.0+, which fixes GHSA-qx49-fqc8-xw99 and four others.
 dependencies = [
     "strands-agents==1.65.0",
+    # strands-agents 1.65.0 allows `mcp>=1.23.0,<2.4`, which still admits the vulnerable 1.23-1.29 and 2.0-2.1;
+    # this floor makes an install upgrade an older `mcp` it finds (GHSA-qx49-fqc8-xw99 and four others, 2.2.0).
+    "mcp>=2.2.0",
     "mycelium-py>=0.2.11",
 ]
 

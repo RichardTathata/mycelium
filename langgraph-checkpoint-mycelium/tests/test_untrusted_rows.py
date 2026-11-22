@@ -31,7 +31,12 @@ from langgraph.checkpoint.serde.jsonplus import (
     JsonPlusSerializer,
 )
 
+import langgraph_checkpoint_mycelium as pkg
 from langgraph_checkpoint_mycelium import MyceliumCheckpointSaver
+
+# A stand-in when the package predates the refusal, so the fail-first run reaches the behaviour (the
+# forged object loads) instead of stopping at the import.
+RefusedCheckpointEncoding = getattr(pkg, "RefusedCheckpointEncoding", type("RefusedCheckpointEncoding", (Exception,), {}))
 
 
 class FakeGateway:
@@ -106,16 +111,16 @@ FORGERIES = [
 SLOTS = ["channel", "skeleton", "write"]
 
 
-def forge(gw: FakeGateway, slot: str, payload: bytes) -> None:
+def forge(gw: FakeGateway, slot: str, payload: bytes, tag: str = "msgpack") -> None:
     blob_id = gw.put_blob(payload)
     for key, raw in list(gw.kv.items()):
         row = json.loads(raw)
         if slot == "channel" and key.startswith("ckpt/"):
-            row["channels"]["messages"] = [blob_id, "msgpack"]
+            row["channels"]["messages"] = [blob_id, tag]
         elif slot == "skeleton" and key.startswith("ckpt/"):
-            row["blob"], row["type"] = blob_id, "msgpack"
+            row["blob"], row["type"] = blob_id, tag
         elif slot == "write" and key.startswith("ckptw/"):
-            row["blob"], row["type"] = blob_id, "msgpack"
+            row["blob"], row["type"] = blob_id, tag
         else:
             continue
         gw.kv[key] = json.dumps(row).encode()
@@ -223,3 +228,154 @@ def test_a_serializer_the_caller_passes_is_kept(tmp_path):
     saver.get_tuple(cfg)
 
     assert marker.exists()
+
+
+# ── Every reader, not only get_tuple (#828's review) ─────────────────────────────────────────────────
+
+LOADERS = ["get_tuple", "list", "aget_tuple", "alist"]
+
+
+async def load_with(saver: MyceliumCheckpointSaver, cfg: dict, loader: str):
+    thread = {"configurable": {"thread_id": cfg["configurable"]["thread_id"], "checkpoint_ns": ""}}
+    if loader == "get_tuple":
+        return saver.get_tuple(cfg)
+    if loader == "list":
+        return list(saver.list(thread))
+    if loader == "aget_tuple":
+        return await saver.aget_tuple(cfg)
+    return [t async for t in saver.alist(thread)]
+
+
+@pytest.mark.parametrize("loader", LOADERS)
+@pytest.mark.parametrize("slot", ["channel", "write"])
+async def test_every_reader_refuses_a_forged_msgpack_callable(tmp_path, loader, slot):
+    gw = FakeGateway()
+    saver = wire(MyceliumCheckpointSaver("127.0.0.1", 1), gw)
+    cfg = honest_checkpoint(saver, f"t-{loader}-{slot}")
+    marker = tmp_path / "ran"
+    forge(gw, slot, forged_payload(EXT_CONSTRUCTOR_POS_ARGS, "os", "mkdir", [str(marker)]))
+
+    await load_with(saver, cfg, loader)
+
+    assert not marker.exists(), f"os.mkdir ran through {loader}"
+
+
+# ── The "json" tag: LangGraph revives langchain-core objects from it (#828's review, F1) ────────────
+
+
+def lc1_payloads():
+    """A forged row's `"json"` payloads: an `lc: 1` constructor for a real langchain-core object."""
+    from langchain_core.load import dumpd
+    from langchain_core.prompts import PromptTemplate
+
+    prompt = PromptTemplate.from_template("Summarise {doc}")
+    sequence = prompt | PromptTemplate.from_template("{text}")
+    return {
+        "PromptTemplate": json.dumps(dumpd(prompt)).encode(),
+        "RunnableSequence": json.dumps(dumpd(sequence)).encode(),
+    }
+
+
+@pytest.mark.parametrize("loader", LOADERS)
+@pytest.mark.parametrize("slot", ["channel", "write"])
+@pytest.mark.parametrize("kind", ["PromptTemplate", "RunnableSequence"])
+async def test_a_forged_json_row_is_refused_by_name_not_revived(loader, slot, kind):
+    payload = lc1_payloads()[kind]
+    assert json.loads(payload)["lc"] == 1 and json.loads(payload)["type"] == "constructor"
+    gw = FakeGateway()
+    saver = wire(MyceliumCheckpointSaver("127.0.0.1", 1), gw)
+    cfg = honest_checkpoint(saver, f"t-json-{loader}-{slot}-{kind}")
+    forge(gw, slot, payload, tag="json")
+
+    with pytest.raises(RefusedCheckpointEncoding) as e:
+        await load_with(saver, cfg, loader)
+    assert "serde=" in str(e.value)
+
+
+def test_the_saver_never_writes_a_json_tag_itself():
+    # The refusal costs no honest row: every tag the saver's own writes carry is one the default loads.
+    from langchain_core.messages import AIMessage
+    from langchain_core.prompts import PromptTemplate
+
+    gw = FakeGateway()
+    saver = wire(MyceliumCheckpointSaver("127.0.0.1", 1), gw)
+    cp = empty_checkpoint()
+    cp["id"] = str(uuid6())
+    cp["channel_values"] = {"a": "surrogate \udc80 text", "b": None, "c": b"raw", "d": AIMessage(content="x"), "e": PromptTemplate.from_template("{x}")}
+    cp["channel_versions"] = {k: 1 for k in cp["channel_values"]}
+    cfg = saver.put({"configurable": {"thread_id": "t-tags", "checkpoint_ns": ""}}, cp, {"source": "loop", "step": 1, "parents": {}}, {})
+    saver.put_writes(cfg, [("a", "surrogate \udc80 write")], task_id="task-1")
+    tags = set()
+    for key, raw in gw.kv.items():
+        row = json.loads(raw)
+        tags.add(row["type"])
+        tags.update(t for _blob, t in (row.get("channels") or {}).values())
+    assert tags <= {"msgpack", "null", "bytes", "bytearray"}, tags
+    saver.get_tuple(cfg)
+
+
+def test_langgraph_s_with_allowlist_keeps_both_refusals(tmp_path):
+    # StateGraph.compile calls checkpointer.with_allowlist(...) under LANGGRAPH_STRICT_MSGPACK=true.
+    gw = FakeGateway()
+    saver = wire(MyceliumCheckpointSaver("127.0.0.1", 1), gw)
+    widened = saver.with_allowlist([("my_app.models", "Order")])
+    cfg = honest_checkpoint(widened, "t-widened")
+    marker = tmp_path / "ran"
+    forge(gw, "channel", forged_payload(EXT_CONSTRUCTOR_POS_ARGS, "os", "mkdir", [str(marker)]))
+    widened.get_tuple(cfg)
+    assert not marker.exists()
+    forge(gw, "write", lc1_payloads()["PromptTemplate"], tag="json")
+    with pytest.raises(RefusedCheckpointEncoding):
+        widened.get_tuple(cfg)
+
+
+def test_the_readme_s_allow_list_keeps_both_refusals(tmp_path):
+    from langgraph_checkpoint_mycelium import default_serde
+
+    gw = FakeGateway()
+    serde = default_serde().with_msgpack_allowlist([("my_app.models", "Order")])
+    saver = wire(MyceliumCheckpointSaver("127.0.0.1", 1, serde=serde), gw)
+    cfg = honest_checkpoint(saver, "t-readme")
+    marker = tmp_path / "ran"
+    forge(gw, "channel", forged_payload(EXT_CONSTRUCTOR_POS_ARGS, "os", "mkdir", [str(marker)]))
+    saver.get_tuple(cfg)
+    assert not marker.exists()
+    forge(gw, "write", lc1_payloads()["RunnableSequence"], tag="json")
+    with pytest.raises(RefusedCheckpointEncoding):
+        saver.get_tuple(cfg)
+
+
+class XorCipher:
+    """A stand-in cipher: the property under test is what reaches the inner serializer, not secrecy."""
+
+    def encrypt(self, plaintext: bytes) -> tuple[str, bytes]:
+        return "xor", bytes(b ^ 0x5A for b in plaintext)
+
+    def decrypt(self, ciphername: str, ciphertext: bytes) -> bytes:
+        assert ciphername == "xor"
+        return bytes(b ^ 0x5A for b in ciphertext)
+
+
+@pytest.mark.parametrize("inner", ["langgraph-default", "default_serde"])
+def test_encryption_does_not_authenticate_a_row(tmp_path, inner):
+    # A forged row tagged "msgpack" (no "+cipher") goes to EncryptedSerializer's inner serializer
+    # undecrypted. With LangGraph's default inner one it runs; built on default_serde() it does not.
+    from langgraph.checkpoint.serde.encrypted import EncryptedSerializer
+
+    import langgraph.checkpoint.serde._msgpack as lg_msgpack
+
+    from langgraph_checkpoint_mycelium import default_serde
+
+    if inner == "langgraph-default" and lg_msgpack.STRICT_MSGPACK_ENABLED:
+        pytest.skip("LANGGRAPH_STRICT_MSGPACK is set, so LangGraph's default inner serializer is strict here")
+    serde = EncryptedSerializer(XorCipher()) if inner == "langgraph-default" else EncryptedSerializer(XorCipher(), default_serde())
+    gw = FakeGateway()
+    saver = wire(MyceliumCheckpointSaver("127.0.0.1", 1, serde=serde), gw)
+    cfg = honest_checkpoint(saver, f"t-enc-{inner}")
+    assert saver.get_tuple(cfg).checkpoint["channel_values"]["messages"] == ["hello"]
+    marker = tmp_path / "ran"
+    forge(gw, "channel", forged_payload(EXT_CONSTRUCTOR_POS_ARGS, "os", "mkdir", [str(marker)]))
+
+    saver.get_tuple(cfg)
+
+    assert marker.exists() == (inner == "langgraph-default")

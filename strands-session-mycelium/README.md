@@ -30,6 +30,8 @@ pinned to **`strands-agents` 1.65.0**, the release whose `SessionRepository` it 
 `tests/test_interface.py` records that interface and fails when a release changes it, which is
 when the pin moves. 0.1.1 moved it from 1.61.1, whose `mcp<2.2` cap kept every install on an `mcp`
 with GHSA-qx49-fqc8-xw99 and four other advisories; 1.65.0 allows `mcp<2.4`, and the interface is unchanged.
+Because 1.65.0's range still admits a vulnerable `mcp`, the package also requires `mcp>=2.2.0`, so an
+install upgrades an older one it finds.
 
 ## Reaching the gateway
 
