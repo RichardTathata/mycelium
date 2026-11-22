@@ -11,6 +11,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A gateway sends an unanswered cancel-forward again** (unreleased code: I4's cancel-forward; identity-and-lifecycle
+  §9 O13, the maintainer's decision of 2026-11-22; found on #824, where behind about 12 000 concurrent mints the
+  provider's stop came about 25 s after the cancel in 4 runs of 9). The forward is a best-effort signal on the
+  gateway's outbound queues, which drop frames when they are full, and nothing told the gateway its forward was
+  dropped: the provider heard of the cancel only when anti-entropy repaired the revocation's record. The gateway now
+  re-sends the same signed checkpoint every 500 ms until the provider answers (`CANCEL_FORWARD_RETRY_MS`; four attempts
+  inside *F* = 2 s), each attempt waiting 5 s for its own answer, then on a back-off from 1 s to 30 s, at most 24
+  attempts (`MAX_CANCEL_FORWARD_ATTEMPTS`), never past the call's window and never once the node is shutting down. The
+  provider holds a repeat idempotently and answers it from what it holds. **What a caller is answered is unchanged:**
+  the receipt is the first answer within 5 s, else `DeliveryUnknown` (never a negative); an answer after that is
+  counted and does not change the receipt. New: `GET /stats` `call_cancel_forwards` and the counters
+  `mycelium_gateway_call_cancel_forward_attempts_total{attempt}` and `mycelium_gateway_call_cancel_forwards_total{outcome}`
+  (`docs/operations/metrics.md`), the evidence on which a lane of its own for control signals is to be decided.
+  A shutdown no longer waits for a pending forward's 5 s timeout. No `deprecations.md` section: no caller's answer, or
+  when it comes, changes.
+
 - **A change of roots no longer livelocks against a fold already running** (unreleased code: I2's `change_roots`, and the
   kept-anchor tests built on it; found as a CI hang, the Test job cancelled at six hours twice on
   `an_often_rotated_peer_does_not_exhaust_the_kept_anchor_budget`). A caller that needed a fold of its own retried

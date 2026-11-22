@@ -1022,3 +1022,162 @@ async fn a_stop_whose_forward_answer_is_lost_is_answered_unknown_never_completed
     p.a.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);
 }
+
+// ── §9 O13: the gateway re-sends an unanswered cancel-forward ───────────────────────────────────────────────────
+
+fn forwards(n: &super::call_mint_tests::N) -> serde_json::Value {
+    n.ctx().call_issuer.cancel_forwards.to_json()
+}
+
+/// **§9 O13: a cancel-forward whose first sends are dropped is sent again, and the provider's stop still arrives inside
+/// bound 1** (the maintainer's decision of 2026-11-22: the gateway keeps its promise by its own effort). A client's call
+/// runs at the provider; the gateway's revoke write is held, so the KV does not carry the revocation and only the
+/// forward can stop the call; the gateway's first two sends are dropped before they leave (`DROP_FIRST_SENDS`, the
+/// shape of #824's full outbound queue). The call stops inside *F* while the cancel is unanswered — on the third
+/// attempt, two re-sends — and once the write is released the receipt is the provider's `Stopped`, counted
+/// `answered_on_retry`. Seen failing first with the forward sending once, as main does (`MAX_CANCEL_FORWARD_ATTEMPTS`
+/// planted to 1): the call ran on until the write was released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancel_forward_whose_first_sends_are_dropped_is_sent_again_and_stops_the_call_inside_bound_1() {
+    let (g, p, cert_dir) = pair(Opts { mint: true, persist: true, ..Opts::default() }).await;
+    let g = Arc::new(g);
+    let g2 = Arc::clone(&g);
+    let answered = tokio::spawn(async move { g2.client_call("slow").await });
+    p.running(1).await;
+    p.began(1).await;
+    let term = g.ctx().call_issuer.issued_terms().pop().expect("minted");
+    let held = call_issuer::test_hooks::hold_revoke_writes(g.a.node_id());
+    call_cancel::test_hooks::DROP_FIRST_SENDS.pin().insert(g.a.node_id().to_string(), Arc::new(std::sync::atomic::AtomicU32::new(2)));
+    let asked = std::time::Instant::now();
+    let (g2, t2) = (Arc::clone(&g), term.clone());
+    let cancel = tokio::spawn(async move { g2.a.cancel_call(&t2).await });
+    let stopped = until(|| p.authority.running_count() == 0, Duration::from_secs(10)).await;
+    let stop_took = asked.elapsed();
+    assert!(stopped, "the call stopped at the provider while the revoke write was held: only a re-sent forward could stop it ({})", forwards(&g));
+    assert!(stop_took < Duration::from_millis(F_MS), "the provider's stop came {stop_took:?} after the cancel, outside bound 1 (F = {F_MS} ms)");
+    assert!(!cancel.is_finished(), "the cancel waits for its write");
+    held.release(1);
+    let receipt = tokio::time::timeout(Duration::from_secs(15), cancel).await.expect("the cancel is answered").unwrap().expect("recorded");
+    call_cancel::test_hooks::DROP_FIRST_SENDS.pin().remove(&g.a.node_id().to_string());
+    assert_eq!(receipt.class, CancelClass::Stopped, "the provider's answer to the third attempt: {receipt:?}");
+    let f = forwards(&g);
+    assert_eq!((f["attempts"].as_u64(), f["retries"].as_u64(), f["answered_on_retry"].as_u64()), (Some(3), Some(2), Some(1)), "{f}");
+    assert_eq!((f["answered_first"].as_u64(), f["unanswered"].as_u64()), (Some(0), Some(0)), "{f}");
+    let stats: serde_json::Value = reqwest::Client::new().get(format!("http://127.0.0.1:{}/stats", g.http_port)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(stats["call_cancel_forwards"], f, "GET /stats carries the same counts");
+    let reply = tokio::time::timeout(Duration::from_secs(10), answered).await.expect("the client is answered").unwrap();
+    assert!(reply.to_string().contains("cancelled"), "{reply}");
+    assert_eq!(p.finished.load(Ordering::SeqCst), 0, "the tool never finished");
+    drop(held);
+    g.a.shutdown().await;
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **§9 O13: a repeated cancel-forward is answered from what the provider holds, and changes nothing there.** The
+/// gateway's revoke write is held and the answer to its first attempt lost (`LOSE_FIRST_ANSWERS`): the provider
+/// stopped the call on that attempt, and the re-send — the same signed checkpoint — is answered `stopped`, from the stop
+/// record, which the receipt carries. The provider then has one stop record of the term, and the same checkpoint
+/// presented twice more directly is answered `stopped` each time, with its stop records, running work, refused holds
+/// and refused forwards all unchanged. Seen failing first with the forward sending once, as main does
+/// (`MAX_CANCEL_FORWARD_ATTEMPTS` planted to 1): the receipt was `DeliveryUnknown`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_repeated_cancel_forward_is_answered_from_what_the_provider_holds_and_changes_nothing() {
+    let (g, p, cert_dir) = pair(Opts { mint: true, persist: true, ..Opts::default() }).await;
+    let g = Arc::new(g);
+    let g2 = Arc::clone(&g);
+    let answered = tokio::spawn(async move { g2.client_call("slow").await });
+    p.running(1).await;
+    p.began(1).await;
+    let term = g.ctx().call_issuer.issued_terms().pop().expect("minted");
+    let held = call_issuer::test_hooks::hold_revoke_writes(g.a.node_id());
+    call_cancel::test_hooks::LOSE_FIRST_ANSWERS.pin().insert(g.a.node_id().to_string(), Arc::new(std::sync::atomic::AtomicU32::new(1)));
+    let (g2, t2) = (Arc::clone(&g), term.clone());
+    let cancel = tokio::spawn(async move { g2.a.cancel_call(&t2).await });
+    assert!(until(|| p.authority.running_count() == 0, Duration::from_secs(10)).await, "the first attempt stopped the call");
+    held.release(1);
+    let receipt = tokio::time::timeout(Duration::from_secs(15), cancel).await.expect("the cancel is answered").unwrap().expect("recorded");
+    call_cancel::test_hooks::LOSE_FIRST_ANSWERS.pin().remove(&g.a.node_id().to_string());
+    assert_eq!(receipt.class, CancelClass::Stopped, "the re-send is answered from the stop record: {receipt:?}");
+    let f = forwards(&g);
+    assert_eq!(f["answered_on_retry"].as_u64(), Some(1), "{f}");
+    let of_term = |p: &super::call_mint_tests::N| p.authority.named_stop_records().iter().filter(|s| s.term.as_deref() == Some(term.as_str())).count();
+    assert_eq!(of_term(&p), 1, "one stop of the term, though the provider was sent it twice");
+
+    // The same signed checkpoint, presented twice more.
+    let revoking = serde_json::from_slice::<SignedRevocationCheckpoint>(&g.kv(&call_checkpoint_key(&g.gateway(), &term)).unwrap()).unwrap();
+    assert!(revoking.checkpoint.revoked.iter().any(|t| t.as_str() == term), "the revoking checkpoint the forward carried");
+    let refused_before: u64 = p.ctx().call_issuer.cancel_forwards_refused.pin().iter().map(|(_, n)| *n).sum();
+    let (stops, holds_refused) = (p.authority.named_stop_records().len(), p.authority.call_holds_refused());
+    for _ in 0..2 {
+        let v = forward_from(g.ctx(), p.a.node_id(), &revoking).await;
+        assert_eq!(v["class"], "stopped", "a repeat is answered from what the provider holds: {v}");
+    }
+    assert_eq!(p.authority.named_stop_records().len(), stops, "no stop record added by a repeat");
+    assert_eq!(of_term(&p), 1);
+    assert_eq!(p.authority.call_holds_refused(), holds_refused, "no hold refused by a repeat");
+    assert_eq!(p.ctx().call_issuer.cancel_forwards_refused.pin().iter().map(|(_, n)| *n).sum::<u64>(), refused_before, "no repeat refused");
+    assert_eq!(p.authority.running_count(), 0);
+    let reply = tokio::time::timeout(Duration::from_secs(10), answered).await.expect("the client is answered").unwrap();
+    assert!(reply.to_string().contains("cancelled"), "{reply}");
+    assert_eq!(p.finished.load(Ordering::SeqCst), 0, "the tool never finished");
+    drop(held);
+    g.a.shutdown().await;
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **§9 O13: no cancel-forward is re-sent past the call's window, or once the gateway is shutting down.** Every send of
+/// the gateway's is dropped (`DROP_FIRST_SENDS` at `u32::MAX`), so no attempt is ever answered. With a 2 s window, a
+/// call minted for the provider and cancelled: the receipt is `DeliveryUnknown` (never a negative), the attempts stop
+/// before the gateway reads the window as ended, the forward ends `unanswered`, and nothing is sent after. Then a second
+/// call, cancelled, and the gateway shut down once two attempts have gone: the shutdown is not held by the forward,
+/// and no attempt is sent once it has begun. Seen failing first with the window test planted out of `forward` (attempts
+/// sent past the window's end) and, separately, with the shutdown arms planted out (attempts sent while the shutdown
+/// drained its tasks, and the shutdown held until it aborted them).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_cancel_forward_is_sent_past_the_calls_window_or_after_shutdown() {
+    let (g, p, cert_dir) = pair(Opts { mint: true, ttl_secs: Some(2), ..Opts::default() }).await;
+    let g = Arc::new(g);
+    let node = g.a.node_id().to_string();
+    call_cancel::test_hooks::DROP_FIRST_SENDS.pin().insert(node.clone(), Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX)));
+    let last = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    call_cancel::test_hooks::LAST_ATTEMPT_AT.pin().insert(node.clone(), Arc::clone(&last));
+    let attempts = || forwards(&g)["attempts"].as_u64().unwrap_or(0);
+
+    // The window.
+    let (_, term) = g.framed(p.a.node_id(), "quick").await;
+    let window_end = call_issuer::test_hooks::window_end_ms(g.ctx(), &term).expect("held as issued");
+    let asked_ms = g.now();
+    let receipt = tokio::time::timeout(Duration::from_secs(20), g.a.cancel_call(&term)).await.expect("the cancel is answered").expect("recorded");
+    assert_eq!(receipt.class, CancelClass::DeliveryUnknown, "no attempt answered: not a negative: {receipt:?}");
+    assert!(until(|| forwards(&g)["unanswered"].as_u64() == Some(1), Duration::from_secs(30)).await, "the forward ended unanswered: {}", forwards(&g));
+    let sent = attempts();
+    let last_at = last.load(Ordering::SeqCst);
+    assert!(last_at < window_end, "the last attempt ({last_at}) was sent before the window's end ({window_end})");
+    let most = 2 + window_end.saturating_sub(asked_ms) / call_cancel::CANCEL_FORWARD_RETRY_MS;
+    assert!((2..=most).contains(&sent), "{sent} attempts between the cancel and the window's end ({most} at most)");
+    tokio::time::sleep(Duration::from_millis(2 * call_cancel::CANCEL_FORWARD_RETRY_MS + 500)).await;
+    assert_eq!(attempts(), sent, "nothing is sent once the forward has ended");
+
+    // The shutdown.
+    let (_, term) = g.framed(p.a.node_id(), "quick").await;
+    let (g2, t2) = (Arc::clone(&g), term.clone());
+    let cancel = tokio::spawn(async move { g2.a.cancel_call(&t2).await });
+    assert!(until(|| attempts() >= sent + 2, Duration::from_secs(10)).await, "the second forward re-sent");
+    let before = attempts();
+    let began = std::time::Instant::now();
+    g.a.shutdown().await;
+    let took = began.elapsed();
+    let after = attempts();
+    tokio::time::sleep(Duration::from_millis(2 * call_cancel::CANCEL_FORWARD_RETRY_MS + 500)).await;
+    assert_eq!(attempts(), after, "nothing is sent after the shutdown");
+    // One attempt may leave in the shutdown's first 250 ms, before its signal (the outbound flush); none after it.
+    assert!(after <= before + 1, "{} attempts sent while the gateway shut down", after - before);
+    assert!(took < Duration::from_secs(4), "the shutdown was not held by the forward: {took:?}");
+    let _ = tokio::time::timeout(Duration::from_secs(10), cancel).await;
+    call_cancel::test_hooks::DROP_FIRST_SENDS.pin().remove(&node);
+    call_cancel::test_hooks::LAST_ATTEMPT_AT.pin().remove(&node);
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}

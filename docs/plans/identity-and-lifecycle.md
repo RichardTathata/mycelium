@@ -3856,7 +3856,7 @@ Items found while building a row that the row does not own. Each names its home,
       `a_call_that_completes_while_its_cancel_is_recorded_is_answered_completed_and_its_result_kept` (the reviewer's
       probe: write held, forward suppressed, the skill completing in 2 s), seen failing with the first fix planted
       back (`canceled`, `tasks/get` `-32001`); the stop's-answer case stays pinned by the door and NotDurable tests.
-    - **Found by #821's CI (2026-11-21), not O10's and not fixed — the forward's place on the connection:** a cancel-forward travels on the same connection as the gateway's gossip and is delivered in order behind it. Behind a burst of *gossiped* writes the provider's stop waits for the frames ahead of it to be received and applied: on the CI's Linux runner (debug) 15 718 plain writes held it 24 s; here, with the burst gossiped, the stop came 2.04 s after the cancel, as the provider had applied 12 550 of the 15 718 burst keys, and with the same burst on the gateway's WAL alone, in 13 ms. The provider in that test has no `[persistence]`, so this is connection order, not a WAL sync. O10's tests therefore load the gateway's WAL alone; the collector's tombstones and an application's writes are gossiped, so the end-to-end stop behind such a burst also waits on the connection. A candidate row of its own for the maintainer (a forward ahead of queued gossip, or on its own path); not built here.
+    - **Found by #821's CI (2026-11-21), not O10's and not fixed — the forward's place on the connection:** a cancel-forward travels on the same connection as the gateway's gossip and is delivered in order behind it. Behind a burst of *gossiped* writes the provider's stop waits for the frames ahead of it to be received and applied: on the CI's Linux runner (debug) 15 718 plain writes held it 24 s; here, with the burst gossiped, the stop came 2.04 s after the cancel, as the provider had applied 12 550 of the 15 718 burst keys, and with the same burst on the gateway's WAL alone, in 13 ms. The provider in that test has no `[persistence]`, so this is connection order, not a WAL sync. O10's tests therefore load the gateway's WAL alone; the collector's tombstones and an application's writes are gossiped, so the end-to-end stop behind such a burst also waits on the connection. A candidate row of its own for the maintainer (a forward ahead of queued gossip, or on its own path); not built here. **It became §9 O13** (below; decided 2026-11-22, where #824's run showed the forward not only delayed but dropped).
     - **Found in the build, not fixed (O11's family):** under `flush` the gateway's connection reader awaits the WAL
       for each inbound record (`apply_inbound_then_append`), so the provider's answer to the forward can wait behind
       the same burst: in the `flush` run the receipt was `DeliveryUnknown` though the call stopped in 160 ms. The rung
@@ -3881,3 +3881,60 @@ Items found while building a row that the row does not own. Each names its home,
   way (`src/agent/journal.rs`). *Evidence it must pass:* `a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog`
   (`src/agent/call_soak_tests.rs`, `#[ignore]`: it fails today — a revocation on disk at about 700 times the quiet
   write behind 1 000 deletes), un-ignored. *Home:* its own plan row, to be written.
+- **O13 · A cancel-forward lost on the gateway's own outbound queues** *(open: the fix decided and built 2026-11-22,
+  to be closed by the mints test passing on #824; O10's candidate row *"a cancel queued behind gossip on one
+  connection"*, found by #821's CI, becomes this item)*.
+  - **Measured on #824** (WAL group commit, which makes the mints fast enough to flood the gateway's gossip): the test
+    `under_the_default_mode_the_providers_stop_beats_the_acknowledgement_behind_concurrent_mints` failed 4 runs of 9;
+    behind about 12 000 concurrent mints the provider's stop came about 25 s after the cancel, the receipt
+    `DeliveryUnknown`. The gateway's own outbound queues drop frames when full, by design: 932 to 2 089 dropped when
+    the forward was emitted, up to about 18 000 by the end; the provider dropped none. The forward is an ordinary
+    best-effort Individual signal on that path (`emit_signal` returned `true`), and the provider got the revocation
+    only when anti-entropy repaired the dropped records (about 25 s; its interval 30 s).
+  - **The hop, pinned by one probe** (2026-11-22, #824's head `a7b64223`, five runs, debug, Apple M2 Max; printing
+    at `dispatch_gossip_try_send`, the shard's dequeue, `run_gossip_shard`'s hand-off to the peer writer, the writer's
+    backoff drop and the provider's `rpc_rx`): in the one failing run (15 851 mints; the stop 26.1 s after the
+    cancel) the shard queue took the forward and **the shard's hand-off to the peer writer dropped it — the writer's
+    channel full** (`ChanVerdict::Full` in `send_to_peer!`, `src/agent/tasks.rs`). In the four passing runs the
+    hand-off took it and the provider received it 0.82 to 1.09 s later, behind the gossip already queued on the
+    connection (the stop 0.99 to 1.32 s after the cancel): delayed, not lost. No drop at the shard queue or in the
+    writer's reconnect backoff.
+  - **The options:** (A) the gateway re-sends the signed revocation on a short bounded interval until the provider
+    answers or the call's window ends, and counts the re-sends; (B) a lane of its own for control signals (a priority
+    queue, or a path past the gossip shards); (C) state the anti-entropy bound as the promise.
+  - **Decided 2026-11-22 (the maintainer): (A).** The gateway keeps its promise — the provider hears of the cancel
+    within bound 1 — by its own effort. (B) is deferred, to be decided later on evidence from the re-send counters.
+    (C) is not taken.
+  - **Built (this row's PR):** `call_cancel::forward` sends an attempt at once and again every
+    `CANCEL_FORWARD_RETRY_MS` (500 ms: four attempts inside *F* = 2 s, ten while the receipt waits) until any attempt is
+    answered; each attempt waits `CANCEL_FORWARD_TIMEOUT_MS` (5 s) for its own answer, so the attempts overlap and a
+    provider still waiting up to 1 s for its work to end is not cut off. Once the receipt is settled the gap doubles
+    from 1 s to `CANCEL_FORWARD_RETRY_CAP_MS` (30 s, the anti-entropy interval's order); `MAX_CANCEL_FORWARD_ATTEMPTS`
+    = 24 reaches about 305 s, past the default 300 s window. No attempt after the first is sent once the gateway reads
+    the call's window as ended (`valid_until_ms` + 2·skew, `reassert`'s test), and the forward stops at once, its
+    attempts dropped, when the node begins to shut down. Timers through `sim_seam` (`sleep_ms`, `mono_instant`).
+    **The caller's promise is unchanged:** the receipt is the first answer within 5 s, else `DeliveryUnknown`, never a
+    negative; an answer after that is counted (`answered_after_receipt`) and the receipt stands. Counted: `GET /stats`
+    `call_cancel_forwards` (`attempts`, `retries`, `answered_first`, `answered_on_retry`, `answered_after_receipt`,
+    `unanswered`); `mycelium_gateway_call_cancel_forward_attempts_total{attempt}`,
+    `mycelium_gateway_call_cancel_forwards_total{outcome}`. **Enumerated** (`git grep -n "CANCEL_RPC_KIND\|forward(&\|cancel_at_door(\|call_cancel::cancel(\|fn cancel_call\|revoke_call(\|cancel_mcp_call(\|call_issuer::revoke(" -- src`): `forward` has two callers, `cancel` (`GossipAgent::cancel_call`) and `cancel_at_door` (A2A `tasks/cancel`; MCP `notifications/cancelled` through `cancel_mcp_call`), both on the retry; `cancelled_before_sent`, `call_issuer::revoke` and `revoke_call` send nothing. The test helper `forward_from` sends the kind directly, once.
+  - **Replays are harmless:** a repeat is the same signed checkpoint; `hold_call_revocation` finds the window held
+    (`registered` unchanged), the offer is idempotent, and the answer is read from what the provider holds (the stop
+    record: `stopped`). `a_repeated_cancel_forward_is_answered_from_what_the_provider_holds_and_changes_nothing`.
+  - **What it does not change:** a forward that is delayed, not dropped — queued in order behind the connection's
+    gossip (the four passing probe runs, about 1 s; #821's CI, 24 s behind 15 718 gossiped writes) — is not made
+    faster: a re-send queues behind the same frames. Only (B) would. The re-send counters say how often each happens:
+    `answered_on_retry` and `answered_after_receipt` count forwards whose first attempt (or its answer) was lost or
+    slower; a provider that waits for its work to end draws re-sends with nothing lost, so `retries` alone overstates.
+  - **Evidence** (`src/agent/call_cancel_tests.rs`, CI's strict `compliance,a2a` line):
+    `a_cancel_forward_whose_first_sends_are_dropped_is_sent_again_and_stops_the_call_inside_bound_1`,
+    `a_repeated_cancel_forward_is_answered_from_what_the_provider_holds_and_changes_nothing`,
+    `no_cancel_forward_is_sent_past_the_calls_window_or_after_shutdown`, and the schedule's unit test
+    `the_resend_schedule_fits_bound_1_and_ends_past_the_default_window` (`src/agent/call_cancel.rs`). **Seen failing
+    first:** with `MAX_CANCEL_FORWARD_ATTEMPTS` planted to 1 (one send, as main does), the dropped-sends test (*"the
+    call stopped at the provider while the revoke write was held"*: one attempt, unanswered) and the repeat test (the
+    receipt `DeliveryUnknown`); with the window test planted out of `forward`, the bound test (14 attempts, the forward
+    never ending); with the shutdown arms planted out, the bound test (*"3 attempts sent while the gateway shut
+    down"*). Restored by copy and `touch`; all four pass, and `agent::call_cancel` passed five runs of five (32 tests).
+  - **To close it:** the mints test re-run on #824 after this merges, passing as often as it is run; the figures on the
+    [ledger](../operations/what-is-proven.md#call-cancel-forward-resent).

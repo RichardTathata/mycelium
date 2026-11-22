@@ -227,6 +227,8 @@ pub(crate) struct CallIssuer {
     pub(crate) cancel_receipts: papaya::HashMap<&'static str, u64>,
     /// I4, PR 3: cancel-forwards this node refused as a provider, by reason (`cancel_not_from_issuer`, …).
     pub(crate) cancel_forwards_refused: papaya::HashMap<&'static str, u64>,
+    /// §9 O13: this gateway's cancel-forward attempts and how each forward ended (`GET /stats` `call_cancel_forwards`).
+    pub(crate) cancel_forwards: super::call_cancel::ForwardStats,
     /// I4, PR 3: the `/mcp` door's id → term table for `notifications/cancelled`, and its counters.
     pub(crate) mcp_cancels: super::call_cancel::McpCancels,
 }
@@ -410,6 +412,9 @@ pub(crate) struct PendingRevoke {
     pub(crate) checkpoint: SignedRevocationCheckpoint,
     /// The provider the call was sent to, if this process knows it.
     pub(crate) target: Option<NodeId>,
+    /// When this gateway reads the call's window as ended (`hlc.decision_now_ms()`): its `valid_until_ms` and twice the
+    /// skew, the same past-its-window test as [`reassert`]'s. The cancel-forward is not re-sent past it.
+    pub(crate) window_end_ms: u64,
     /// Its sequence, and whether this process has written it durably already (then [`finish_revoke`] writes nothing).
     seq: u64,
     on_disk: bool,
@@ -473,7 +478,8 @@ pub(crate) fn begin_revoke(ctx: &TaskCtx, term: &str) -> Result<PendingRevoke, R
     // process's own record of its durable writes decides it (#794's review, K1): the KV may hold the revoking
     // checkpoint because the re-assertion wrote it without an fsync.
     let on_disk = revoking.durable_seq >= revoking.seq;
-    Ok(PendingRevoke { term: term.to_string(), checkpoint: signed, target: revoking.target, seq: revoking.seq, on_disk })
+    let window_end_ms = revoking.until_ms.saturating_add(2 * skew_ms(ctx));
+    Ok(PendingRevoke { term: term.to_string(), checkpoint: signed, target: revoking.target, window_end_ms, seq: revoking.seq, on_disk })
 }
 
 /// **The revoke's second step: the revoking checkpoint on disk** — the WAL's required-sync write, which applies it to
@@ -809,6 +815,11 @@ pub(crate) mod test_hooks {
             HOLD_REVOKE_WRITE.pin().remove(&self.node);
             self.gate.permits.close();
         }
+    }
+    /// §9 O13: when this gateway reads `term`'s window as ended — what [`PendingRevoke::window_end_ms`] carries.
+    #[cfg_attr(not(feature = "compliance"), allow(dead_code))] // read by `call_cancel_tests`
+    pub(crate) fn window_end_ms(ctx: &super::TaskCtx, term: &str) -> Option<u64> {
+        ctx.call_issuer.issued.pin().get(term).map(|i| i.until_ms.saturating_add(2 * super::skew_ms(ctx)))
     }
     /// Hold `node`'s revoke writes at a gate until it is released or dropped.
     #[cfg_attr(not(feature = "compliance"), allow(dead_code))] // read by `call_cancel_tests`

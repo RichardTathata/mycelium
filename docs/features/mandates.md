@@ -79,6 +79,18 @@ work.
   `CancelReceipt` whose class is the provider's own answer — `Stopped` only where the agent doing the work promised
   to stop and it ended, `Unbounded` where it made no such promise, `DeliveryUnknown` for no answer (never a
   negative). Tests: [`src/agent/call_cancel_tests.rs`](../../src/agent/call_cancel_tests.rs).
+- **An unanswered cancel-forward is sent again** (identity-and-lifecycle §9 O13, the maintainer's decision of
+  2026-11-22): the forward is a best-effort signal on the gateway's outbound queues, which drop a frame when full, so
+  the gateway re-sends the same signed checkpoint every 500 ms (`CANCEL_FORWARD_RETRY_MS`; four attempts inside
+  *F* = 2 s) until the provider answers, then on a back-off from 1 s to 30 s, at most 24 attempts
+  (`MAX_CANCEL_FORWARD_ATTEMPTS`), never past the call's window and never once the node is shutting down. The
+  provider holds a repeat idempotently and answers it from what it holds. **What the caller is answered is
+  unchanged:** the receipt is the first answer within 5 s (`CANCEL_FORWARD_TIMEOUT_MS`), else `DeliveryUnknown`; an
+  answer after that is counted, not reported. `GET /stats` `call_cancel_forwards` (`attempts`, `retries`,
+  `answered_first`, `answered_on_retry`, `answered_after_receipt`, `unanswered`) and two counters
+  ([metrics](../operations/metrics.md#contracts-axis--receipts-control-envelope-authorisation)) are the evidence on
+  which a lane of its own for control signals is to be decided
+  ([ledger](../operations/what-is-proven.md#call-cancel-forward-resent)).
 - **Not built, for the `call:` mandate:** a receipt on the A2A or MCP wire (by decision, Q2: the doors answer what
   the gateway did); after a gateway restart, the gateway re-asserts nothing and forwards nothing for the calls it
   minted before (`NotForwarded`: the KV carries the cancel). The authority's half and the provider's admission are
