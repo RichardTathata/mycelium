@@ -435,6 +435,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   through `/gateway/kv` uses the namespace's own route (§99's table). **Not changed:** the log read routes still read
   a stream under `cn/`, `wiki/` or `reason/` with `consensus:read` (closed by the entry above, §101); public `/stats` still counts every live key
   (`store_entries`), the hidden namespaces' included.
+- **`url` 2.5.8 → 2.5.9**, with `form_urlencoded` 1.2.2 → 1.2.3, which `url` 2.5.9 requires (RUSTSEC-2026-0592,
+  GHSA-hrj5-67jp-wqp9, published 2026-11-22; affected `<= 2.5.8`, fixed in 2.5.9). In 2.5.8, `Url::origin()` of a
+  `blob:` URL parses the path as a URL and calls itself on it, one stack frame for each `blob:` prefix, so a URL of
+  some ten thousand nested prefixes, which `Url::parse` accepts, overflows a thread's stack and aborts the process
+  (`catch_unwind` does not catch it). The affected functions are `Url::origin` and `url::quirks::origin`; parsing
+  alone is not affected. **Check whether you are affected:** no. **Not reachable in Mycelium:** no crate in the
+  workspace calls `origin()` on a URL (`grep -rn '\.origin(' --include='*.rs' .` finds nothing, examples, tests and
+  fuzz targets included) or `url::quirks`. Mycelium's own URL parsing — the egress allow-list
+  (`src/capability_config.rs`), the loopback and credential-host checks (`mycelium-core/src/config.rs`), the OIDC
+  exchange endpoint (`src/agent/oidc_exchange.rs`), the developer-consent base URL (`src/dev_consent.rs`), the wasm
+  host's activation egress and object-store source (`mycelium-wasm-host/src/activation_egress.rs`,
+  `object_store_source.rs`) — reads `host()`, `host_str()`, the scheme and the port, never the origin. The other
+  crates in the tree that depend on `url` call neither function either: `reqwest` 0.12.28 and 0.13.5 (a redirect
+  compares `host_str()` and `port_or_known_default()`, `src/redirect.rs`; its one `blob:` branch, in `into_url.rs`,
+  is compiled for `wasm32` only and calls no `origin()`), `tower-http` 0.6.11 (`follow_redirect` parses and joins),
+  `object_store` 0.14.2 and `wasmtime-wasi` 49.0.7. The bump is here because the affected version was linked and
+  CI's audit was failing every PR. **Affected releases:** every tagged release locks `url` 2.5.8, v2.40.1 and v2.40.0
+  included; none reaches the defect. **The fix is on `main`, unreleased.** A lockfile change only, in all three tracked
+  lockfiles: the version and checksum lines of `url` and `form_urlencoded`, nothing else, except in `fuzz/Cargo.lock`,
+  which also gains the `rustix` edges of `mycelium` and `mycelium-core` that their manifests have declared since
+  I7's PR 3a (#813, under `tls`) and that lockfile never recorded (`cargo metadata --locked` refused it before, and
+  accepts it now). No API change.
+  **Check:** `grep -A1 '^name = "url"$' Cargo.lock` shows `2.5.9`, and `cargo audit --deny warnings -f Cargo.lock`
+  (with the ignores CI's `audit` job names) no longer reports RUSTSEC-2026-0592.
 
 ### Added
 
