@@ -29,8 +29,9 @@ docker run --rm -p 8080:8080/tcp -p 8080:8080/udp -p 8300:8300 \
 ```
 
 where `node.toml` sets `bind_address = "0.0.0.0"`, `http_port = 8300`, `http_addr = "0.0.0.0"` and a token table.
-Linux binaries need glibc 2.36+ and `libssl3`. The sums are integrity, not provenance — nothing signs the binaries
-yet ([what-is-proven](what-is-proven.md)).
+Linux binaries need glibc 2.36+ and `libssl3`. From the first tag after security-operations SO3 each tarball, the
+sums and the image carry a verified build-provenance attestation; check it with `gh attestation verify`
+([installation § The published node](../guide/installation.md#the-published-node); [what-is-proven](what-is-proven.md#binary-provenance)).
 
 ## The minimum
 

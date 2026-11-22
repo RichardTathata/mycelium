@@ -207,6 +207,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **Release assets carry build provenance, verified before they are attached** (security-operations SO3;
+  [published node](docs/features/published-node.md); `RELEASING.md` § 8). The release workflow attests the three
+  tarballs, `SHA256SUMS`, the image index and both per-architecture images with GitHub artifact attestations
+  (`actions/attest`: SLSA v1 provenance, Sigstore keyless, the public Rekor log), pushes the image attestations to
+  ghcr.io and attaches the Sigstore bundles to the Release. Every attestation is verified in the workflow
+  (`scripts/verify-release-attestation.sh`, pinned to the repository, `release.yml`, the run's ref and commit) before
+  anything is uploaded, and `latest` now moves in its own step, by digest, only after the image verifies. Permissions
+  are per job (signing only in the two jobs that sign; nothing at the workflow's level), every action in
+  `release.yml` is pinned by commit SHA, and `scripts/check-release-workflow.py` (in `make check` and CI) fails an
+  upload or a move of `latest` not preceded by its verification. A dry run — a pull request from a branch of this
+  repository, or a dispatch — attests and verifies the files; the image half first runs at a tag. **Check:**
+  `gh attestation verify mycelium-NEW-linux-x86_64.tar.gz --repo RichardTathata/mycelium --signer-workflow
+  RichardTathata/mycelium/.github/workflows/release.yml --source-ref refs/tags/vNEW` prints a verified result for the
+  first tag cut after this change; v2.40.1 and earlier carry sums only.
+- **The plan for the security-operations rows** ([`docs/plans/security-operations.md`](docs/plans/security-operations.md)):
+  SO1 (SIEM export, planned for the wave 2 MINOR, decisions D1–D8), SO2 (the SDKs' dependency audits) and SO3.
+
 - **A grant decision names what its decider saw, and a rewritten request record is no longer the one decided**
   (identity-and-lifecycle I7-S, PR 1 of 2; #813's review, F1, the rewrite half; `deprecations.md` §123;
   [grants](docs/features/grants.md)). A signed issue or refusal names the request record's tool, resource,

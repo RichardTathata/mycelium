@@ -176,14 +176,20 @@ re-triggers the workflow on the corrected ref.
 **Pushing the tag starts `.github/workflows/release.yml`** (adopter-surface X0). It refuses a tag whose version differs
 from `Cargo.toml`'s (step 4 before step 7), builds the three binaries for Linux x86_64 and aarch64 and macOS aarch64,
 smokes each Linux tarball in a clean container with no toolchain (`mycelium --version` must print the tag's version),
-attaches the tarballs and `SHA256SUMS` to the tag's Release — **creating the Release from the annotated tag's message
-if step 8 has not run yet** — and pushes `ghcr.io/richardtathata/mycelium:NEW` (the image tag has no `v`) and
-`:latest`. Watch it:
+**attests each tarball, `SHA256SUMS`, the image index and both per-architecture images** (GitHub artifact attestations:
+Sigstore keyless, SLSA v1 provenance, in the public Rekor log; security-operations SO3) and **verifies every
+attestation before it attaches anything or moves `latest`**, attaches the tarballs, `SHA256SUMS` and the Sigstore
+bundles to the tag's Release — **creating the Release from the annotated tag's message if step 8 has not run yet** —
+and pushes `ghcr.io/richardtathata/mycelium:NEW` (the image tag has no `v`), then `:latest` once the image verifies.
+Watch it:
 `gh run watch "$(gh run list --workflow release.yml --event push --limit 1 --json databaseId --jq '.[0].databaseId')"`
 (`--event push`: the workflow also dry-runs on pull requests, and `--limit 1` without it returns one of those). A red
 run means no artefacts and no image for this tag; fix and **re-run all jobs** on the same tag (it uploads with
 `--clobber`; a *re-run failed jobs* after one Linux arch failed leaves the other arch's untagged image in ghcr and a
-Release with no assets until the full re-run). Note that `--latest`, on the Release and on the image tag, is
+Release with no assets until the full re-run). A full re-run attests the rebuilt files again; an earlier run's
+attestation stays in the transparency log and names a digest no longer attached, which is harmless. **A red
+verification step** (`Verify each file's attestation`, `Verify each image's attestation`) means nothing was attached
+and `latest` did not move; do not attach by hand — see § 8, *If verification fails*. Note that `--latest`, on the Release and on the image tag, is
 unconditional: a patch cut from an older line after a newer MINOR relabels both — cut such a patch knowing that, or
 re-point `latest` by hand afterwards.
 
@@ -210,8 +216,8 @@ The **annotated tag message is the release body** — it was written for this, a
 release was cut, and re-summarising it later produces a second account that can drift from the
 first. Since X0 the workflow creates the Release itself when this step has not, from the same tag message, so
 running this step after the workflow answers *release already exists*; then this step is only the check that the
-assets are attached: `gh release view vNEW --json assets --jq '.assets[].name'` must list three tarballs and
-`SHA256SUMS`. **The image's visibility:** a package created by a workflow's `GITHUB_TOKEN` inherits the visibility and
+assets are attached: `gh release view vNEW --json assets --jq '.assets[].name'` must list three tarballs,
+`SHA256SUMS`, `mycelium-NEW.sigstore.json` and the three `mycelium-NEW-image-{amd64,arm64,index}.sigstore.json`. **The image's visibility:** a package created by a workflow's `GITHUB_TOKEN` inherits the visibility and
 permissions model of the repository the workflow runs in (GitHub's *Publishing and installing a package with GitHub
 Actions*), so the package created on v2.37.0's push is public, as this repository is; the image's
 `org.opencontainers.image.source` label links it to the repository but, per the same documentation, carries
@@ -221,6 +227,60 @@ denied, open the package's settings on GitHub and set it public. **Also check th
 tag's:** `gh release view vNEW --json name --jq .name` must print the tag's subject, not the squash commit's — the
 first run got the commit's because the checkout peeled the tag, since fixed by fetching the tag object. `--verify-tag` refuses if the tag is not on the remote, which catches the "tagged but never
 pushed" mistake.
+
+**Check the provenance as an operator would** (security-operations SO3), from a shell that has not used this
+repository's credentials — `gh` needs to be logged in to some account to query the attestations API, but no
+permission on the repository:
+
+```bash
+NEW=2.41.0; REPO=RichardTathata/mycelium; IMAGE=ghcr.io/richardtathata/mycelium
+gh release download "v$NEW" --repo "$REPO" --pattern "mycelium-$NEW-linux-x86_64.tar.gz" --pattern SHA256SUMS \
+  --pattern "mycelium-$NEW.sigstore.json" --pattern "mycelium-$NEW-image-index.sigstore.json"
+sha256sum -c --ignore-missing SHA256SUMS
+gh attestation verify "mycelium-$NEW-linux-x86_64.tar.gz" --repo "$REPO" \
+  --signer-workflow "$REPO/.github/workflows/release.yml" --source-ref "refs/tags/v$NEW" --deny-self-hosted-runners
+gh attestation verify SHA256SUMS --repo "$REPO" \
+  --signer-workflow "$REPO/.github/workflows/release.yml" --source-ref "refs/tags/v$NEW"
+gh attestation verify "oci://$IMAGE:$NEW" --repo "$REPO" \
+  --signer-workflow "$REPO/.github/workflows/release.yml" --source-ref "refs/tags/v$NEW"
+# Offline, from the bundles the Release carries (fetch the trusted root once, online: gh attestation trusted-root):
+gh attestation trusted-root > trusted_root.jsonl
+gh attestation verify "mycelium-$NEW-linux-x86_64.tar.gz" --repo "$REPO" --source-ref "refs/tags/v$NEW" \
+  --bundle "mycelium-$NEW.sigstore.json" --custom-trusted-root trusted_root.jsonl
+```
+
+Each must print a verified result naming `release.yml@refs/tags/vNEW`; `--source-ref` is what refuses a dry run's
+attestation (it names `refs/pull/N/merge` or `refs/heads/main`). **Without `gh`**, cosign (v3) checks the same
+bundle against the public-good Sigstore root:
+
+```bash
+cosign verify-blob-attestation --bundle "mycelium-$NEW.sigstore.json" --type https://slsa.dev/provenance/v1 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity "https://github.com/$REPO/.github/workflows/release.yml@refs/tags/v$NEW" \
+  "mycelium-$NEW-linux-x86_64.tar.gz"
+# The image, by digest, from its attached bundle (the digest without its sha256: prefix):
+digest=$(docker buildx imagetools inspect "$IMAGE:$NEW" --format '{{json .Manifest}}' | jq -r .digest)
+cosign verify-blob-attestation --bundle "mycelium-$NEW-image-index.sigstore.json" --type https://slsa.dev/provenance/v1 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity "https://github.com/$REPO/.github/workflows/release.yml@refs/tags/v$NEW" \
+  --digest "${digest#sha256:}" --digestAlg sha256
+```
+
+`cosign verify-attestation --type slsaprovenance1 --certificate-oidc-issuer … --certificate-identity … "$IMAGE@$digest"`
+reads the attestation from the registry instead; the two `verify-blob-attestation` forms are the ones checked
+against a real GitHub bundle when SO3 was written (2026-11-22, cosign v3.1.4). A security release's first paragraph
+may cite the `gh attestation verify` line as the reader's check.
+
+**If verification fails.** In the workflow, a failed verification stops the run before anything is attached and
+before `latest` moves; the image may already carry the `:NEW` tag (it is created so it can be attested). Do not attach
+assets by hand or move `latest` by hand: an unverified asset on the Releases page is exactly what this step exists to
+prevent. Read the step's log — it names the file and the pin that failed. A transient Sigstore, Rekor or GitHub API
+error is fixed by **re-running all jobs**; a failure that persists is a release blocker: delete the `:NEW` image tag
+(the package's settings on GitHub) so no one pulls an unverified image, leave the Release without assets, and open an
+issue. **After publishing**, an operator's verification that fails on an attached asset — or a verified result naming
+any ref other than `refs/tags/vNEW`, or any workflow other than `release.yml` — is a security incident: take the
+asset down (`gh release delete-asset vNEW <name>`), move `latest` back to the previous verified tag, and follow
+[`SECURITY.md`](SECURITY.md).
 
 > **`--notes-from-tag` is silently incompatible with `--repo`.** Together they print a usage error
 > and exit 1 — and in a `for` loop over tags that reads as *no output*, which looks exactly like

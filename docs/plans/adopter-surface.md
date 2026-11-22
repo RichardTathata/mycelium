@@ -183,7 +183,8 @@ artefact becomes the path, the toolchain the fallback).
 - the `one-hour` job's first step is this download, timed.
 
 **Not built, stated:** no signing of the binaries (Sigstore or GPG) — the sums are integrity, not provenance, and the
-page says so; no Windows build; no package-manager formula.
+page says so; no Windows build; no package-manager formula. *(2026-11-22: signing is now
+[security-operations SO3](security-operations.md#so3) — attestations verified before upload.)*
 
 ### X1 · `mycelium doctor` — the readiness report without a node
 

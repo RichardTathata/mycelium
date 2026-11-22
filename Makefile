@@ -195,6 +195,8 @@ check:
 	./scripts/check-sim-seams.sh                                # no new nondeterminism outside the seams
 	./scripts/check-release-blockers.sh                         # a release blocker the tree states (warns; --release fails, RELEASING.md § 2)
 	./scripts/check-release-blockers.sh --self-test             # …and it refuses a planted blocker, passes a clear one
+	./scripts/with-pyyaml.sh scripts/check-release-workflow.py  # the release workflow verifies each attestation before it uploads or moves latest; actions pinned (SO3)
+	./scripts/with-pyyaml.sh scripts/check-release-workflow.py --self-test  # …and each planted reordering, unpinned action or unverified asset fails it
 	./scripts/test-check-sim-seams.sh                           # …and it sees every timer-alias spelling (planted files)
 	./scripts/with-pyyaml.sh scripts/check-test-inventory.py    # every test requirement runs in some CI step, with its features (verification policy rule 3)
 	./scripts/with-pyyaml.sh scripts/test-check-test-inventory.py  # …and the check catches every bypass a review found

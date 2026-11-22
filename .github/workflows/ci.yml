@@ -264,6 +264,11 @@ jobs:
       # a warning here, an error on the release workflow's tag push; and the self-test that it refuses a planted one.
       - run: ./scripts/check-release-blockers.sh
       - run: ./scripts/check-release-blockers.sh --self-test
+      # Security-operations SO3: release.yml verifies every attestation before it uploads an asset or moves `latest`,
+      # uploads only what its verification covers, grants signing only to the jobs that sign, and pins every action
+      # by commit SHA; the self-test plants each fault and requires the check to name it.
+      - run: ./scripts/with-pyyaml.sh scripts/check-release-workflow.py
+      - run: ./scripts/with-pyyaml.sh scripts/check-release-workflow.py --self-test
       - run: ./scripts/check-wiki-mutation-fence.sh
       # Post-360 plan row F: every locally-originated KV write leaves through `make_kv_wire_msg`, so a
       # TLS node signs it — a bare `Data` frame at a write site would be refused by a fleet that

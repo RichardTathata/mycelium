@@ -36,22 +36,24 @@ is, what adopting it would buy, what it would cost or risk, its state, and what 
 
 ### W1. Build provenance for the node and its capabilities
 
-- **State:** `plan` (no plan row yet).
+- **State:** `plan`, with its plan row: [security-operations SO3](security-operations.md#so3)
+  (built 2026-11-22; `adopted` once the first `v*` tag's run attests and verifies).
 - **Upstream:** GitHub artifact attestations, SLSA build provenance
   ([docs](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations), available
   now); Cargo's SBOM precursor, `-Zsbom`, unstable
   ([Cargo unstable features](https://doc.rust-lang.org/cargo/reference/unstable.html)); the crates.io
   registry-hardening goal (verifiable mirroring, quarantine), *unverified* end date, see the
   [Rust project goals](https://rust-lang.github.io/rust-project-goals/).
-- **Where Mycelium is:** `.github/workflows/release.yml:15` publishes `SHA256SUMS` and says *the sums are integrity,
-  not provenance*. `cargo audit` runs over every tracked lockfile (`ci.yml`, job `audit`). On the capability side, the
+- **Where Mycelium is:** `.github/workflows/release.yml` publishes `SHA256SUMS` and, since SO3, attests each tarball,
+  the sums and the image, verifying every attestation before upload (`scripts/verify-release-attestation.sh`). `cargo audit` runs over every tracked lockfile (`ci.yml`, job `audit`). On the capability side, the
   artifact library already has signed manifests, fuel by publisher (D19) and proposed → shadow → accept (D20).
 - **What it buys:** a customer can check what produced the binary or image they run, from which commit, with which
   dependencies, and (for a capability) which approval admitted it. It makes the customer-control claim checkable.
 - **Cost and risk:** low for attestations on the release binaries and the `ghcr.io` image. Linking an installed
   capability to its build record is design work in the artifact library.
-- **Next:** a plan row (attestations on every `v*` tag, verified in the release runbook); link it here, then
-  `adopted` with its PR.
+- **Next:** `adopted`, citing SO3's PR, when the first `v*` tag after it attests every asset and verifies it
+  (`gh attestation verify`, RELEASING.md § 8). The capability half (linking an installed capability to its build
+  record) stays open as artifact-library design work.
 
 ### W2. The official Rust MCP SDK (`rmcp`)
 
@@ -242,3 +244,4 @@ is, what adopting it would buy, what it would cost or risk, its state, and what 
 | 2026-11-19 | Claude | **W4:** wasmtime 49.0.5 → 49.0.7 for RUSTSEC-2026-0566 to -0573 (eight advisories of 2026-11-16, which CI's audit was failing on); none reachable through the host as configured; on `main`, unreleased. No state change. |
 | 2026-11-21 | Claude | **W4:** the wasmtime 49.0.7 bump shipped in v2.40.1; the count is nine, not eight — it also fixes RUSTSEC-2026-0587 (`wasmtime-wasi`, Windows only, 2026-11-19), not reachable: no published binary is built for Windows and the host preopens no directory. No state change. |
 | 2026-11-22 | Claude | No row: `url` 2.5.8 → 2.5.9 for RUSTSEC-2026-0592 (`Url::origin()` recursion on nested `blob:` URLs, published 2026-11-22, which CI's audit was failing on), a security bump that rule 5 leaves to the audit job; not reachable (no crate in the tree calls `Url::origin` or `url::quirks::origin`; CHANGELOG, Unreleased, Security); on `main`, unreleased. No state change. |
+| 2026-11-22 | maintainer + Claude | **W1:** `plan` now has its row, [security-operations SO3](security-operations.md) (release attestations, verified in the workflow before upload; D10). Built in SO3's PR; `adopted` at the first attested tag. |

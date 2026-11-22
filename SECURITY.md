@@ -33,6 +33,7 @@ If a timeline cannot be met we will notify you promptly and explain why.
 - Wire protocol security (framing, TLS handshake, Ed25519 signing)
 - Authentication and authorisation in the HTTP gateway
 - Cryptographic primitives (key generation, signing, verification)
+- The release workflow and its build provenance (`.github/workflows/release.yml`)
 
 **Out of scope:**
 - Demo credentials in `examples/` (e.g., `postgresql://pipeline:pipeline@...` in the
@@ -40,6 +41,23 @@ If a timeline cannot be met we will notify you promptly and explain why.
 - Vulnerabilities in third-party dependencies (report those upstream; we will pull fixes
   into Mycelium promptly when they are available)
 - Denial-of-service via resource exhaustion in a test/dev cluster
+
+## Verifying a release
+
+From the first tag cut after security-operations SO3, every release tarball, `SHA256SUMS` and the container image
+carry a GitHub artifact attestation (SLSA v1 build provenance, signed keyless through Sigstore and logged in the public
+Rekor log), which the release workflow verified before it attached the file:
+
+```bash
+gh attestation verify mycelium-NEW-linux-x86_64.tar.gz --repo RichardTathata/mycelium \
+  --signer-workflow RichardTathata/mycelium/.github/workflows/release.yml --source-ref refs/tags/vNEW
+gh attestation verify oci://ghcr.io/richardtathata/mycelium:NEW --repo RichardTathata/mycelium \
+  --signer-workflow RichardTathata/mycelium/.github/workflows/release.yml --source-ref refs/tags/vNEW
+```
+
+The offline and `cosign` forms are in [`RELEASING.md` § 8](RELEASING.md#8-publish-the-github-release). A release asset
+that fails verification, or that verifies as built by any workflow other than `release.yml` or from any ref other than
+its `refs/tags/v…` tag, is a vulnerability: report it as above.
 
 ## Credit
 
