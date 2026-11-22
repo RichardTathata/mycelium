@@ -43,6 +43,6 @@ Pages: `.github/workflows/release.yml`, `RELEASING.md` § 7–8, `SECURITY.md`, 
   (conditions, `continue-on-error`, `|| true`, comments, continuation lines, other jobs, triggers, reusable workflows,
   third-party actions, curl). Rule: in a release workflow, check what is allowed, not what is forbidden.
 - `:NEW` is now set after verification (F4: a `sha-<commit>` staging tag first); a tag must be on `main` or `release-*`
-  and still point at `GITHUB_SHA` (F6 — the tag ruleset is the maintainer's, open); the upload set is exactly eight
+  and still point at `GITHUB_SHA` (F6 — and the maintainer's tag ruleset `release-tags`, active 2026-11-22, limits `v*`/`*-v*` tags to the admin role); the upload set is exactly eight
   regular files (F7); checkouts keep no credentials and base images are pinned by digest (F9); `cla.yml`'s action
   pinned (F5).

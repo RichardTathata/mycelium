@@ -190,9 +190,10 @@ and tags `ghcr.io/richardtathata/mycelium:NEW` (the image tag has no `v`), then 
 image verifies (the index first sits under a staging tag, `sha-<commit>`). It publishes only from a **push** of the
 tag, on a commit of `main` or a `release-*` branch; a `workflow_dispatch` is always a dry run, on any ref.
 
-**Open (the maintainer's, a repository setting):** who may push a `v*` tag. The workflow refuses a tag on a commit
-outside `main` and `release-*`, but any writer can still push a tag on such a commit's history; a tag ruleset on
-`v*` restricted to the maintainer closes that (security-operations SO3, #827's review F6). Not set as of 2026-11-22.
+**Who may push a `v*` tag:** the repository's tag ruleset `release-tags` (active since 2026-11-22) restricts creating, updating and deleting `refs/tags/v*` and `refs/tags/*-v*` to the admin role (security-operations SO3, #827's review F6), so a writer without that role cannot
+create or re-point a release tag. The workflow's own checks — the tag's commit on `main` or a `release-*` branch, and
+the tag still at the commit the run built — stay as defence in depth. Pushing a release tag therefore needs the admin
+role; a re-pointed tag (`git push --force origin vNEW`, above) is an update and needs it too.
 Watch it:
 `gh run watch "$(gh run list --workflow release.yml --event push --limit 1 --json databaseId --jq '.[0].databaseId')"`
 (`--event push`: the workflow also dry-runs on pull requests, and `--limit 1` without it returns one of those). A red

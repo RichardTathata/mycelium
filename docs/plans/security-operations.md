@@ -151,8 +151,8 @@ MINOR). Each promise below is quoted next to what delivers it, or written *not b
   Seen failing first: it reports main's workflow before this PR as failing. `verify-release-attestation.sh
   --self-test` plants ten directory faults (symlinks, directories in a bundle's name, dotfiles, extra or missing
   files, a mismatched sum).
-- **Open (the maintainer's, a repository setting, F6):** a tag ruleset on `v*` restricting who may push one. The
-  workflow refuses a tag off `main` and `release-*`, but cannot stop a writer pushing a tag on a commit of either.
+- **Who may push a tag (F6, the repository's half — done by the maintainer, 2026-11-22):** the repository's tag ruleset `release-tags` (active since 2026-11-22) restricts creating, updating and deleting `refs/tags/v*` and `refs/tags/*-v*` to the admin role. The workflow's
+  checks (the commit on `main` or `release-*`, the tag unmoved) stay as defence in depth.
 
 **What a dry run proves, and what only a tag will.** A dry run attests and verifies the real tarballs and
 `SHA256SUMS` exactly as a tag run does, in the same job, and uploads them as a workflow artifact (with the bundle).
