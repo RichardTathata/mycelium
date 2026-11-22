@@ -501,6 +501,12 @@ jobs:
             echo "::notice::v$VERSION is not the highest release tag: $IMAGE:latest is not moved, and a Release this run created is not marked latest"
             exit 0
           fi
+          # Asked again just before the move: a higher tag pushed while this run built leaves latest to its own run.
+          again=$(git ls-remote --tags origin 'refs/tags/v*' | scripts/release-is-latest.py "$VERSION")
+          if [ "$again" != "true" ]; then
+            echo "::notice::a higher release tag appeared during this run: $IMAGE:latest is left to that tag's run"
+            exit 0
+          fi
           docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE@$DIGEST_INDEX"
           got=$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Manifest}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')
           [ "$got" = "$DIGEST_INDEX" ] || { echo "::error::$IMAGE:latest is $got, not the verified $DIGEST_INDEX"; exit 1; }

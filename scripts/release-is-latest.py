@@ -8,8 +8,8 @@ WHY IT EXISTS
   `gh release create --latest=…` and the step that moves `:latest`.
 
 THE RULE
-  The tags considered are the repository's `v<MAJOR>.<MINOR>.<PATCH>` tags, compared as three integers (so 2.10.0 is
-  above 2.9.0). A pre-release (`v2.42.0-rc.1`, any suffix) is not a release this repository cuts (RELEASING.md tags
+  The tags considered are the repository's `v<MAJOR>.<MINOR>.<PATCH>` tags, each a number without leading zeros
+  (`v02.99.0` is not one), compared as three integers (so 2.10.0 is above 2.9.0). A pre-release (`v2.42.0-rc.1`, any suffix) is not a release this repository cuts (RELEASING.md tags
   plain `vX.Y.Z` only) and is ignored, as are the companions' `<name>-vX.Y.Z` tags and anything else. The answer is
   `true` when VERSION is a plain `X.Y.Z` at or above every such tag, `false` otherwise — a pre-release VERSION is
   always `false`. VERSION's own tag must be in the list: a listing that does not hold the tag being published (an
@@ -24,8 +24,9 @@ USAGE
 import re
 import sys
 
-RELEASE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
-PLAIN = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+N = r"(0|[1-9]\d*)"  # a number without leading zeros (semver 2.0.0, item 2)
+RELEASE = re.compile(rf"^v{N}\.{N}\.{N}$")
+PLAIN = re.compile(rf"^{N}\.{N}\.{N}$")
 
 
 def tag_names(text):
@@ -48,7 +49,7 @@ def decide(version, names):
         raise ValueError(f"the tag listing does not hold v{version} ({len(names)} tags); refusing to decide latest from it")
     m = PLAIN.match(version)
     if not m:
-        return False, f"{version} is a pre-release; latest stays where it is"
+        return False, f"{version} is a pre-release or not a plain X.Y.Z; latest stays where it is"
     mine = tuple(int(x) for x in m.groups())
     higher = sorted((tuple(int(x) for x in r.groups()), n) for n in names if (r := RELEASE.match(n)))
     top = higher[-1] if higher else (mine, f"v{version}")
@@ -72,6 +73,8 @@ CASES = [
     ("2.42.0-rc.1", ["v2.41.0", "v2.42.0-rc.1"], False),                      # a pre-release never moves latest
     ("2.41.0", ["v2.41.0", "mycelium-py-v9.9.9", "langgraph-checkpoint-mycelium-v0.3.4"], True),  # companions ignored
     ("2.41.0", ["v2.41.0", "v9", "v2.50", "vnext", "v2.50.0.1"], True),       # malformed tags ignored
+    ("2.41.0", ["v2.41.0", "v02.99.0", "v2.041.0"], True),                   # leading zeros are not a version
+    ("02.41.0", ["v02.41.0"], False),                                         # …nor is a VERSION with one
     ("2.41.0", [], None),                                                     # an empty listing is refused
     ("2.41.0", ["v2.40.0", "v2.42.0"], None),                                 # a listing without the tag is refused
 ]

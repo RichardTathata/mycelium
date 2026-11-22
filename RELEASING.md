@@ -210,7 +210,11 @@ it is not — a patch cut from an older line after a newer MINOR, such as 2.40.2
 with `--latest=false`, `:latest` stays on the newer line, and the `Move latest` step says so in a notice. Pre-release
 tags (`vX.Y.Z-…`) are not a convention here and never count, and a pre-release version never moves `latest`; the
 companions' `<name>-vX.Y.Z` tags are ignored. A listing that does not hold `vNEW` itself fails the step, before the
-Release, rather than reading as "nothing is higher".
+Release, rather than reading as "nothing is higher"; the `Move latest` step asks the remote again just before it
+moves, so a higher tag pushed during the run leaves `latest` to that tag's own run. **A `v*` tag refused or failed
+before its Release must be deleted (`git push origin :refs/tags/vNEW`) or re-run to success:** the answer reads the
+tags, not the Releases, so a higher tag left on the remote with no Release keeps `latest` from moving to every later
+release below it.
 
 ## 8. Publish the GitHub Release
 

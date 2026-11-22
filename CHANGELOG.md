@@ -228,11 +228,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`latest` moves only for the highest version** (security-operations SO3, the maintainer's decision of 2026-11-22;
   `RELEASING.md` § 7). The release workflow asks `scripts/release-is-latest.py` whether the tag is the highest
   `vX.Y.Z` on the remote, by number; a patch cut from an older line after a newer MINOR (2.40.2 after 2.41.0) is now
-  published with `--latest=false` and leaves the image's `:latest` on the newer line, where before both moved to it.
-  Pre-release and companion tags never count. `scripts/check-release-workflow.py` now also holds a verification step
+  published with `--latest=false` and leaves the image's `:latest` on the newer line, where before both moved to it;
+  the answer is asked again just before `:latest` moves. Pre-release, companion and leading-zero tags never count. A
+  `v*` tag refused or failed before its Release must now be deleted or re-run: a higher tag with no Release keeps
+  `latest` from every later release below it (`RELEASING.md` § 7). `scripts/check-release-workflow.py` now also holds a verification step
   to its `cp` and verification lines, the three image verifications to the amd64, arm64 and index digests once each,
-  `buildx build` and any push to `linux`, every `||` to `exit 1`, and no `GITHUB_*`/`GH_*` override in an `env:`
-  (13 of #827's re-review's 15 fresh plants; the other two are listed as known in its docstring). `RELEASING.md` § 8
+  `buildx build` and any push to `linux`, every `||` to `exit 1` (with no other `exit` in the block), publish's
+  refusals to their exact lines, and each level's `env:` to the keys the workflow sets there — so no `PATH`,
+  `BASH_ENV`, `ENV`, `LD_*`, `GITHUB_*` or `GH_*` (`GH_TOKEN` aside) anywhere, no step-level `VERSION` or `IMAGE`, no
+  write to `$GITHUB_ENV` or `$GITHUB_PATH`, and no script under `scripts/` rewritten before it runs (13 of #827's
+  re-review's 15 fresh plants and 16 of #830's review's 19; the misses — HTTP from an interpreter, a command reached
+  through a variable or `eval` — are listed as known in its docstring, beside a file written where a later command
+  reads it). `RELEASING.md` § 8
   says a `sha-<commit>` staging tag left by a failed verification names an unverified image: delete it, never pull or
   promote it. **Check:** `python3 scripts/release-is-latest.py --self-test` passes, and `git tag -l 'v*' |
   python3 scripts/release-is-latest.py 2.40.1` prints `false` once a 2.41.0 tag exists.

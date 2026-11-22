@@ -25,3 +25,12 @@ Pages: `.github/workflows/release.yml`, `scripts/check-release-workflow.py`, `sc
 `RELEASING.md` §§ 7–8, `docs/plans/security-operations.md` SO3, `docs/operations/what-is-proven.md`
 (`binary-provenance`), `docs/features/published-node.md`, `docs/wiki/dev/operations.md`, `CHANGELOG.md`, `Makefile`,
 `.github/workflows/ci.yml`.
+
+**After #830's review (same day):** the env rule was a deny-list of prefixes and missed what defeats a verification
+outright — `PATH` (a fake `gh`), `BASH_ENV` (the verify script is bash, so it sources the stub), and an earlier step
+writing `$GITHUB_PATH` or `$GITHUB_ENV`. It is now an allow-list per level (workflow `IMAGE`/feature lists; job
+`VERSION`/`DRY_RUN`/`GH_TOKEN`/`ATTEST`; step `BUNDLE_*`/`DIGEST_*`/`LATEST`), and no step writes those two files.
+Also: a `||` block may hold no other `exit`; publish's refusals are matched as exact lines (an `&&` rewrite kept the
+substring); no script under `scripts/` is named except to run it; the tag regex refuses leading zeros (`v02.99.0`
+read as above 2.41.0); `Move latest` asks the remote again just before it moves. Lesson: the answer reads tags, not
+Releases, so a failed or refused tag left on the remote holds `latest` back — RELEASING § 7 now says delete or re-run.
