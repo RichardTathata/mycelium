@@ -145,8 +145,9 @@ attestation names its own ref (`refs/pull/N/merge` or `refs/heads/main`), which 
 `refs/tags/vNEW` — refuses.
 
 **Exit:** on the dry run and on the first tag, `gh attestation verify` passes for every asset and for
-`oci://…@digest` of all three image digests, pinned to `release.yml` and the run's ref *(dry run: the files half;
-the tag: both — pending)*; `latest` is not moved by a run whose verification failed *(by construction and by the
+`oci://…@digest` of all three image digests, pinned to `release.yml` and the run's ref *(dry run: the files half, met —
+#827's run 45024079934, all four files verified against the store and the bundle, the wrong ref refused; the tag:
+both halves, pending)*; `latest` is not moved by a run whose verification failed *(by construction and by the
 structural check; first exercised at the tag)*; `RELEASING.md` § 8 carries the operator's command *(done)*.
 
 **Does not:** claim reproducible builds; ship an SBOM (a follow-up, `actions/attest` with `sbom-path`); reach SLSA

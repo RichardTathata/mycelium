@@ -275,7 +275,9 @@ may cite the `gh attestation verify` line as the reader's check.
 before `latest` moves; the image may already carry the `:NEW` tag (it is created so it can be attested). Do not attach
 assets by hand or move `latest` by hand: an unverified asset on the Releases page is exactly what this step exists to
 prevent. Read the step's log — it names the file and the pin that failed. A transient Sigstore, Rekor or GitHub API
-error is fixed by **re-running all jobs**; a failure that persists is a release blocker: delete the `:NEW` image tag
+error — at the verify step or at an `actions/attest` step (SO3's own dry run met `InternalError: error fetching tlog
+entry - (404) Not Found` once, gone on the re-run; upstream, the same message was a Rekor outage) — is fixed by
+**re-running all jobs**; a failure that persists is a release blocker: delete the `:NEW` image tag
 (the package's settings on GitHub) so no one pulls an unverified image, leave the Release without assets, and open an
 issue. **After publishing**, an operator's verification that fails on an attached asset — or a verified result naming
 any ref other than `refs/tags/vNEW`, or any workflow other than `release.yml` — is a security incident: take the
