@@ -181,6 +181,35 @@ through this saver; a **receipt names the gateway node's rung and nothing above 
 and the saver makes no governed call, so grants and provider-side enforcement belong to the doors the graph's tools
 go through.
 
+## What the serializer trusts (0.3.5)
+
+**The saver deserializes checkpoint rows that any admitted member can write.** A checkpoint row
+(`ckpt/…`, `ckptw/…`) is an unsigned record in the gossip KV, and it names both the blob ids and the
+type tag each payload is decoded with; `_assemble` (`saver.py`) hands that tag and the blob's bytes
+to `serde.loads_typed`. Any admitted member can write such a row — and so can any HTTP client
+holding `kv:write`, since the gateway's KV routes do not refuse these prefixes — and a blob it chose
+goes in through the blob tier (`llm:write`). The precondition LangGraph's advisories treat as
+post-exploitation, write access to the checkpoint store, is on a fleet simply membership.
+
+0.3.5 raises the floor to **`langgraph-checkpoint>=4.1.1`**. Two advisories reach this path:
+GHSA-wwqv-p2pp-99h5 / CVE-2025-64439 (HIGH: the `"json"` mode's constructor envelope ran arbitrary
+code; fixed in 3.0.0) and GHSA-fjqc-hq36-qh5p / CVE-2026-48775 (method dispatch in the JSON reviver;
+fixed in 4.1.1). The `"json"` mode now refuses a constructor outside an allow-list. The same floor
+also clears GHSA-mhr3-j7m5-c7c9 / CVE-2026-27794 (pickle in LangGraph's `BaseCache`, fixed in 4.0.0),
+which the saver does not use.
+
+**The floor does not make a member-written row safe to load.** Under the default
+`JsonPlusSerializer`, the `"msgpack"` mode still imports and calls any type a payload names — it
+logs `Deserializing unregistered type …` and goes on; checked on 4.1.1 and 4.3.2 with a payload
+naming `os.system`, which ran. Until the follow-up below, run every process that loads checkpoints
+with **`LANGGRAPH_STRICT_MSGPACK=true`** (only LangGraph's safe types are revived), or pass
+`serde=JsonPlusSerializer(allowed_msgpack_modules=[(module, name), …])` naming the types your graph
+stores. Both refuse a type outside the list, so a graph that checkpoints its own classes must list
+them. The follow-up — owner-signed checkpoint rows verified at read, as the project's
+[owner-signed rule](../docs/wiki/dev/owner-signed-records.md) asks of a record that decides what
+code runs, or a serializer restricted to plain JSON — is not built
+([what is proven](../docs/operations/what-is-proven.md#checkpoint-rows-deserialized-unsigned)).
+
 ## What a write's receipt names (0.3.4)
 
 Every row and blob-index write returns the route's receipt, kept as `saver.last_receipt` (a `WriteReceipt`: the

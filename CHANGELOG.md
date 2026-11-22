@@ -460,6 +460,43 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Check:** `grep -A1 '^name = "url"$' Cargo.lock` shows `2.5.9`, and `cargo audit --deny warnings -f Cargo.lock`
   (with the ignores CI's `audit` job names) no longer reports RUSTSEC-2026-0592.
 
+- **The Python companions' vulnerable dependency floors are raised** (each on its own tag; no node change). Each
+  advisory's fixed-in version was checked against its OSV record on 2026-11-22.
+  - **`langgraph-checkpoint-mycelium` 0.3.5** (unreleased): `langgraph-checkpoint>=4.1.1` (was `>=2`). Two advisories
+    reach the saver's loads: **GHSA-wwqv-p2pp-99h5** / CVE-2025-64439 (HIGH, code execution through the `"json"`
+    mode's constructor envelope; fixed in 3.0.0) and **GHSA-fjqc-hq36-qh5p** / CVE-2026-48775 (method dispatch in the
+    JSON reviver; fixed in 4.1.1). They are reachable because the saver hands a row's own type tag and the blob it
+    names to `loads_typed` (`saver.py:538-544`), and any admitted member, or any client holding `kv:write`, can write
+    that row. The floor also clears GHSA-mhr3-j7m5-c7c9 / CVE-2026-27794 (`BaseCache` pickle, fixed in 4.0.0), which
+    the saver does not use. The `dev` extra moves to `langgraph>=1.0.10` (GHSA-g48c-2wqr-h844 / CVE-2026-28277,
+    fixed in 1.0.10), `pytest>=9.0.3` and `pytest-asyncio>=1.3.0` (the first that installs beside pytest 9). No code change: the suite passes on 4.1.1 and 4.3.2. **The floor does not
+    make a member-written row safe to load.** Under the default `JsonPlusSerializer` the `"msgpack"` mode still
+    imports and calls any type a payload names; a payload naming `os.system` ran on 4.1.1 and 4.3.2. Run every process
+    that loads checkpoints with `LANGGRAPH_STRICT_MSGPACK=true`, or pass `allowed_msgpack_modules`. Owner-signed
+    checkpoint rows, or a plain-JSON serializer, are *not built*
+    (`what-is-proven.md#checkpoint-rows-deserialized-unsigned`; the README's *What the serializer trusts*).
+  - **`mycelium-py` 0.2.16** (unreleased; the floors ride in the version already on `main`): the `sign` extra needs
+    `cryptography>=50.0.0` (was `>=42`). That covers **GHSA-jwv3-5hgf-82ww** / CVE-2026-69249 (HIGH, exponential
+    certificate path-building) and **GHSA-m2h6-j472-rp4c** / CVE-2026-69248 (a wildcard DNS name escaping
+    `permittedSubtrees`), both fixed in 49.0.0; **GHSA-g6cj-pr64-35w5** / CVE-2026-69247 (a Bleichenbacher oracle in
+    PKCS#7 decryption, fixed in 50.0.0), which the re-audit found at 49.0.0; and every earlier advisory the audit found
+    against the old floor, including GHSA-537c-gmf6-5ccf (HIGH, the bundled OpenSSL; 48.0.1). The SDK signs with
+    Ed25519 and neither builds a certificate path nor decrypts PKCS#7, so these are reachable only through other
+    uses of the same install. The
+    `typed` extra needs `pydantic>=2.4` (was `>=2`; **GHSA-mr82-8j83-vxmv** / CVE-2024-3772, a regular-expression
+    denial of service in email validation, fixed in 2.4.0). The `dev` extra needs `pytest>=9.0.3` and `pytest-asyncio>=1.3.0`.
+  - **`strands-session-mycelium` 0.1.1** (unreleased): `strands-agents==1.65.0` (was `==1.61.1`). 1.61.1 caps
+    `mcp<2.2`, so no install could reach a fixed `mcp`. 1.65.0 allows `mcp<2.4`, and a fresh install resolves
+    `mcp` 2.3.0. That fixes **GHSA-qx49-fqc8-xw99** / CVE-2026-115563 (HIGH: the OAuth client could send credentials
+    to an authorization server the MCP server chose) and four MODERATE advisories: GHSA-84m7-p3x7-pcfv,
+    GHSA-5h93-6whr-6q8j, GHSA-w4fh-qvv9-3v23 and GHSA-rwrf-2pqf-9j8j, all fixed in 2.2.0 and 1.30.0. They are reachable
+    only through a Strands agent's own MCP use: the store makes no MCP call. The store's recorded `SessionRepository`
+    interface is unchanged at 1.65.0 (`tests/test_interface.py`, the pin moved). The `dev` extra needs
+    `pytest>=9.0.3`. The `mycelium-py>=0.2.11` requirement is unchanged.
+  - **`mycelium-ts`** (no version change): `package-lock.json` refreshed by `npm audit fix`. Every package it moves is
+    dev-only (`handlebars`, `brace-expansion`, `browserslist`, `js-yaml`, `baseline-browser-mapping`, `@babel/core`),
+    so the published package does not change.
+
 ### Added
 
 - **CA succession: the old CA's commitment, a node's pin of it, and the kept-anchor journal's compaction**

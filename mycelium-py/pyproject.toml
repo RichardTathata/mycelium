@@ -13,10 +13,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev   = ["pytest>=8", "pytest-asyncio>=0.23"]
-typed = ["pydantic>=2"]
+dev   = ["pytest>=9.0.3", "pytest-asyncio>=1.3.0"]
+typed = ["pydantic>=2.4"]                # 2.4.0 fixes GHSA-mr82-8j83-vxmv
 # Client signatures (identity-and-lifecycle I1): Ed25519 over the call.
-sign  = ["cryptography>=42"]
+# A security floor (0.2.16): 50.0.0 fixes GHSA-g6cj-pr64-35w5, 49.0.0 GHSA-jwv3-5hgf-82ww and GHSA-m2h6-j472-rp4c,
+# and every earlier advisory against the old floor.
+sign  = ["cryptography>=50.0.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mycelium"]
