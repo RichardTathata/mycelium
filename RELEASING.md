@@ -169,11 +169,10 @@ git push origin <companion-tag> …                # then the companions' tags, 
 
 **Push the `v*` tag on its own.** GitHub creates no push event when more than three tags are pushed at once, so a
 `git push --tags` (or one push naming the release tag beside the companions') starts no workflow, and nothing fails to
-say so: v2.38.0's six tags went in one push and the Release did not run. If that happens, do not delete and re-push the
-tag: `gh workflow run release.yml --ref vNEW` runs the same workflow on the tag, and it publishes, because the
-`version` job reads `GITHUB_REF_TYPE` (a dispatch on a branch is a dry run; on a tag it is not). The `one-hour` job
-follows a Release only when that Release was started by a tag push, so after a dispatched Release start it by hand:
-`gh workflow run one-hour.yml -f tag=vNEW`.
+say so: v2.38.0's six tags went in one push and the Release did not run. If that happens, push the tag again on its
+own: `git push origin :refs/tags/vNEW && git push origin vNEW` (both need the admin role, below). A
+`gh workflow run release.yml --ref vNEW` does **not** publish: since #827's review (F1) a dispatch is a dry run on any
+ref, a tag included, and only a push of the tag publishes.
 
 The tag must be **annotated** (`-a`): the Release workflow fetches the tag object and refuses a lightweight one after
 every build has run. If that happens, `git tag -d vNEW && git tag -a vNEW -m "…" && git push --force origin vNEW`
@@ -186,8 +185,8 @@ smokes each Linux tarball in a clean container with no toolchain (`mycelium --ve
 Sigstore keyless, SLSA v1 provenance, in the public Rekor log; security-operations SO3) and **verifies every
 attestation before it attaches anything or moves `latest`**, attaches the tarballs, `SHA256SUMS` and the Sigstore
 bundles to the tag's Release — **creating the Release from the annotated tag's message if step 8 has not run yet** —
-and tags `ghcr.io/richardtathata/mycelium:NEW` (the image tag has no `v`), then `:latest`, each by digest once the
-image verifies (the index first sits under a staging tag, `sha-<commit>`). It publishes only from a **push** of the
+and tags `ghcr.io/richardtathata/mycelium:NEW` (the image tag has no `v`), then `:latest` (only for the highest
+version, below), each by digest once the image verifies (the index first sits under a staging tag, `sha-<commit>`). It publishes only from a **push** of the
 tag, on a commit of `main` or a `release-*` branch; a `workflow_dispatch` is always a dry run, on any ref.
 
 **Who may push a `v*` tag:** the repository's tag ruleset `release-tags` (active since 2026-11-22) restricts creating, updating and deleting `refs/tags/v*` and `refs/tags/*-v*` to the admin role (security-operations SO3, #827's review F6), so a writer without that role cannot
@@ -202,9 +201,16 @@ run means no artefacts and no image for this tag; fix and **re-run all jobs** on
 Release with no assets until the full re-run). A full re-run attests the rebuilt files again; an earlier run's
 attestation stays in the transparency log and names a digest no longer attached, which is harmless. **A red
 verification step** (`Verify each file's attestation`, `Verify each image's attestation`) means nothing was attached
-and `latest` did not move; do not attach by hand — see § 8, *If verification fails*. Note that `--latest`, on the Release and on the image tag, is
-unconditional: a patch cut from an older line after a newer MINOR relabels both — cut such a patch knowing that, or
-re-point `latest` by hand afterwards.
+and `latest` did not move; do not attach by hand — see § 8, *If verification fails*.
+
+**`latest` moves only for the highest version** (the maintainer's decision, 2026-11-22). `publish` asks
+`scripts/release-is-latest.py` whether `vNEW` is the highest `vX.Y.Z` tag on the remote, compared as numbers (2.10.0
+is above 2.9.0). If it is, the Release is created with `--latest` and the image's `:latest` moves to it, as before. If
+it is not — a patch cut from an older line after a newer MINOR, such as 2.40.2 after 2.41.0 — the Release is created
+with `--latest=false`, `:latest` stays on the newer line, and the `Move latest` step says so in a notice. Pre-release
+tags (`vX.Y.Z-…`) are not a convention here and never count, and a pre-release version never moves `latest`; the
+companions' `<name>-vX.Y.Z` tags are ignored. A listing that does not hold `vNEW` itself fails the step, before the
+Release, rather than reading as "nothing is higher".
 
 ## 8. Publish the GitHub Release
 
@@ -222,8 +228,12 @@ is there, CI is green, and only the page is wrong. Backfilled 2026-09-23.
 NEW=2.13.0
 title=$(git tag -l --format='%(contents:subject)' "v$NEW")
 git tag -l --format='%(contents:body)' "v$NEW" > /tmp/notes.md
-gh release create "v$NEW" --title "$title" --notes-file /tmp/notes.md --verify-tag --latest
+latest=$(git ls-remote --tags origin 'refs/tags/v*' | scripts/release-is-latest.py "$NEW")   # true only for the highest vX.Y.Z
+gh release create "v$NEW" --title "$title" --notes-file /tmp/notes.md --verify-tag --latest="$latest"
 ```
+
+`--latest` follows the same rule as the workflow (§ 7, *`latest` moves only for the highest version*): a patch to an
+older line is created with `--latest=false`, so the page keeps naming the newer line.
 
 The **annotated tag message is the release body** — it was written for this, at the moment the
 release was cut, and re-summarising it later produces a second account that can drift from the
@@ -295,7 +305,10 @@ prevent. Read the step's log — it names the file and the pin that failed. A tr
 error — at the verify step or at an `actions/attest` step (SO3's own dry run met `InternalError: error fetching tlog
 entry - (404) Not Found` once, gone on the re-run; upstream, the same message was a Rekor outage) — is fixed by
 **re-running all jobs**; a failure that persists is a release blocker: delete the `sha-<commit>` staging tag
-(the package's settings on GitHub), leave the Release without assets, and open an issue. **After publishing**, an operator's verification that fails on an attached asset — or a verified result naming
+(the package's settings on GitHub), leave the Release without assets, and open an issue. **A `sha-<commit>` tag left
+by a failed verification names an unverified image.** Delete it once the run is not going to be re-run (a re-run
+pushes it again); never pull it, and never promote it — do not tag it `:NEW` or `:latest`, by hand or by copying its
+digest — since the whole point of the staging tag is that nothing reads the image before its attestation verifies. **After publishing**, an operator's verification that fails on an attached asset — or a verified result naming
 any ref other than `refs/tags/vNEW`, or any workflow other than `release.yml` — is a security incident: take the
 asset down (`gh release delete-asset vNEW <name>`), move `latest` back to the previous verified tag, and follow
 [`SECURITY.md`](SECURITY.md).

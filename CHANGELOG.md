@@ -225,6 +225,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   image half first runs at a tag. **Check:** `gh attestation verify mycelium-NEW-linux-x86_64.tar.gz --repo
   RichardTathata/mycelium --cert-identity https://github.com/RichardTathata/mycelium/.github/workflows/release.yml@refs/tags/vNEW --deny-self-hosted-runners` prints a verified result for the first tag
   cut after this change; v2.40.1 and earlier carry sums only.
+- **`latest` moves only for the highest version** (security-operations SO3, the maintainer's decision of 2026-11-22;
+  `RELEASING.md` § 7). The release workflow asks `scripts/release-is-latest.py` whether the tag is the highest
+  `vX.Y.Z` on the remote, by number; a patch cut from an older line after a newer MINOR (2.40.2 after 2.41.0) is now
+  published with `--latest=false` and leaves the image's `:latest` on the newer line, where before both moved to it.
+  Pre-release and companion tags never count. `scripts/check-release-workflow.py` now also holds a verification step
+  to its `cp` and verification lines, the three image verifications to the amd64, arm64 and index digests once each,
+  `buildx build` and any push to `linux`, every `||` to `exit 1`, and no `GITHUB_*`/`GH_*` override in an `env:`
+  (13 of #827's re-review's 15 fresh plants; the other two are listed as known in its docstring). `RELEASING.md` § 8
+  says a `sha-<commit>` staging tag left by a failed verification names an unverified image: delete it, never pull or
+  promote it. **Check:** `python3 scripts/release-is-latest.py --self-test` passes, and `git tag -l 'v*' |
+  python3 scripts/release-is-latest.py 2.40.1` prints `false` once a 2.41.0 tag exists.
 - **The plan for the security-operations rows** ([`docs/plans/security-operations.md`](docs/plans/security-operations.md)):
   SO1 (SIEM export, planned for the wave 2 MINOR, decisions D1–D8), SO2 (the SDKs' dependency audits) and SO3.
 

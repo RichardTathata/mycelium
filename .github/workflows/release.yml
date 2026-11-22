@@ -12,7 +12,9 @@
 # since an attestation can only be pushed beside an image the registry holds. It then attaches the tarballs,
 # `SHA256SUMS` and the Sigstore bundles to the GitHub Release of that tag, creating the Release from the annotated
 # tag's message when § 8 has not yet (so the Releases page cannot silently fall behind the tags again, as it did after
-# v2.4.4), and tags the verified image `:VERSION`, then `:latest`, each by digest.
+# v2.4.4), and tags the verified image `:VERSION`, then `:latest`, each by digest. `latest` — the Release's label and
+# the image tag — moves only when the tag is the highest `vX.Y.Z` by semver (`scripts/release-is-latest.py`): a patch
+# to an older line after a newer MINOR is published without it.
 #
 # Every other run is a dry run and publishes nothing: a pull request that touches this workflow, the Dockerfile, the
 # verification script or the three binaries' sources (so a change to the publishing path proves itself before it
@@ -384,6 +386,15 @@ jobs:
           [ "$kind" = "tag" ] || { echo "::error::$tag is a $kind, not an annotated tag"; exit 1; }
           now=$(git rev-parse "refs/tags/$tag^{commit}")
           [ "$now" = "$GITHUB_SHA" ] || { echo "::error::$tag now points at $now, not $GITHUB_SHA, which this run built; the re-pointed tag's own run publishes it"; exit 1; }
+      # `latest` (the Release's label and the image's `:latest`) moves only for the highest `vX.Y.Z` tag by semver, so a
+      # patch cut from an older line after a newer MINOR leaves both on the newer line (maintainer, 2026-11-22). Read
+      # from the remote; a listing that lacks this tag fails the step rather than answering "nothing is higher".
+      - name: Whether this is the highest release
+        id: highest
+        run: |
+          set -euo pipefail
+          latest=$(git ls-remote --tags origin 'refs/tags/v*' | scripts/release-is-latest.py "$VERSION")
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-bundle-${{ env.VERSION }}
@@ -463,6 +474,8 @@ jobs:
           [ "$got" = "$DIGEST_INDEX" ] || { echo "::error::$IMAGE:$VERSION is $got, not the verified $DIGEST_INDEX"; exit 1; }
 
       - name: The Release — created from the tag's message if § 8 has not run, then the assets attached
+        env:
+          LATEST: ${{ steps.highest.outputs.latest }}
         run: |
           set -euo pipefail
           tag="v$VERSION"
@@ -470,19 +483,24 @@ jobs:
           if ! gh release view "$tag" >/dev/null 2>&1; then
             title=$(git tag -l --format='%(contents:subject)' "$tag")
             git tag -l --format='%(contents:body)' "$tag" > notes.md
-            gh release create "$tag" --title "$title" --notes-file notes.md --verify-tag --latest
+            gh release create "$tag" --title "$title" --notes-file notes.md --verify-tag --latest="$LATEST"
             echo "created the Release for $tag from the annotated tag"
           fi
           gh release upload "$tag" bundle/mycelium-*.tar.gz bundle/SHA256SUMS bundle/*.sigstore.json --clobber
           gh release view "$tag" --json assets --jq '.assets[].name'
 
-      # `latest` moves to the verified index digest, by digest; a single-index source is copied, not rebuilt, and the
-      # check after it fails the run if the registry's `latest` names any other digest.
+      # `latest` moves to the verified index digest, by digest, when this is the highest release; a single-index source
+      # is copied, not rebuilt, and the check after it fails the run if the registry's `latest` names any other digest.
       - name: Move latest to the verified image
         env:
           DIGEST_INDEX: ${{ steps.index.outputs.index }}
+          LATEST: ${{ steps.highest.outputs.latest }}
         run: |
           set -euo pipefail
+          if [ "$LATEST" != "true" ]; then
+            echo "::notice::v$VERSION is not the highest release tag: $IMAGE:latest is not moved, and a Release this run created is not marked latest"
+            exit 0
+          fi
           docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE@$DIGEST_INDEX"
           got=$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Manifest}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')
           [ "$got" = "$DIGEST_INDEX" ] || { echo "::error::$IMAGE:latest is $got, not the verified $DIGEST_INDEX"; exit 1; }

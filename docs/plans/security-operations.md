@@ -143,11 +143,27 @@ MINOR). Each promise below is quoted next to what delivers it, or written *not b
   `rust:` and `debian:` stages, the smoke's container) by digest, since the workflow holds `id-token: write`; every
   checkout sets `persist-credentials: false` (F9). `cla.yml`'s third-party action, which runs on any user's comment
   with `contents: write`, is pinned by SHA too (F5); the other workflows' pins are a separate PR.
-- `scripts/check-release-workflow.py` (in `make check` and CI's lint job) is an allow-list over the workflow's
-  triggers, permissions, actions, step conditions and publishing commands, with continuation lines joined and
-  comments dropped; it requires every upload and image tag after its verification, `latest` only in the last step,
-  and publishing only from a tag push. Its `--self-test` plants 41 faults — the first version's 12, the 17 of #827's
-  review (all of which the first version passed), and one or more per fix F1, F4, F6, F7, F9 — and catches each.
+- *"`latest` moves only for the highest version."* (the maintainer's decision, 2026-11-22, after #827) — `publish`'s
+  step `highest` runs `scripts/release-is-latest.py` over the remote's `v*` tags: `true` only when `vVERSION` is the
+  highest `vX.Y.Z` by number (pre-release and companion tags ignored; a listing without `vVERSION` fails the step).
+  `gh release create` passes `--latest="$LATEST"`, and `Move latest` leaves `:latest` where it is, with a notice,
+  unless the answer is `true`; so a 2.40.x patch after 2.41.0 is published with `--latest=false` and without moving
+  the image's `latest`. `release-is-latest.py --self-test` (in `make check` and CI's lint job) covers 2.40.2 against
+  2.41.0, 2.9.x against 2.10.0, the first release of a line and of a MAJOR, a re-run of an older tag, pre-release and
+  companion tags, and the refused listings. *First exercised at a tag; a patch to an older line has not been cut.*
+- `scripts/check-release-workflow.py` (in `make check` and CI's lint job) is an **allow-list** for the workflow's
+  triggers, permissions, actions, step conditions, the `gh release` and `imagetools` commands, the lines a
+  verification step may run (`set -euo pipefail`, the bundle's `cp`, verification lines — no `exit`, no `if`) and the
+  version step's writes to `GITHUB_OUTPUT`; and a **deny-list** for the rest of a step's shell, with continuation
+  lines joined and comments dropped. It requires every upload and image tag after its verification, the three image
+  verifications to name the amd64, arm64 and index digests once each, `buildx build` and any push only in `linux`
+  (by digest), every `||` to end in `exit 1`, `latest` only in the last step and only for the highest version, and
+  publishing only from a tag push. Its `--self-test` plants 64 faults — the first version's 12, the 17 of #827's
+  review (all of which the first version passed), one or more per fix F1, F4, F6, F7, F9, 13 of the re-review's 15
+  fresh plants, and 10 more for the new rules and `latest` — and catches each; the 23 new ones were seen failing
+  against the previous rules first. **Known, not caught** (its docstring): HTTP from an interpreter and a command
+  reached through indirection (`$G upload`, `eval`, `sh -c`), the two re-review plants left open; each sits behind
+  the run-time refusals, `publish`'s `if:` and the `release-tags` ruleset.
   Seen failing first: it reports main's workflow before this PR as failing. `verify-release-attestation.sh
   --self-test` plants ten directory faults (symlinks, directories in a bundle's name, dotfiles, extra or missing
   files, a mismatched sum).

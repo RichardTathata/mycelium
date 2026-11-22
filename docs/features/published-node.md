@@ -10,7 +10,9 @@ is created from the annotated tag's message if the runbook's step 8 has not run,
 behind the tags again. **Every tarball, `SHA256SUMS`, the image index and both per-architecture images carry build
 provenance** — a GitHub artifact attestation (SLSA v1, signed keyless through Sigstore, logged in Rekor) naming the
 repository, `release.yml`, the tag and the commit that built it — and the workflow verifies each attestation before
-it attaches the file or moves `latest` ([plan row SO3](../plans/security-operations.md#so3)). The first tag cut after
+it attaches the file or moves `latest` ([plan row SO3](../plans/security-operations.md#so3)). `latest` — the Release's
+label and the image's `:latest` — moves only for the highest `vX.Y.Z` tag, so a patch to an older line after a newer
+MINOR does not take it back. The first tag cut after
 SO3 is the first that carries them; v2.40.1 and earlier carry sums only.
 
 ## When to use it, and when not
