@@ -582,9 +582,18 @@ async fn drain_time(g: &Arc<super::call_mint_tests::N>, target: &NodeId, burst: 
 /// while the caller's acknowledgement still waits for the disk.** A gateway with `[persistence]` under `mode` and a
 /// provider; a client's call runs at the provider; `burst` is queued at the gateway's WAL, sized from a calibration
 /// to drain in about three times *F* on this machine's disk; then `cancel_call`. Asserted, by structure: the call stops at
-/// the provider inside *F* (bound 1) — the forward did not wait for the syncs ahead — **while `cancel_call` has not
-/// answered**; the answer then comes only once the revocation is on disk (the gateway's own record is the revoking
-/// checkpoint when it does), and it took several times longer than the stop.
+/// the provider inside *F* (bound 1) — the forward did not wait for the syncs ahead, which take about 3·*F* — and the
+/// answer comes only once the revocation is on disk (the gateway's own record is the revoking checkpoint when it does).
+///
+/// **The order of the stop and the acknowledgement is not the promise** (#826's review). The acknowledgement waits for
+/// the disk *and* the forward's answer. When the disk is the later of the two, the acknowledgement comes after the
+/// stop by seconds; when the forward's answer is — a forward delayed behind the gateway's own gossip — the answer
+/// releases the acknowledgement, and this test's poll of the provider can see the stop a few milliseconds after it
+/// (#826's CI: the stop seen at 463.9 ms, the acknowledgement at 461.8 ms, the receipt `Stopped`). That is the poll's
+/// race, not a broken promise: a `Stopped` receipt is the provider's answer, sent only after the work ended. So what
+/// is asserted is the receipt's rung — **when `cancel_call` returns `Stopped`, the provider's work has stopped** —
+/// read inside the cancel's own task, not by a racing poll. Whether the burst still held the disk when the stop was
+/// seen is printed.
 async fn the_stop_beats_the_acknowledgement_behind(mode: crate::config::SyncMode, burst: Burst) {
     let (g, p, cert_dir) = pair(Opts { mint: true, persist: true, wal: Some((mode, 1_000_000)), ..Opts::default() }).await;
     let g = Arc::new(g);
@@ -603,32 +612,33 @@ async fn the_stop_beats_the_acknowledgement_behind(mode: crate::config::SyncMode
     let term = g.ctx().call_issuer.issued_terms().into_iter().max_by_key(|t| t[1..].parse::<u64>().unwrap_or(0)).expect("minted");
     let tasks = queue_burst(&g, &target, burst, n, "burst").await;
     let asked = std::time::Instant::now();
-    let (g2, t2) = (Arc::clone(&g), term.clone());
+    let (g2, t2, at_provider) = (Arc::clone(&g), term.clone(), Arc::clone(&p.authority));
     let cancel = tokio::spawn(async move {
         let r = g2.a.cancel_call(&t2).await;
-        (r, std::time::Instant::now())
+        (r, std::time::Instant::now(), at_provider.running_count())
     });
     let stopped = until(|| p.authority.running_count() == 0, Duration::from_secs(120)).await;
     let stop_took = asked.elapsed();
     let acknowledged_at_the_stop = cancel.is_finished();
-    let (receipt, acked) = tokio::time::timeout(Duration::from_secs(300), cancel).await.expect("the cancel is answered").unwrap();
+    let (receipt, acked, running_at_ack) = tokio::time::timeout(Duration::from_secs(300), cancel).await.expect("the cancel is answered").unwrap();
     let ack_took = acked.saturating_duration_since(asked);
     for t in tasks {
         t.await.expect("a mint of the burst ran");
     }
     eprintln!(
-        "§9 O10, {mode:?} behind {n} {burst:?} (one drains in {per:?} here): the provider's stop seen {stop_took:?} after the cancel; the cancel acknowledged {ack_took:?} after it; receipt {receipt:?}"
+        "§9 O10, {mode:?} behind {n} {burst:?} (one drains in {per:?} here): the provider's stop seen {stop_took:?} after the cancel; the cancel acknowledged {ack_took:?} after it (already when the stop was seen: {acknowledged_at_the_stop}); receipt {receipt:?}; forwards {}",
+        g.ctx().call_issuer.cancel_forwards.to_json()
     );
     assert!(stopped, "the call stopped at the provider");
     assert!(
         stop_took < Duration::from_millis(F_MS),
         "the provider's stop came {stop_took:?} after the cancel, outside bound 1 (F = {F_MS} ms): the forward waited for the {n} {burst:?} ahead of the revocation's sync (the cancel was acknowledged after {ack_took:?})"
     );
-    // What O10 promises, and no ratio (#821's CI: on a loaded runner a 3x margin failed with the promise kept): the stop
-    // inside bound 1, above, and the acknowledgement not yet given when the stop was seen — the burst, sized to about
-    // 3·F, still held the disk then.
-    assert!(!acknowledged_at_the_stop, "the cancel was acknowledged ({ack_took:?}) before the provider's stop was seen ({stop_took:?}): the burst did not hold the disk");
     let receipt = receipt.expect("the revocation is on disk");
+    // The receipt names its rung (#826's review): a `Stopped` answer is given only once the work has ended.
+    if receipt.class == CancelClass::Stopped {
+        assert_eq!(running_at_ack, 0, "cancel_call answered Stopped ({ack_took:?}) while the provider still ran the call");
+    }
     // The provider answers `stopped`; under `flush` the answer can reach the gateway's caller too late for the
     // forward's 5 s — the gateway's connection reader awaits the WAL for each inbound record (`append_inbound`), so the
     // answer's frame waits behind the same burst — and is then `DeliveryUnknown`: never a negative (§9 O11's family).
@@ -1178,6 +1188,76 @@ async fn no_cancel_forward_is_sent_past_the_calls_window_or_after_shutdown() {
     let _ = tokio::time::timeout(Duration::from_secs(10), cancel).await;
     call_cancel::test_hooks::DROP_FIRST_SENDS.pin().remove(&node);
     call_cancel::test_hooks::LAST_ATTEMPT_AT.pin().remove(&node);
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **#826's review, F1: a re-sent forward that reaches the provider while its first attempt still waits for the work
+/// to end joins that wait** — it takes no confirm-wait permit of its own, so it is never answered `stop_requested` at
+/// once ahead of the first attempt's waited `stopped`. The provider may wait on one answer at a time
+/// (`CONFIRM_WAITS_CAP` = 1); its skill takes 800 ms to stop once asked (`linger`), so the gateway's second attempt,
+/// 500 ms in, arrives during the first's wait. The receipt is `Stopped`, a re-send was sent, and the provider counts it
+/// joined. Seen failing first with the join planted out of `serve` (every request answered on its own): the re-send
+/// found no permit, was answered `stop_requested` at once, and the receipt was `StopRequested`.
+#[cfg(feature = "a2a")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resent_forward_joins_the_providers_wait_and_does_not_overtake_its_answer() {
+    let (g, p, cert_dir) = pair(Opts { mint: true, more_doors: true, ..Opts::default() }).await;
+    assert!(until(|| crate::store::scan_kv_prefix(&g.ctx().kv_state, "cap/").iter().any(|(k, _)| k.contains("depot")), Duration::from_secs(20)).await, "the gateway sees the skill");
+    let g = Arc::new(g);
+    call_cancel::test_hooks::CONFIRM_WAITS_CAP.pin().insert(p.a.node_id().to_string(), 1);
+    let g2 = Arc::clone(&g);
+    let send = serde_json::json!({"id": "t-1", "skillId": "depot/dispatch", "message": {"role": "user", "parts": [{"type": "text", "text": "linger"}]}});
+    let answered = tokio::spawn(async move { a2a(&g2, "alice-secret", "tasks/send", send).await });
+    p.running(1).await;
+    let term = g.ctx().call_issuer.issued_terms().pop().expect("minted");
+    let receipt = tokio::time::timeout(Duration::from_secs(20), g.a.cancel_call(&term)).await.expect("answered").expect("recorded");
+    call_cancel::test_hooks::CONFIRM_WAITS_CAP.pin().remove(&p.a.node_id().to_string());
+    let (f, pf) = (forwards(&g), forwards(&p));
+    assert_eq!(receipt.class, CancelClass::Stopped, "the first attempt's waited answer, not a re-send's unwaited one: {receipt:?}; gateway {f}, provider {pf}");
+    assert!(f["retries"].as_u64() >= Some(1), "a re-send went while the provider waited: {f}");
+    assert!(pf["provider_joined"].as_u64() >= Some(1), "the provider joined it to the wait: {pf}");
+    let _ = tokio::time::timeout(Duration::from_secs(10), answered).await.expect("the send is answered");
+    g.a.shutdown().await;
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **#826's review, F2: one forward per term.** Every send of the gateway's is dropped, so no forward is ever answered.
+/// Three `cancel_call`s of one term at once run **one** forward — the two later ones join it (`joined` 2) and are
+/// answered its receipt, `DeliveryUnknown` — so its attempts are one schedule's, not three. A fourth cancel, after the
+/// receipt, replaces the forward still re-sending (`superseded` 1) and starts afresh: a cancel asked again is forwarded
+/// again, and still only one runs. Seen failing first with the join planted out of `forward_once` (each cancel its own
+/// forward): `joined` 0 and three schedules' attempts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repeated_cancels_of_one_term_run_one_forward() {
+    let (g, p, cert_dir) = pair(Opts { mint: true, ..Opts::default() }).await;
+    let g = Arc::new(g);
+    let node = g.a.node_id().to_string();
+    call_cancel::test_hooks::DROP_FIRST_SENDS.pin().insert(node.clone(), Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX)));
+    let (_, term) = g.framed(p.a.node_id(), "quick").await;
+    let began = std::time::Instant::now();
+    let cancels: Vec<_> = (0..3)
+        .map(|_| {
+            let (g2, t2) = (Arc::clone(&g), term.clone());
+            tokio::spawn(async move { g2.a.cancel_call(&t2).await })
+        })
+        .collect();
+    for c in cancels {
+        let r = tokio::time::timeout(Duration::from_secs(20), c).await.expect("answered").unwrap().expect("recorded");
+        assert_eq!(r.class, CancelClass::DeliveryUnknown, "the one forward's receipt: {r:?}");
+    }
+    let took = began.elapsed();
+    let f = forwards(&g);
+    assert_eq!(f["joined"].as_u64(), Some(2), "two cancels joined the first's forward: {f}");
+    // One schedule: an attempt at once and one every 500 ms while the receipt waits.
+    let most = 1 + took.as_millis() as u64 / call_cancel::CANCEL_FORWARD_RETRY_MS + 1;
+    assert!(f["attempts"].as_u64() <= Some(most), "{f}: one forward's attempts in {took:?} ({most} at most)");
+    let r = tokio::time::timeout(Duration::from_secs(20), g.a.cancel_call(&term)).await.expect("answered").expect("recorded");
+    assert_eq!(r.class, CancelClass::DeliveryUnknown);
+    assert!(until(|| forwards(&g)["superseded"].as_u64() == Some(1), Duration::from_secs(10)).await, "the settled forward was replaced: {}", forwards(&g));
+    call_cancel::test_hooks::DROP_FIRST_SENDS.pin().remove(&node);
+    g.a.shutdown().await;
     p.a.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);
 }

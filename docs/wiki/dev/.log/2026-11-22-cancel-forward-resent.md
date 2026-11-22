@@ -19,3 +19,14 @@ Durable knowledge from the build:
 
 Pages: the plan's §9 O13 (and O10's pointer to it), `docs/operations/what-is-proven.md` (`call-cancel-forward-resent`),
 `docs/features/mandates.md`, `docs/operations/metrics.md`, `CHANGELOG.md`.
+
+**From #826's review, the same day:**
+- **Behind the gateway's own flood a re-send turns lost into late**, and late is often more than *F*: on #824 with
+  this code the stop was inside *F* in 5 of 10 runs (every receipt `Stopped`, none by anti-entropy). §9 O13 stays
+  open, pending option B.
+- **One question, one wait:** a provider joins a repeat of a forward to the answer already in progress for the same
+  `(issuer, scope)` (`call_cancel::serve`). Without it a re-send took a confirm-wait permit, or, finding none, was
+  answered `stop_requested` at once and settled the receipt ahead of the first attempt's waited `stopped`.
+- **One forward per term at the gateway** (`forward_once`): join while unsettled, replace once settled.
+- **A test that orders an acknowledgement against a poll of the provider races** whenever the forward's answer
+  releases the acknowledgement; assert the receipt's rung inside the cancel's own task instead.

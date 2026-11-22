@@ -3881,8 +3881,9 @@ Items found while building a row that the row does not own. Each names its home,
   way (`src/agent/journal.rs`). *Evidence it must pass:* `a_cancel_is_on_disk_inside_bound_1_while_the_collector_deletes_a_backlog`
   (`src/agent/call_soak_tests.rs`, `#[ignore]`: it fails today — a revocation on disk at about 700 times the quiet
   write behind 1 000 deletes), un-ignored. *Home:* its own plan row, to be written.
-- **O13 · A cancel-forward lost on the gateway's own outbound queues** *(open: the fix decided and built 2026-11-22,
-  to be closed by the mints test passing on #824; O10's candidate row *"a cancel queued behind gossip on one
+- **O13 · A cancel-forward lost on the gateway's own outbound queues** *(**open**: option A built 2026-11-22 and shown
+  to remove the anti-entropy tail but not to keep bound 1 behind the gateway's own flood (#826's review); pending the
+  maintainer's decision on option B; O10's candidate row *"a cancel queued behind gossip on one
   connection"*, found by #821's CI, becomes this item)*.
   - **Measured on #824** (WAL group commit, which makes the mints fast enough to flood the gateway's gossip): the test
     `under_the_default_mode_the_providers_stop_beats_the_acknowledgement_behind_concurrent_mints` failed 4 runs of 9;
@@ -3936,5 +3937,33 @@ Items found while building a row that the row does not own. Each names its home,
     receipt `DeliveryUnknown`); with the window test planted out of `forward`, the bound test (14 attempts, the forward
     never ending); with the shutdown arms planted out, the bound test (*"3 attempts sent while the gateway shut
     down"*). Restored by copy and `touch`; all four pass, and `agent::call_cancel` passed five runs of five (32 tests).
-  - **To close it:** the mints test re-run on #824 after this merges, passing as often as it is run; the figures on the
-    [ledger](../operations/what-is-proven.md#call-cancel-forward-resent).
+  - **#826's review (2026-11-22), measured:** ten bounded runs of the mints test on #824's head `52f5559f` with this
+    row's code (debug, 14 057 to 15 696 mints): every receipt `Stopped`, none waited for anti-entropy (4 of 9 did
+    before), and the provider's stop at 0.011 to 3.42 s — inside *F* in 5 of 10, the test passing 4 of 10; the PR's own
+    CI failed it too. A re-send takes the first send's path, through the shard's queue behind every frame already
+    there and into the same writer channel: under a sustained flood it has the first send's odds of being dropped,
+    and once taken waits about 1 s behind the queue. **The re-send turns lost into late; late is often more than
+    *F*.** Bound 1 behind the gateway's own flood needs option B (or a re-send that bypasses the shard and the
+    writer's queue): put to the maintainer, not built here.
+  - **Fixed from that review:** **F1** — re-sends took the provider's confirm-wait permits (64), and a re-send without
+    one was answered `stop_requested` at once and could settle the receipt ahead of the first attempt's waited
+    `stopped`; the provider now joins a repeat to the answer in progress for the same `(issuer, scope)`
+    (`call_cancel::serve`, `provider_joined`), so a repeat is answered what the first attempt is and takes no
+    permit. Chosen over the gateway holding back a re-send's `stop_requested`: the provider is the agent whose answer
+    it is, and one question gets one wait whoever asks it how often; the gateway would have to guess whether its
+    first attempt arrived. **F2** — forwards were not deduplicated per term; now one runs per term
+    (`call_cancel::forward_once`): a cancel while the term's forward still waits for its receipt joins it
+    (`joined`), one after the receipt replaces a forward still re-sending (`superseded`). **The edges, stated:** the
+    first attempt is exempt from the window test; a re-send reaching a provider that no longer keeps the stop record
+    (newest 1 024, `STOP_RECORDS_KEPT`) is answered `not_running` — at `/a2a`, *completed*; a re-send reaching a
+    **restarted** provider while unanswered plants its hold, so a call re-presented there later is refused
+    `revoked` — better than O10's crash bound while the gateway lives; a gateway crash between the forward and the
+    sync is bounded as O10 states. **The mints test's ordering assertion** (the acknowledgement not given when the
+    stop was seen) was a race of the test's poll whenever the forward's answer, not the disk, released the
+    acknowledgement (CI: the stop seen 2 ms after it, receipt `Stopped`); it now asserts the receipt's rung — a
+    `Stopped` from `cancel_call` means the provider's work had stopped, read in the cancel's own task — beside the
+    stop inside *F*, which still catches a forward that waits for the disk (the burst is about 3·*F* of syncs).
+    Tests: `a_resent_forward_joins_the_providers_wait_and_does_not_overtake_its_answer`,
+    `repeated_cancels_of_one_term_run_one_forward`.
+  - **To close it:** the maintainer's decision on option B, and the mints test passing on #824 as often as it is run;
+    the figures on the [ledger](../operations/what-is-proven.md#call-cancel-forward-resent).

@@ -83,13 +83,21 @@ work.
   2026-11-22): the forward is a best-effort signal on the gateway's outbound queues, which drop a frame when full, so
   the gateway re-sends the same signed checkpoint every 500 ms (`CANCEL_FORWARD_RETRY_MS`; four attempts inside
   *F* = 2 s) until the provider answers, then on a back-off from 1 s to 30 s, at most 24 attempts
-  (`MAX_CANCEL_FORWARD_ATTEMPTS`), never past the call's window and never once the node is shutting down. The
-  provider holds a repeat idempotently and answers it from what it holds. **What the caller is answered is
-  unchanged:** the receipt is the first answer within 5 s (`CANCEL_FORWARD_TIMEOUT_MS`), else `DeliveryUnknown`; an
-  answer after that is counted, not reported. `GET /stats` `call_cancel_forwards` (`attempts`, `retries`,
-  `answered_first`, `answered_on_retry`, `answered_after_receipt`, `unanswered`) and two counters
-  ([metrics](../operations/metrics.md#contracts-axis--receipts-control-envelope-authorisation)) are the evidence on
-  which a lane of its own for control signals is to be decided
+  (`MAX_CANCEL_FORWARD_ATTEMPTS`). **No attempt after the first** is sent once the call's window has ended — the
+  first always goes, and the provider answers it from what it holds — and none once the node is shutting down. One
+  forward runs per term: a cancel asked while the term's forward still waits for its receipt joins it; one asked after
+  replaces it. The provider holds a repeat idempotently and joins it to the answer already in progress for the term,
+  so a re-send is answered what the first attempt is. **What the caller is answered, and when:** the first answer
+  within 5 s (`CANCEL_FORWARD_TIMEOUT_MS`), else `DeliveryUnknown`; an answer after that is counted, not reported. A
+  re-send's answer stands where the first attempt or its answer was lost. Two edges: a re-send reaching a provider
+  that no longer keeps the stop record (the newest 1 024) is answered `NotRunning` — at `/a2a`, *completed*; and a
+  re-send reaching a **restarted** provider while unanswered plants its hold there, so a call re-presented later is
+  refused `revoked` — better than the crash bound below, which is unchanged for a gateway crash. **Not changed:** a
+  forward delayed in order behind the gateway's own gossip is not made faster (behind a flood of mints the stop was
+  inside *F* in 4 runs of 10). `GET /stats` `call_cancel_forwards` (`attempts`, `retries`, `answered_first`,
+  `answered_on_retry`, `answered_after_receipt`, `unanswered`, `superseded`, `joined`, `provider_joined`) and two
+  counters ([metrics](../operations/metrics.md#contracts-axis--receipts-control-envelope-authorisation)) are the
+  evidence on which a lane of its own for control signals is to be decided
   ([ledger](../operations/what-is-proven.md#call-cancel-forward-resent)).
 - **Not built, for the `call:` mandate:** a receipt on the A2A or MCP wire (by decision, Q2: the doors answer what
   the gateway did); after a gateway restart, the gateway re-asserts nothing and forwards nothing for the calls it
