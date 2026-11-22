@@ -248,11 +248,13 @@ impl KvHandle {
     ///
     /// The ordering is what makes the failure meaningful. Every other write applies first, so a
     /// durability failure leaves a value that readers, subscribers and peers may already have seen.
-    /// Here, an error means **nothing became visible at this node**.
+    /// Here, an error means **nothing became visible at this node** — until a restart: the record's
+    /// frame may still be whole on disk (a failed sync, or a later record's write torn in the same
+    /// group-committed batch) and replay after a restart (`ops::kv_set_requiring_sync`'s doc).
     ///
     /// # Errors
     /// [`ReceiptError::DurabilityNotEstablished`] when this node has no persistence configured, or
-    /// when the forced sync failed — in both cases nothing was applied.
+    /// when the forced write or sync failed — in both cases nothing was applied.
     /// [`ReceiptError::Rejected`] for an oversized key + value.
     pub async fn set_requiring_sync<K: Into<Arc<str>>>(
         &self,

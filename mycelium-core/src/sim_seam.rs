@@ -453,6 +453,36 @@ mod installed {
         });
     }
 
+    /// Write down how many messages a drain took past the one that started it (only when it took
+    /// any: see [`super::chan_drain`]).
+    pub fn drain_record(stream: &str, taken: usize) {
+        CTX.with(|c| {
+            let mut guard = c.borrow_mut();
+            let Some(ctx) = guard.as_mut() else { return };
+            let mut seams = Seams::new(&mut ctx.kernel, &mut ctx.sources, &ctx.node);
+            if let Err(d) = seams.chan(stream, "drain", || taken.to_string()) {
+                panic!("{d}");
+            }
+        });
+    }
+
+    /// How many messages the recording's drain took here: the recorded count when the next choice
+    /// is this drain, and 0 when it is not (a drain that took nothing recorded nothing).
+    pub fn drain_replay(stream: &str) -> usize {
+        CTX.with(|c| {
+            let mut guard = c.borrow_mut();
+            let Some(ctx) = guard.as_mut() else { return 0 };
+            if ctx.kernel.next_is(Some(&ctx.node), mycelium_sim::trace::ChoiceKind::Chan, stream, "drain") != Some(true) {
+                return 0;
+            }
+            let mut seams = Seams::new(&mut ctx.kernel, &mut ctx.sources, &ctx.node);
+            match seams.chan(stream, "drain", || unreachable!("replay reads the recorded count")) {
+                Ok(v) => v.parse().unwrap_or_else(|_| panic!("replay diverged at chan {stream}/drain: an unreadable recorded count {v:?}")),
+                Err(d) => panic!("{d}"),
+            }
+        })
+    }
+
     /// The verdict the recording gave this send.
     pub fn chan_replay(stream: &str) -> String {
         CTX.with(|c| {
@@ -1034,6 +1064,76 @@ pub fn chan_try_send<T>(stream: &str, tx: &tokio::sync::mpsc::Sender<T>, msg: T)
             recorded
         }
     }
+}
+
+/// Take what is **already queued** on `rx`, one message at a time, for as long as `more` says to
+/// go on — the WAL writer's group commit (identity-and-lifecycle §9 O11). `more` sees each message
+/// after it is taken (a message cannot be put back) and answers whether to take another: `false` at
+/// a message that ends the batch, or once the batch is at its cap. The drain stops, too, when the
+/// queue is empty or closed.
+///
+/// How many messages were queued at that instant is a scheduling fact, not a function of the
+/// inputs, and it decides how many records one `write_all` carries — so it is a recorded choice
+/// (inventory §2, `wal/drain`). Without the kernel: the real drain.
+#[cfg(not(feature = "sim"))]
+pub async fn chan_drain<T>(
+    _stream: &str,
+    rx: &mut tokio::sync::mpsc::Receiver<T>,
+    more: impl FnMut(&T) -> bool,
+) -> Vec<T> {
+    drain_now(rx, more)
+}
+
+/// [`chan_drain`] through the kernel. In `Record` the real drain decides, and its count is written
+/// down **only when it took something**, so a lone message records exactly what it recorded before
+/// group commit existed. In `Replay` the recorded count decides: the drain awaits exactly that many
+/// messages (they were sent by the same schedule, so they arrive), and a `more` that ends the batch
+/// before the recorded count is a divergence — the replay's messages are not the recording's.
+#[cfg(feature = "sim")]
+pub async fn chan_drain<T>(
+    stream: &str,
+    rx: &mut tokio::sync::mpsc::Receiver<T>,
+    mut more: impl FnMut(&T) -> bool,
+) -> Vec<T> {
+    match installed::chan_mode() {
+        None => drain_now(rx, more),
+        Some(mycelium_sim::Mode::Record) => {
+            let taken = drain_now(rx, more);
+            if !taken.is_empty() {
+                installed::drain_record(stream, taken.len());
+            }
+            taken
+        }
+        Some(mycelium_sim::Mode::Replay) => {
+            let n = installed::drain_replay(stream);
+            let mut taken = Vec::with_capacity(n);
+            for i in 0..n {
+                let Some(m) = rx.recv().await else {
+                    panic!("replay diverged at chan {stream}/drain: the recording took {n}, the channel closed after {i}");
+                };
+                let go_on = more(&m);
+                taken.push(m);
+                assert!(
+                    go_on || i + 1 == n,
+                    "replay diverged at chan {stream}/drain: the recording took {n}, the batch ended at {}", i + 1
+                );
+            }
+            taken
+        }
+    }
+}
+
+/// The drain itself: `try_recv` until the queue is empty or closed, or `more` says stop.
+fn drain_now<T>(rx: &mut tokio::sync::mpsc::Receiver<T>, mut more: impl FnMut(&T) -> bool) -> Vec<T> {
+    let mut taken = Vec::new();
+    while let Ok(m) = rx.try_recv() {
+        let go_on = more(&m);
+        taken.push(m);
+        if !go_on {
+            break;
+        }
+    }
+    taken
 }
 
 /// The verdict a `try_send` result carries.

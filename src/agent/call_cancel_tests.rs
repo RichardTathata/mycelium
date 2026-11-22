@@ -519,13 +519,6 @@ async fn the_mcp_tables_eviction_leaves_a_fresh_call_registered_at_a_stale_key()
 /// What a burst queued at the gateway's WAL ahead of a cancel is made of.
 #[derive(Clone, Copy, Debug)]
 enum Burst {
-    /// Appends handed to the gateway's WAL alone (`append_try`), applied and gossiped nowhere: under `sync_mode =
-    /// "flush"` the writer syncs each one. Not plain `kv_set` writes (#821's CI, 2026-11-21): those are gossiped too,
-    /// and the forward then reaches the provider only after every frame queued ahead of it on the same connection —
-    /// 15 718 of them took the CI runner 24 s — which is the connection's order, not the gateway's disk. With the burst
-    /// gossiped, the stop came when the provider had applied 12 550 of 15 718 burst keys; with it on the WAL alone, in
-    /// 13 ms (`docs/operations/what-is-proven.md#call-cancel-behind-collector`).
-    WalAppends,
     /// Concurrent mints (`call_issuer::record`): two required-sync writes each, synced under any mode. Each mint gossips
     /// its records only once synced, so few frames are ahead of the forward on the connection: probed for #821's CI,
     /// 800 mints held the stop 11.8 ms, as 800 synced appends gossiped nowhere did.
@@ -533,16 +526,8 @@ enum Burst {
 }
 
 /// Queue `n` units of `burst` at `g`'s WAL, ahead of whatever is asked next; the mints' tasks, still writing.
-async fn queue_burst(g: &Arc<super::call_mint_tests::N>, target: &NodeId, burst: Burst, n: usize, tag: &str) -> Vec<tokio::task::JoinHandle<()>> {
+async fn queue_burst(g: &Arc<super::call_mint_tests::N>, target: &NodeId, burst: Burst, n: usize, _tag: &str) -> Vec<tokio::task::JoinHandle<()>> {
     match burst {
-        Burst::WalAppends => {
-            let wal = g.ctx().wal.get().expect("persists");
-            for i in 0..n {
-                let u = crate::framing::make_gossip_update(g.a.node_id(), 4, Arc::from(format!("o10/{tag}/{i}")), Bytes::from_static(b"burst"), false, &g.ctx().hlc);
-                wal.append_try(crate::framing::sync_entry_from(&u));
-            }
-            Vec::new()
-        }
         Burst::Mints => {
             // Each task's first write is handed to the WAL in the same poll that counts it begun.
             let begun = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -644,13 +629,52 @@ async fn the_stop_beats_the_acknowledgement_behind(mode: crate::config::SyncMode
     let _ = std::fs::remove_dir_all(&cert_dir);
 }
 
-/// §9 O10 under `sync_mode = "flush"`, behind a burst of synced appends at the gateway's WAL — what O10 promises the
-/// forward does not wait for. Seen failing first on main at 7e9486f7 (the forward sent only after the revocation's
-/// sync), with plain gossiped writes as the burst; with the burst on the WAL alone it fails there the same way (the
-/// revocation's own sync is behind it).
+/// **§9 O10 under `sync_mode = "flush"`: the forward does not wait for the gateway's own sync, whatever the disk
+/// does.** A gateway with `[persistence]` under `Flush` and a provider; a client's call runs at the provider; the
+/// gateway's revoke write is **held at a gate** (`hold_revoke_writes`, before `finish_revoke`'s required-sync write) —
+/// the gateway's disk not yet done with the revocation, deterministically. Asserted: the call stops at the provider
+/// inside *F* (bound 1) **while `cancel_call` has not answered** and the gateway's KV still holds the first checkpoint;
+/// released, the cancel is answered once the revocation is on disk, and the record is the revoking checkpoint.
+///
+/// It used to hold the disk with a burst of WAL-only appends sized to about 3·*F* of syncs. Since the WAL's writer
+/// commits what is queued under one sync (§9 O11, #824) such a burst drains in one or a few syncs, so it no longer held
+/// the acknowledgement and the test's premise was gone (#824's CI, 2026-11-21); the gate holds the same thing without
+/// depending on the disk. Seen failing first with the old order planted (`finish_revoke` awaited before the forward
+/// in `cancel`): the call ran on at the provider until the gate was released.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn under_flush_the_providers_stop_beats_the_acknowledgement_behind_a_burst_of_writes() {
-    the_stop_beats_the_acknowledgement_behind(crate::config::SyncMode::Flush, Burst::WalAppends).await;
+    let (g, p, cert_dir) = pair(Opts { mint: true, persist: true, wal: Some((crate::config::SyncMode::Flush, 1_000_000)), ..Opts::default() }).await;
+    let g = Arc::new(g);
+    let checkpoint_seq = |term: &str| serde_json::from_slice::<SignedRevocationCheckpoint>(&g.kv(&call_checkpoint_key(&g.gateway(), term)).unwrap()).unwrap().checkpoint.seq;
+    let g2 = Arc::clone(&g);
+    let answered = tokio::spawn(async move { g2.client_call("slow").await });
+    p.running(1).await;
+    p.began(1).await;
+    let term = g.ctx().call_issuer.issued_terms().pop().expect("minted");
+    let held = call_issuer::test_hooks::hold_revoke_writes(g.a.node_id());
+    let asked = std::time::Instant::now();
+    let (g2, t2) = (Arc::clone(&g), term.clone());
+    let cancel = tokio::spawn(async move { g2.a.cancel_call(&t2).await });
+    assert!(until(|| held.reached() == 1, Duration::from_secs(10)).await, "the revoke reached its durable write");
+    let stopped = until(|| p.authority.running_count() == 0, Duration::from_millis(F_MS)).await;
+    let stop_took = asked.elapsed();
+    assert!(stopped, "the call did not stop at the provider inside bound 1 (F = {F_MS} ms) while the gateway's revoke write was held: the forward waited for the gateway's own sync");
+    assert!(!cancel.is_finished(), "cancel_call answered before its revocation was on disk");
+    assert_eq!(checkpoint_seq(&term), 1, "nothing in the gateway's KV before the sync");
+    held.release(1);
+    let receipt = tokio::time::timeout(Duration::from_secs(30), cancel).await.expect("answered once on disk").unwrap().expect("on disk");
+    eprintln!("§9 O10, Flush, the gateway's revoke write held: the provider's stop seen {stop_took:?} after the cancel; receipt {receipt:?}");
+    // Under `flush` the provider's answer can wait at the gateway's connection reader (O11's PR 2), so the receipt may
+    // be `DeliveryUnknown` — never a negative.
+    assert!(matches!(receipt.class, CancelClass::Stopped | CancelClass::DeliveryUnknown), "{receipt:?}");
+    assert_eq!(checkpoint_seq(&term), 2, "the revoking checkpoint is the gateway's record once acknowledged");
+    let reply = tokio::time::timeout(Duration::from_secs(10), answered).await.expect("the client is answered").unwrap();
+    assert!(reply.to_string().contains("cancelled"), "{reply}");
+    assert_eq!(p.finished.load(Ordering::SeqCst), 0, "the tool never finished");
+    drop(held);
+    g.a.shutdown().await;
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
 }
 
 /// §9 O10 under the default `sync_mode` (`async`), behind concurrent mints — required-sync writes queue behind each
