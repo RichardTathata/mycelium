@@ -49,11 +49,13 @@ carry a GitHub artifact attestation (SLSA v1 build provenance, signed keyless th
 Rekor log), which the release workflow verified before it attached the file:
 
 ```bash
-gh attestation verify mycelium-NEW-linux-x86_64.tar.gz --repo RichardTathata/mycelium \
-  --signer-workflow RichardTathata/mycelium/.github/workflows/release.yml --source-ref refs/tags/vNEW
-gh attestation verify oci://ghcr.io/richardtathata/mycelium:NEW --repo RichardTathata/mycelium \
-  --signer-workflow RichardTathata/mycelium/.github/workflows/release.yml --source-ref refs/tags/vNEW
+ID="https://github.com/RichardTathata/mycelium/.github/workflows/release.yml@refs/tags/vNEW"
+gh attestation verify mycelium-NEW-linux-x86_64.tar.gz --repo RichardTathata/mycelium --cert-identity "$ID" --deny-self-hosted-runners
+gh attestation verify oci://ghcr.io/richardtathata/mycelium:NEW --repo RichardTathata/mycelium --cert-identity "$ID" --deny-self-hosted-runners
 ```
+
+`--cert-identity` is exact (workflow file and tag); gh's `--signer-workflow` is a prefix match and would also admit a
+workflow whose path merely starts with `release`.
 
 The offline and `cosign` forms are in [`RELEASING.md` § 8](RELEASING.md#8-publish-the-github-release). A release asset
 that fails verification, or that verifies as built by any workflow other than `release.yml` or from any ref other than

@@ -216,11 +216,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   anything is uploaded, and `latest` now moves in its own step, by digest, only after the image verifies. Permissions
   are per job (signing only in the two jobs that sign; nothing at the workflow's level), every action in
   `release.yml` is pinned by commit SHA, and `scripts/check-release-workflow.py` (in `make check` and CI) fails an
-  upload or a move of `latest` not preceded by its verification. A dry run — a pull request from a branch of this
-  repository, or a dispatch — attests and verifies the files; the image half first runs at a tag. **Check:**
-  `gh attestation verify mycelium-NEW-linux-x86_64.tar.gz --repo RichardTathata/mycelium --signer-workflow
-  RichardTathata/mycelium/.github/workflows/release.yml --source-ref refs/tags/vNEW` prints a verified result for the
-  first tag cut after this change; v2.40.1 and earlier carry sums only.
+  upload or image tag not preceded by its verification. The image index is pushed under a staging tag
+  (`sha-<commit>`), attested and verified, and only then tagged `:NEW` and `:latest`, each by digest. **Only a push of
+  a `v*` tag publishes**, and only one on `main` or a `release-*` branch: a `workflow_dispatch` is now always a dry run,
+  on any ref (before this a dispatch on a tag ref published, whatever its `dry_run` input said). The release's base
+  images are pinned by digest, its checkouts keep no credentials, and `cla.yml`'s third-party action is pinned by SHA.
+  A dry run — a pull request from a branch of this repository, or a dispatch — attests and verifies the files; the
+  image half first runs at a tag. **Check:** `gh attestation verify mycelium-NEW-linux-x86_64.tar.gz --repo
+  RichardTathata/mycelium --cert-identity https://github.com/RichardTathata/mycelium/.github/workflows/release.yml@refs/tags/vNEW --deny-self-hosted-runners` prints a verified result for the first tag
+  cut after this change; v2.40.1 and earlier carry sums only.
 - **The plan for the security-operations rows** ([`docs/plans/security-operations.md`](docs/plans/security-operations.md)):
   SO1 (SIEM export, planned for the wave 2 MINOR, decisions D1–D8), SO2 (the SDKs' dependency audits) and SO3.
 

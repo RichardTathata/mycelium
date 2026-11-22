@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 # The published node (docs/plans/adopter-surface.md, row X0).
 #
 # Three stages, one build:
@@ -22,7 +22,8 @@
 ARG NODE_FEATURES=cli,tls,compliance,a2a,llm,metrics
 ARG STEM_FEATURES=stem,gateway,llm,object_store,compliance
 
-FROM rust:1.96-slim-bookworm AS builder
+# Base images pinned by digest (security-operations SO3; #827's review, F9); RELEASING.md § 2 refreshes them.
+FROM rust:1.96-slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba72290398a644c135c97eaa881447fddc354ee4701a3 AS builder
 ARG NODE_FEATURES
 ARG STEM_FEATURES
 ARG TARGETARCH
@@ -39,7 +40,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM scratch AS export
 COPY --from=builder /out/ /
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
 ARG VERSION=dev
 ARG REVISION=unknown
 LABEL org.opencontainers.image.title="mycelium" \

@@ -13,7 +13,9 @@ jobs:
     # The action needs write access to create the `cla-signatures` branch +
     # `signatures/cla.json` storage file and to post the sign/confirm comment.
     # Without this block the default GITHUB_TOKEN is read-only and the action
-    # fails with "Resource not accessible by integration".
+    # fails with "Resource not accessible by integration". `contents: write` stays while the signatures live in this
+    # repository (the action's README: it "can be 'read' if the signatures are in remote repository"); `issues: write`
+    # is kept because this job has run with it and no run without it has been seen (2026-11-22, #827's review F5).
     permissions:
       contents: write
       pull-requests: write
@@ -24,7 +26,9 @@ jobs:
       github.event_name == 'pull_request_target'
     steps:
       - name: CLA Assistant
-        uses: contributor-assistant/github-action@v2.6.1
+        # Pinned by commit SHA (#827's review, F5): this job runs on `pull_request_target` and `issue_comment`, which any
+        # GitHub user can trigger, and holds `contents: write` — a moved tag on a third-party action would run with it.
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
         # Use the now-writable GITHUB_TOKEN for both the signatures store and PR
         # comments — avoids depending on a separately-scoped CLA_TOKEN PAT. (To
         # store signatures in a *different* repo, restore PERSONAL_ACCESS_TOKEN

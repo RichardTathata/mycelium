@@ -51,14 +51,14 @@ curl -fsSLO "$base/mycelium-${MYCELIUM_RELEASE_TAG#v}-$arch.tar.gz" && curl -fsS
 sha256sum --ignore-missing -c SHA256SUMS && tar -xzf "mycelium-${MYCELIUM_RELEASE_TAG#v}-$arch.tar.gz"
 "./mycelium-${MYCELIUM_RELEASE_TAG#v}-$arch/mycelium" --version
 # Provenance (a tag cut after SO3): which workflow, commit and tag built the file. gh must be logged in to any account.
-gh attestation verify "mycelium-${MYCELIUM_RELEASE_TAG#v}-$arch.tar.gz" --repo RichardTathata/mycelium \
-  --signer-workflow RichardTathata/mycelium/.github/workflows/release.yml --source-ref "refs/tags/$MYCELIUM_RELEASE_TAG"
+gh attestation verify "mycelium-${MYCELIUM_RELEASE_TAG#v}-$arch.tar.gz" --repo RichardTathata/mycelium --deny-self-hosted-runners \
+  --cert-identity "https://github.com/RichardTathata/mycelium/.github/workflows/release.yml@refs/tags/$MYCELIUM_RELEASE_TAG"   # exact: this workflow file, this tag
 ```
 
 ```sh
 docker run --rm "ghcr.io/richardtathata/mycelium:${MYCELIUM_RELEASE_TAG#v}" --version   # the image tag has no v
-gh attestation verify "oci://ghcr.io/richardtathata/mycelium:${MYCELIUM_RELEASE_TAG#v}" --repo RichardTathata/mycelium \
-  --signer-workflow RichardTathata/mycelium/.github/workflows/release.yml --source-ref "refs/tags/$MYCELIUM_RELEASE_TAG"
+gh attestation verify "oci://ghcr.io/richardtathata/mycelium:${MYCELIUM_RELEASE_TAG#v}" --repo RichardTathata/mycelium --deny-self-hosted-runners \
+  --cert-identity "https://github.com/RichardTathata/mycelium/.github/workflows/release.yml@refs/tags/$MYCELIUM_RELEASE_TAG"
 ```
 
 Without `gh`, the Release's `*.sigstore.json` bundles verify with `cosign verify-blob-attestation`, and offline with

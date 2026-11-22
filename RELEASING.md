@@ -20,6 +20,12 @@ make check-full        # clippy feature-matrix + wasm-host clippy + the test sui
 ```
 Must be green. (`make check` is the fast pre-push gate; a *release* runs `check-full`.)
 
+**The release's base images are pinned by digest** (`docker/Dockerfile.node`'s `# syntax=` frontend, `rust:` and
+`debian:bookworm-slim`, and the clean-container smoke's `debian:bookworm-slim` in `release.yml`; security-operations
+SO3). A pin freezes the base layer, not the packages: both stages `apt-get install` from the archive at build time.
+Refresh the digests at each MINOR, in their own commit, with
+`docker buildx imagetools inspect <image>:<tag> --format '{{json .Manifest}}'` (the index digest).
+
 ```bash
 scripts/check-release-blockers.sh --release   # a blocker a constant in the tree states
 ```
@@ -180,7 +186,13 @@ smokes each Linux tarball in a clean container with no toolchain (`mycelium --ve
 Sigstore keyless, SLSA v1 provenance, in the public Rekor log; security-operations SO3) and **verifies every
 attestation before it attaches anything or moves `latest`**, attaches the tarballs, `SHA256SUMS` and the Sigstore
 bundles to the tag's Release — **creating the Release from the annotated tag's message if step 8 has not run yet** —
-and pushes `ghcr.io/richardtathata/mycelium:NEW` (the image tag has no `v`), then `:latest` once the image verifies.
+and tags `ghcr.io/richardtathata/mycelium:NEW` (the image tag has no `v`), then `:latest`, each by digest once the
+image verifies (the index first sits under a staging tag, `sha-<commit>`). It publishes only from a **push** of the
+tag, on a commit of `main` or a `release-*` branch; a `workflow_dispatch` is always a dry run, on any ref.
+
+**Open (the maintainer's, a repository setting):** who may push a `v*` tag. The workflow refuses a tag on a commit
+outside `main` and `release-*`, but any writer can still push a tag on such a commit's history; a tag ruleset on
+`v*` restricted to the maintainer closes that (security-operations SO3, #827's review F6). Not set as of 2026-11-22.
 Watch it:
 `gh run watch "$(gh run list --workflow release.yml --event push --limit 1 --json databaseId --jq '.[0].databaseId')"`
 (`--event push`: the workflow also dry-runs on pull requests, and `--limit 1` without it returns one of those). A red
@@ -237,20 +249,23 @@ NEW=2.41.0; REPO=RichardTathata/mycelium; IMAGE=ghcr.io/richardtathata/mycelium
 gh release download "v$NEW" --repo "$REPO" --pattern "mycelium-$NEW-linux-x86_64.tar.gz" --pattern SHA256SUMS \
   --pattern "mycelium-$NEW.sigstore.json" --pattern "mycelium-$NEW-image-index.sigstore.json"
 sha256sum -c --ignore-missing SHA256SUMS
-gh attestation verify "mycelium-$NEW-linux-x86_64.tar.gz" --repo "$REPO" \
-  --signer-workflow "$REPO/.github/workflows/release.yml" --source-ref "refs/tags/v$NEW" --deny-self-hosted-runners
-gh attestation verify SHA256SUMS --repo "$REPO" \
-  --signer-workflow "$REPO/.github/workflows/release.yml" --source-ref "refs/tags/v$NEW"
-gh attestation verify "oci://$IMAGE:$NEW" --repo "$REPO" \
-  --signer-workflow "$REPO/.github/workflows/release.yml" --source-ref "refs/tags/v$NEW"
-# Offline, from the bundles the Release carries (fetch the trusted root once, online: gh attestation trusted-root):
+ID="https://github.com/$REPO/.github/workflows/release.yml@refs/tags/v$NEW"   # the exact signer: workflow and tag
+gh attestation verify "mycelium-$NEW-linux-x86_64.tar.gz" --repo "$REPO" --cert-identity "$ID" --deny-self-hosted-runners
+gh attestation verify SHA256SUMS --repo "$REPO" --cert-identity "$ID" --deny-self-hosted-runners
+gh attestation verify "oci://$IMAGE:$NEW" --repo "$REPO" --cert-identity "$ID" --deny-self-hosted-runners
+# Offline, from the bundles the Release carries (fetch the trusted root once, online):
 gh attestation trusted-root > trusted_root.jsonl
-gh attestation verify "mycelium-$NEW-linux-x86_64.tar.gz" --repo "$REPO" --source-ref "refs/tags/v$NEW" \
+gh attestation verify "mycelium-$NEW-linux-x86_64.tar.gz" --repo "$REPO" --cert-identity "$ID" --deny-self-hosted-runners \
   --bundle "mycelium-$NEW.sigstore.json" --custom-trusted-root trusted_root.jsonl
+# Optionally, the commit too: --source-digest "$(git rev-parse "v$NEW^{commit}")" in a clone.
 ```
 
-Each must print a verified result naming `release.yml@refs/tags/vNEW`; `--source-ref` is what refuses a dry run's
-attestation (it names `refs/pull/N/merge` or `refs/heads/main`). **Without `gh`**, cosign (v3) checks the same
+Each must print a verified result naming `release.yml@refs/tags/vNEW`. **Use `--cert-identity`, not
+`--signer-workflow`:** gh reads `--signer-workflow` as an unanchored prefix regex, so `…/workflows/rel` passes it, and
+`--repo` alone admits any workflow in the repository (#827's review, F3, reproduced on a real bundle). The exact
+identity names the workflow file and the tag in one string, which is what refuses a dry run's attestation (it names
+`refs/pull/N/merge` or a branch; a dispatch on a tag attests nothing, so an identity naming a tag comes only from
+that tag's push) and any other workflow. **Without `gh`**, cosign (v3) checks the same
 bundle against the public-good Sigstore root:
 
 ```bash
@@ -272,14 +287,14 @@ against a real GitHub bundle when SO3 was written (2026-11-22, cosign v3.1.4). A
 may cite the `gh attestation verify` line as the reader's check.
 
 **If verification fails.** In the workflow, a failed verification stops the run before anything is attached and
-before `latest` moves; the image may already carry the `:NEW` tag (it is created so it can be attested). Do not attach
+before `:NEW` or `latest` is set; the image index exists only under its staging tag, `sha-<commit>` (it must be in the
+registry before its attestation can be pushed beside it), which no document tells anyone to pull. Do not attach
 assets by hand or move `latest` by hand: an unverified asset on the Releases page is exactly what this step exists to
 prevent. Read the step's log — it names the file and the pin that failed. A transient Sigstore, Rekor or GitHub API
 error — at the verify step or at an `actions/attest` step (SO3's own dry run met `InternalError: error fetching tlog
 entry - (404) Not Found` once, gone on the re-run; upstream, the same message was a Rekor outage) — is fixed by
-**re-running all jobs**; a failure that persists is a release blocker: delete the `:NEW` image tag
-(the package's settings on GitHub) so no one pulls an unverified image, leave the Release without assets, and open an
-issue. **After publishing**, an operator's verification that fails on an attached asset — or a verified result naming
+**re-running all jobs**; a failure that persists is a release blocker: delete the `sha-<commit>` staging tag
+(the package's settings on GitHub), leave the Release without assets, and open an issue. **After publishing**, an operator's verification that fails on an attached asset — or a verified result naming
 any ref other than `refs/tags/vNEW`, or any workflow other than `release.yml` — is a security incident: take the
 asset down (`gh release delete-asset vNEW <name>`), move `latest` back to the previous verified tag, and follow
 [`SECURITY.md`](SECURITY.md).

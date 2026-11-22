@@ -29,15 +29,19 @@ This feature is turned on in code.
 - [`version_line`](../../src/main.rs) — the one line `mycelium --version` prints, which the workflow's clean-container
   smoke compares to the tag.
 - The workflow itself is [`.github/workflows/release.yml`](../../.github/workflows/release.yml) and the image is
-  [`docker/Dockerfile.node`](../../docker/Dockerfile.node); a `workflow_dispatch` run is the dry run, and so is a
-  pull request that touches the publishing path — both attest and verify the tarballs and `SHA256SUMS`.
+  [`docker/Dockerfile.node`](../../docker/Dockerfile.node). Only a push of a `v*` tag publishes, and only one on a
+  commit of `main` or a `release-*` branch; a `workflow_dispatch` (on any ref, a tag included) and a pull request that
+  touches the publishing path are dry runs — both attest and verify the tarballs and `SHA256SUMS`, except a dispatch on
+  a tag, which would sign as the tag and so attests nothing.
 - [`scripts/verify-release-attestation.sh`](../../scripts/verify-release-attestation.sh) — the workflow's verification,
-  run after every attestation and before every upload; [`scripts/check-release-workflow.py`](../../scripts/check-release-workflow.py)
-  (in `make check`) fails if an upload or the move of `latest` is not preceded by it, or an action is not pinned by SHA.
+  run after every attestation and before every upload or image tag; [`scripts/check-release-workflow.py`](../../scripts/check-release-workflow.py)
+  (in `make check`) holds the workflow's shape — triggers, permissions, pins, step conditions, and every upload and
+  image tag after its verification.
 - **Verify a download** (the full set, offline and cosign forms: [`RELEASING.md` § 8](../../RELEASING.md#8-publish-the-github-release)):
-  `gh attestation verify mycelium-NEW-linux-x86_64.tar.gz --repo RichardTathata/mycelium --signer-workflow
-  RichardTathata/mycelium/.github/workflows/release.yml --source-ref refs/tags/vNEW`, and the same with
-  `oci://ghcr.io/richardtathata/mycelium:NEW` for the image.
+  `gh attestation verify mycelium-NEW-linux-x86_64.tar.gz --repo RichardTathata/mycelium --cert-identity
+  https://github.com/RichardTathata/mycelium/.github/workflows/release.yml@refs/tags/vNEW --deny-self-hosted-runners`, and the same with
+  `oci://ghcr.io/richardtathata/mycelium:NEW` for the image (`--cert-identity` is exact; `--signer-workflow` is a
+  prefix match).
 - `version_line_names_the_crate_version`, in [`src/main.rs`](../../src/main.rs): the line is `mycelium ` and the
   version `Cargo.toml` declares, read from the manifest by the test. A tag cut out of order is caught earlier, by the
   workflow's version job comparing the tag to `Cargo.toml`; the smoke's own value is that the binary loads and runs

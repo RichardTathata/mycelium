@@ -121,28 +121,45 @@ MINOR). Each promise below is quoted next to what delivers it, or written *not b
   (the files) and `mycelium-NEW-image-{amd64,arm64,index}.sigstore.json`.
 - *"Each is verified in the workflow before the upload and before `latest` moves."* —
   `scripts/verify-release-attestation.sh`, run after each attestation: `gh attestation verify` pinned to the
-  repository, `release.yml` as the signer workflow, the run's ref and commit, and GitHub-hosted runners; once against
-  GitHub's store and once against the bundle that will be attached (and, for an image, against the copy in the
-  registry), plus one verification pinned to a ref that did not build it, which must fail. The `publish` job verifies
-  the files again on the runner that uploads. `latest` is a separate step after the image verification, moved by
-  digest to the verified index and checked to name it.
+  repository, the exact signer identity `…/release.yml@<run's ref>` (`--cert-identity`; gh's `--signer-workflow` is a
+  prefix match, #827's review F3), the run's ref and commit, and GitHub-hosted runners; once against GitHub's store
+  and once against the bundle that will be attached (and, for an image, against the copy in the registry), plus two
+  verifications that must fail — a ref that did not build it, and a prefix of the real identity. The `publish` job
+  verifies the files again on the runner that uploads, and the upload step first checks the directory holds exactly
+  the eight expected regular files (`assets`, F7). The image index is pushed under a staging tag, `sha-<commit>`;
+  `:VERSION` and then `latest` are set after the image verification, each by digest to the verified index and checked
+  to name it (F4).
 - *"Permissions are per job."* — the workflow grants nothing at its top level; `id-token: write` and `attestations:
   write` are held by `bundle` and `publish` only; `packages: write` by `linux` (the per-arch push) and `publish`;
   `contents: write` by `publish` only.
 - *"The dispatch dry run attests and verifies."* — so does the pull-request dry run, from a branch of this repository
-  (a fork's pull request has no OIDC token, and the job says so and skips). See *What a dry run proves* below.
-- Every action in `release.yml` is pinned to a full commit SHA, since the workflow holds `id-token: write`.
-- `scripts/check-release-workflow.py` (in `make check` and CI's lint job) fails if an upload or the move of `latest`
-  is not preceded by its verification, if the upload names a path the verification does not cover, if a job holds
-  signing grants it does not use, or if an action is not pinned; its `--self-test` plants each fault. Seen failing
-  first: on `main`'s workflow before this PR it reports 19 errors.
+  (a fork's pull request has no OIDC token, and the job says so and skips). See *What a dry run proves* below. **Only a
+  push of a `v*` tag publishes:** a dispatch is a dry run on any ref, a tag included (#827's review F1 found that a
+  dispatch on a tag ref published, whatever its input said), and `publish` refuses anything but a push by itself. A
+  dispatch on a tag does not attest either, so an attestation whose identity names a tag comes only from its push.
+- A tag is published only from a commit on `main` or a `release-*` branch, and only while it still points at the
+  commit the run built (F6, the workflow's half).
+- Every action in `release.yml` is pinned to a full commit SHA, and every base image (the Dockerfile's frontend,
+  `rust:` and `debian:` stages, the smoke's container) by digest, since the workflow holds `id-token: write`; every
+  checkout sets `persist-credentials: false` (F9). `cla.yml`'s third-party action, which runs on any user's comment
+  with `contents: write`, is pinned by SHA too (F5); the other workflows' pins are a separate PR.
+- `scripts/check-release-workflow.py` (in `make check` and CI's lint job) is an allow-list over the workflow's
+  triggers, permissions, actions, step conditions and publishing commands, with continuation lines joined and
+  comments dropped; it requires every upload and image tag after its verification, `latest` only in the last step,
+  and publishing only from a tag push. Its `--self-test` plants 41 faults — the first version's 12, the 17 of #827's
+  review (all of which the first version passed), and one or more per fix F1, F4, F6, F7, F9 — and catches each.
+  Seen failing first: it reports main's workflow before this PR as failing. `verify-release-attestation.sh
+  --self-test` plants ten directory faults (symlinks, directories in a bundle's name, dotfiles, extra or missing
+  files, a mismatched sum).
+- **Open (the maintainer's, a repository setting, F6):** a tag ruleset on `v*` restricting who may push one. The
+  workflow refuses a tag off `main` and `release-*`, but cannot stop a writer pushing a tag on a commit of either.
 
 **What a dry run proves, and what only a tag will.** A dry run attests and verifies the real tarballs and
 `SHA256SUMS` exactly as a tag run does, in the same job, and uploads them as a workflow artifact (with the bundle).
-It pushes no image and touches no Release, so **the image attestations, their registry copies, the Release
-attachment and the move of `latest` run only on a tag**: the first tag after this PR is their first run. A dry run's
-attestation names its own ref (`refs/pull/N/merge` or `refs/heads/main`), which every operator check — pinned to
-`refs/tags/vNEW` — refuses.
+It pushes no image and touches no Release, so **the image attestations, their registry copies, the staging and
+version tags, the Release attachment and the move of `latest` run only on a tag**: the first tag after this PR is
+their first run. A dry run's attestation names its own ref (`refs/pull/N/merge` or a branch; a dispatch on a tag
+attests nothing), which every operator check — the exact identity `release.yml@refs/tags/vNEW` — refuses.
 
 **Exit:** on the dry run and on the first tag, `gh attestation verify` passes for every asset and for
 `oci://…@digest` of all three image digests, pinned to `release.yml` and the run's ref *(dry run: the files half, met —
