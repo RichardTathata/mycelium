@@ -10,7 +10,10 @@ The durable finding: **the checkpointer loads member-writable rows, and the floo
 `ckpt/` row names the type tag its blob is decoded with (`saver.py:538-544`). LangGraph 4.x refuses the `"json"` mode's
 constructors, but its default `"msgpack"` mode still imports and calls any type a payload names (a warning only);
 `os.system` ran on 4.1.1 and 4.3.2 and was refused under `LANGGRAPH_STRICT_MSGPACK=true`. LangGraph's advisories call
-store write access post-exploitation; on a fleet it is membership.
+store write access post-exploitation; on a fleet it is membership. So 0.3.5 also changes the saver's default serializer
+to `JsonPlusSerializer(allowed_msgpack_modules=None)`, LangGraph's strict mode regardless of the variable
+(`saver.py::default_serde`, `tests/test_untrusted_rows.py`, seen failing on the floor alone). What stays open is the
+content: the rows are unsigned, so a member can still rewrite a thread's state with allowed types.
 
 Pages: `owner-signed-records.md` (the `ckpt/…` row now says the forgery runs code); `companions/companions.md` (the
 Strands pin). Outside the wiki: the gap row `what-is-proven.md#checkpoint-rows-deserialized-unsigned`, the

@@ -198,16 +198,38 @@ fixed in 4.1.1). The `"json"` mode now refuses a constructor outside an allow-li
 also clears GHSA-mhr3-j7m5-c7c9 / CVE-2026-27794 (pickle in LangGraph's `BaseCache`, fixed in 4.0.0),
 which the saver does not use.
 
-**The floor does not make a member-written row safe to load.** Under the default
-`JsonPlusSerializer`, the `"msgpack"` mode still imports and calls any type a payload names — it
-logs `Deserializing unregistered type …` and goes on; checked on 4.1.1 and 4.3.2 with a payload
-naming `os.system`, which ran. Until the follow-up below, run every process that loads checkpoints
-with **`LANGGRAPH_STRICT_MSGPACK=true`** (only LangGraph's safe types are revived), or pass
-`serde=JsonPlusSerializer(allowed_msgpack_modules=[(module, name), …])` naming the types your graph
-stores. Both refuse a type outside the list, so a graph that checkpoints its own classes must list
-them. The follow-up — owner-signed checkpoint rows verified at read, as the project's
-[owner-signed rule](../docs/wiki/dev/owner-signed-records.md) asks of a record that decides what
-code runs, or a serializer restricted to plain JSON — is not built
+**The floor alone did not make a member-written row safe to load, so 0.3.5 changes the default.**
+Under LangGraph's default `JsonPlusSerializer()`, the `"msgpack"` mode imports and calls any type a
+payload names, logging `Deserializing unregistered type …` and going on, unless
+`LANGGRAPH_STRICT_MSGPACK=true` is set in the loading process: a payload naming `os.system` ran on
+4.1.1 and 4.3.2. The saver now loads, when you pass no `serde`, with **`default_serde()`** —
+`JsonPlusSerializer(allowed_msgpack_modules=None)`, LangGraph's strict mode whatever the variable
+says. Only LangGraph's safe set is constructed (`SAFE_MSGPACK_TYPES` in
+`langgraph.checkpoint.serde._msgpack`: datetimes, UUIDs, decimals, sets, paths, the langchain-core
+messages and `Document`, `Send`, `Command`, `Interrupt` and LangGraph's other types); any other type
+loads as **its raw arguments** and is never called. The `"json"` mode's constructors are refused
+outside the same set, and pickle stays off. `tests/test_untrusted_rows.py` writes the forged rows — a
+channel value, a skeleton and a pending write naming `os.system` or `os.mkdir`, sync and async — and
+asserts nothing runs.
+
+**Upgrading from 0.3.4:** a graph that checkpoints its own classes (a Pydantic or dataclass state, a
+custom message type) now reads them back as plain dicts or lists unless it names them:
+
+```python
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+checkpointer = MyceliumCheckpointSaver("127.0.0.1", 8101,
+    serde=JsonPlusSerializer(allowed_msgpack_modules=[MyState, ("my_app.models", "Order")]))
+```
+
+or sets `LANGGRAPH_STRICT_MSGPACK=true`, under which LangGraph adds a compiled graph's state-schema
+types to the saver's serializer itself (`BaseCheckpointSaver.with_allowlist`). **A `serde` you pass is
+used as given** — including a permissive one; the saver does not narrow it.
+
+**What remains.** The rows are still unsigned. A member can still replace a checkpoint's *content* —
+its state, its pending writes, which parent it names — with any values of the allowed types, or point a
+thread at another checkpoint, and the saver loads that as the thread's state. The follow-up — owner-signed
+checkpoint rows verified at read, as the project's [owner-signed rule](../docs/wiki/dev/owner-signed-records.md)
+asks of a record an agent resumes from — is not built
 ([what is proven](../docs/operations/what-is-proven.md#checkpoint-rows-deserialized-unsigned)).
 
 ## What a write's receipt names (0.3.4)

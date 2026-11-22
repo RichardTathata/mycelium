@@ -469,11 +469,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     names to `loads_typed` (`saver.py:538-544`), and any admitted member, or any client holding `kv:write`, can write
     that row. The floor also clears GHSA-mhr3-j7m5-c7c9 / CVE-2026-27794 (`BaseCache` pickle, fixed in 4.0.0), which
     the saver does not use. The `dev` extra moves to `langgraph>=1.0.10` (GHSA-g48c-2wqr-h844 / CVE-2026-28277,
-    fixed in 1.0.10), `pytest>=9.0.3` and `pytest-asyncio>=1.3.0` (the first that installs beside pytest 9). No code change: the suite passes on 4.1.1 and 4.3.2. **The floor does not
-    make a member-written row safe to load.** Under the default `JsonPlusSerializer` the `"msgpack"` mode still
-    imports and calls any type a payload names; a payload naming `os.system` ran on 4.1.1 and 4.3.2. Run every process
-    that loads checkpoints with `LANGGRAPH_STRICT_MSGPACK=true`, or pass `allowed_msgpack_modules`. Owner-signed
-    checkpoint rows, or a plain-JSON serializer, are *not built*
+    fixed in 1.0.10), `pytest>=9.0.3` and `pytest-asyncio>=1.3.0` (the first that installs beside pytest 9).
+    **The saver's default serializer is now safe against a member-written row.** The floor alone did not do that:
+    under LangGraph's default `JsonPlusSerializer()` the `"msgpack"` mode imports and calls any type a payload names
+    unless `LANGGRAPH_STRICT_MSGPACK=true` is set, and a payload naming `os.system` ran on 4.1.1 and 4.3.2. With no
+    `serde` passed, the saver now loads with `default_serde()`, `JsonPlusSerializer(allowed_msgpack_modules=None)`:
+    LangGraph's strict mode whatever the variable says. Only LangGraph's `SAFE_MSGPACK_TYPES` are constructed, and
+    any other type loads as its raw arguments, never called. `tests/test_untrusted_rows.py` forges a channel value,
+    a skeleton and a pending write naming `os.system` or `os.mkdir`, sync and async, and was seen failing on the
+    floor alone (13 of its 15 cases). **Upgrade note:** a graph that checkpoints its own classes (a Pydantic or
+    dataclass state) reads them back as plain dicts unless it names them,
+    `serde=JsonPlusSerializer(allowed_msgpack_modules=[MyState, …])`, or sets `LANGGRAPH_STRICT_MSGPACK=true`, under
+    which LangGraph adds the compiled graph's state-schema types itself. A `serde` the caller passes is used as given.
+    **Not changed:** the rows are still unsigned, so a member can still replace a checkpoint's content with other
+    values of the allowed types. Owner-signed checkpoint rows are *not built*
     (`what-is-proven.md#checkpoint-rows-deserialized-unsigned`; the README's *What the serializer trusts*).
   - **`mycelium-py` 0.2.16** (unreleased; the floors ride in the version already on `main`): the `sign` extra needs
     `cryptography>=50.0.0` (was `>=42`). That covers **GHSA-jwv3-5hgf-82ww** / CVE-2026-69249 (HIGH, exponential
