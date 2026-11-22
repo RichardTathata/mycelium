@@ -356,19 +356,21 @@ class XorCipher:
         return bytes(b ^ 0x5A for b in ciphertext)
 
 
-@pytest.mark.parametrize("inner", ["langgraph-default", "default_serde"])
+@pytest.mark.parametrize("inner", ["permissive", "default_serde"])
 def test_encryption_does_not_authenticate_a_row(tmp_path, inner):
     # A forged row tagged "msgpack" (no "+cipher") goes to EncryptedSerializer's inner serializer
-    # undecrypted. With LangGraph's default inner one it runs; built on default_serde() it does not.
-    from langgraph.checkpoint.serde.encrypted import EncryptedSerializer
+    # undecrypted. LangGraph's default inner one is a bare JsonPlusSerializer(), permissive unless
+    # LANGGRAPH_STRICT_MSGPACK is set; "permissive" names that case explicitly, so the result does not
+    # depend on the variable. Built on default_serde() the forgery does not run.
+    import inspect
 
-    import langgraph.checkpoint.serde._msgpack as lg_msgpack
+    from langgraph.checkpoint.serde.encrypted import EncryptedSerializer
 
     from langgraph_checkpoint_mycelium import default_serde
 
-    if inner == "langgraph-default" and lg_msgpack.STRICT_MSGPACK_ENABLED:
-        pytest.skip("LANGGRAPH_STRICT_MSGPACK is set, so LangGraph's default inner serializer is strict here")
-    serde = EncryptedSerializer(XorCipher()) if inner == "langgraph-default" else EncryptedSerializer(XorCipher(), default_serde())
+    assert type(inspect.signature(EncryptedSerializer.__init__).parameters["serde"].default) is JsonPlusSerializer
+    inner_serde = JsonPlusSerializer(allowed_msgpack_modules=True) if inner == "permissive" else default_serde()
+    serde = EncryptedSerializer(XorCipher(), inner_serde)
     gw = FakeGateway()
     saver = wire(MyceliumCheckpointSaver("127.0.0.1", 1, serde=serde), gw)
     cfg = honest_checkpoint(saver, f"t-enc-{inner}")
@@ -378,4 +380,4 @@ def test_encryption_does_not_authenticate_a_row(tmp_path, inner):
 
     saver.get_tuple(cfg)
 
-    assert marker.exists() == (inner == "langgraph-default")
+    assert marker.exists() == (inner == "permissive")
