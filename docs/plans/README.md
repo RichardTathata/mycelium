@@ -162,6 +162,16 @@ future contributor needs so they don't re-litigate a settled choice — lives he
 
 ## Proposed — not yet started
 
+[`security-operations.md`](security-operations.md) — **security operations: SIEM export, SDK dependency audits, signed
+release assets** (**agreed with the maintainer 2026-11-22**, rev 0.1; decisions D1–D12 taken as recommended). Three
+rows answering a CISO-style security assessment: **SO1**, the audit chain exported to a SIEM — a JSON-lines file sink
+attached from configuration that refills its gaps from the chain, a cursor on `/gateway/audit` carrying signatures,
+and opt-in credentials on `/metrics` and `/stats` (`metrics:read`) — *planned for the wave 2 MINOR*; **SO2**, the npm
+and PyPI dependencies audited in CI as the Rust ones are (in progress); **SO3**, GitHub artifact attestations (Sigstore,
+SLSA v1 provenance) on every release tarball, `SHA256SUMS` and image, each verified in the workflow before it is
+attached or `latest` moves (built; first proven at the next tag). SO2 and SO3 need no MINOR and land before wave 1b's
+tag; scheduled in [`identity-and-lifecycle.md` § 4](identity-and-lifecycle.md#4--sequence-and-release-shape).
+
 [`external-critique-2026-11-12.md`](external-critique-2026-11-12.md) — **the third-party critique of 2026-11-12:
 verification and the plan that answers it** (**agreed with the maintainer 2026-11-12**, rev 0.4 — rev 0.4, 2026-11-13, adds a second candidate shape for CR13's second step; rev 0.3: all sixteen decisions of its §5 answered as
 recommended; rev 0.2 took #773's independent review). The critique is vendored unchanged at

@@ -38,7 +38,9 @@ pins rather than assuming every tag is interchangeable.
 Every `v*` tag publishes the node ([feature page](../features/published-node.md)): three binaries per platform
 (`mycelium`, `mycelium-stem`, `mycelium-artifact`) for Linux x86_64, Linux aarch64 and macOS aarch64, with a
 `SHA256SUMS`, and a multi-arch image. The Linux binaries are built on Debian bookworm and need glibc 2.36 or newer
-and `libssl3`; the macOS binary is arm64. The sums are integrity, not provenance: nothing signs the binaries yet.
+and `libssl3`; the macOS binary is arm64. From the first tag after security-operations SO3, every tarball, the sums
+and the image also carry a GitHub artifact attestation (SLSA v1 provenance, Sigstore) that the release workflow
+verified before attaching it; check it with `gh attestation verify` (below). Earlier tags carry sums only.
 
 ```sh
 # MYCELIUM_RELEASE_TAG as set in § Pin the source (one assignment per page, so the release step moves one line);
@@ -48,11 +50,19 @@ base="https://github.com/RichardTathata/mycelium/releases/download/$MYCELIUM_REL
 curl -fsSLO "$base/mycelium-${MYCELIUM_RELEASE_TAG#v}-$arch.tar.gz" && curl -fsSLO "$base/SHA256SUMS"
 sha256sum --ignore-missing -c SHA256SUMS && tar -xzf "mycelium-${MYCELIUM_RELEASE_TAG#v}-$arch.tar.gz"
 "./mycelium-${MYCELIUM_RELEASE_TAG#v}-$arch/mycelium" --version
+# Provenance (a tag cut after SO3): which workflow, commit and tag built the file. gh must be logged in to any account.
+gh attestation verify "mycelium-${MYCELIUM_RELEASE_TAG#v}-$arch.tar.gz" --repo RichardTathata/mycelium --deny-self-hosted-runners \
+  --cert-identity "https://github.com/RichardTathata/mycelium/.github/workflows/release.yml@refs/tags/$MYCELIUM_RELEASE_TAG"   # exact: this workflow file, this tag
 ```
 
 ```sh
 docker run --rm "ghcr.io/richardtathata/mycelium:${MYCELIUM_RELEASE_TAG#v}" --version   # the image tag has no v
+gh attestation verify "oci://ghcr.io/richardtathata/mycelium:${MYCELIUM_RELEASE_TAG#v}" --repo RichardTathata/mycelium --deny-self-hosted-runners \
+  --cert-identity "https://github.com/RichardTathata/mycelium/.github/workflows/release.yml@refs/tags/$MYCELIUM_RELEASE_TAG"
 ```
+
+Without `gh`, the Release's `*.sigstore.json` bundles verify with `cosign verify-blob-attestation`, and offline with
+`gh attestation verify --bundle … --custom-trusted-root …` ([`RELEASING.md` § 8](../../RELEASING.md#8-publish-the-github-release)).
 
 Inside a container the node binds every address for gossip (the image sets `GOSSIP_BIND_ADDRESS=0.0.0.0`); to reach
 the gateway, the configuration file sets `http_addr` and a credential — the run command with ports and a mounted

@@ -1,19 +1,33 @@
-# Publish the node (docs/plans/adopter-surface.md, row X0).
+# Publish the node (docs/plans/adopter-surface.md, row X0), with build provenance (docs/plans/security-operations.md,
+# row SO3).
 #
-# On a `v*` tag — the one RELEASING.md § 7 pushes — this builds `mycelium`, `mycelium-stem` and `mycelium-artifact`
-# for Linux x86_64, Linux aarch64 and macOS aarch64, each natively on its own runner; smokes every Linux tarball in
-# a clean bookworm container with no Rust toolchain (`mycelium --version` must print the tag's version, and
-# `wire-check` must run over the repository's unit fixtures); attaches the tarballs and `SHA256SUMS` to the GitHub
-# Release of that tag, creating the Release from the annotated tag's message when § 8 has not yet (so the Releases
-# page cannot silently fall behind the tags again, as it did after v2.4.4); and pushes a multi-arch image to
-# ghcr.io, tagged by version and `latest`.
+# On a push of a `v*` tag — the one RELEASING.md § 7 pushes, on a commit of `main` or of a `release-*` branch — this
+# builds `mycelium`, `mycelium-stem` and `mycelium-artifact` for Linux x86_64, Linux aarch64 and macOS aarch64, each
+# natively on its own runner; smokes every Linux tarball in a clean bookworm container with no Rust toolchain
+# (`mycelium --version` must print the tag's version, and `wire-check` must run over the repository's unit fixtures);
+# attests the three tarballs and `SHA256SUMS`, the image index and both per-architecture images (GitHub artifact
+# attestations: Sigstore keyless, SLSA v1 build provenance, logged in the public Rekor log; the image attestations
+# pushed to ghcr.io beside the image); and **verifies every attestation before a file is attached, before the image
+# is tagged by version and before `latest` moves**. The index is first pushed under `sha-<commit>`, a staging tag,
+# since an attestation can only be pushed beside an image the registry holds. It then attaches the tarballs,
+# `SHA256SUMS` and the Sigstore bundles to the GitHub Release of that tag, creating the Release from the annotated
+# tag's message when § 8 has not yet (so the Releases page cannot silently fall behind the tags again, as it did after
+# v2.4.4), and tags the verified image `:VERSION`, then `:latest`, each by digest.
 #
-# The dry run the plan's exit asks for runs two ways, and publishes nothing either way: on every pull request that
-# touches this workflow, the Dockerfile or the three binaries' sources (so a change to the publishing path proves
-# itself before it merges — GitHub resolves `workflow_dispatch` only on the default branch, so a branch cannot be
-# dispatched), and by `workflow_dispatch` once merged. A dry run builds and smokes everything and uploads the bundle
-# as a workflow artifact; no Release is touched and no image pushed. The sums are integrity, not provenance: nothing
-# here signs a binary (stated on the feature page and in what-is-proven.md).
+# Every other run is a dry run and publishes nothing: a pull request that touches this workflow, the Dockerfile, the
+# verification script or the three binaries' sources (so a change to the publishing path proves itself before it
+# merges), and every `workflow_dispatch`, on any branch or tag (GitHub needs the workflow on the default branch, then
+# runs a dispatch on whichever ref is chosen; only `push` of a tag publishes, whatever the `dry_run` input says). A dry
+# run builds and smokes everything, **attests and verifies the tarballs and `SHA256SUMS`** (a pull request from a fork
+# cannot mint an OIDC token, and a dispatch on a tag would sign as that tag, so those say so and skip), and uploads the
+# bundle as a workflow artifact; no Release is touched and no image is pushed, so the image's attestation and its tags
+# are first exercised by a tag. A dry run's attestation names its own ref (`refs/pull/N/merge` or `refs/heads/…`) in
+# its signer identity, so the operator's check — the exact identity `release.yml@refs/tags/vNEW` — refuses it.
+#
+# Every action is pinned by full commit SHA and every base image by digest: this workflow holds `id-token: write`, and
+# a moved tag would sign whatever its new content chose to. `scripts/check-release-workflow.py` (in `make check` and
+# CI) holds this file's shape — triggers, permissions, pins, step conditions, and every publishing command after its
+# verification — and its self-test plants each fault it knows.
 name: Release
 
 on:
@@ -22,6 +36,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/release.yml'
+      - 'scripts/verify-release-attestation.sh'
       - 'docker/Dockerfile.node'
       - 'mycelium-wasm-host/Cargo.toml'
       - 'src/main.rs'
@@ -34,9 +49,8 @@ on:
         type: boolean
         default: true
 
-permissions:
-  contents: write
-  packages: write
+# Nothing at the workflow's level: each job names what it needs (SO3). Only `bundle` and `publish` can sign.
+permissions: {}
 
 concurrency:
   group: release-${{ github.ref }}
@@ -54,17 +68,24 @@ jobs:
   version:
     name: The version, and whether this is a dry run
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       version: ${{ steps.v.outputs.version }}
       dry_run: ${{ steps.v.outputs.dry_run }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0              # the ancestry check below reads main and the release-* branches
+          persist-credentials: false
       - id: v
         shell: bash
         run: |
           set -euo pipefail
           crate=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+          # Only a push of a v* tag publishes. A dispatch is always a dry run, on any ref — a tag included, since GitHub
+          # lets a dispatch run on any branch or tag once the workflow is on the default branch (#827's review, F1).
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
             tag="${GITHUB_REF_NAME#v}"
             # RELEASING.md § 4 bumps the manifests before § 7 tags; a tag that disagrees with Cargo.toml is a
             # release cut out of order, refused by name rather than published under the wrong number.
@@ -72,14 +93,26 @@ jobs:
               echo "::error::tag v$tag does not match Cargo.toml version $crate (RELEASING.md § 4 before § 7)"
               exit 1
             fi
+            # The tag's commit is on main or on a release-* maintenance branch: a v* tag pushed on any other commit
+            # (a branch nobody reviewed) is refused before anything is built or signed (#827's review, F6). Who may
+            # push a v* tag at all is a repository setting, not this workflow's (RELEASING.md § 7).
+            on_line=""
+            for b in $(git for-each-ref --format='%(refname)' refs/remotes/origin/main 'refs/remotes/origin/release-*'); do
+              if git merge-base --is-ancestor "$GITHUB_SHA" "$b"; then on_line="$b"; break; fi
+            done
+            [[ -n "$on_line" ]] || { echo "::error::v$tag ($GITHUB_SHA) is on neither main nor a release-* branch"; exit 1; }
+            echo "v$tag is on ${on_line#refs/remotes/}"
             echo "version=$tag" >> "$GITHUB_OUTPUT"
             echo "dry_run=false" >> "$GITHUB_OUTPUT"
           else
             echo "version=$crate" >> "$GITHUB_OUTPUT"
-            # A pull request or a dispatch is a dry run: nothing publishes from a non-tag ref.
+            # A pull request or a dispatch (on any ref) is a dry run: nothing publishes except a tag push.
             echo "dry_run=true" >> "$GITHUB_OUTPUT"
             if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" == "false" ]]; then
               echo "::warning::dry_run=false on a workflow_dispatch is ignored: only a v* tag push publishes"
+            fi
+            if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+              echo "::notice::a $GITHUB_EVENT_NAME on tag $GITHUB_REF_NAME is a dry run: only a push of the tag publishes"
             fi
           fi
       # Release blockers a constant in the tree states (RELEASING.md § 2): on a tag push a blocker fails the release
@@ -105,11 +138,16 @@ jobs:
           - { arch: amd64, target: x86_64,  runner: ubuntu-latest }
           - { arch: arm64, target: aarch64, runner: ubuntu-24.04-arm }
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write   # the per-arch image, pushed by digest on a tag
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       # The binaries, out of the `export` stage: the same bytes the runtime image carries.
       - name: Build the binaries (bookworm, glibc 2.36)
@@ -126,7 +164,7 @@ jobs:
           docker run --rm \
             -v "$PWD/dist:/dist:ro" -v "$PWD/tests/fixtures/units:/units:ro" \
             -e EXPECTED="mycelium $VERSION" -e VERSION="$VERSION" \
-            debian:bookworm-slim sh -euc '
+            debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc sh -euc '
               apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends libssl3 ca-certificates >/dev/null
               got=$(/dist/mycelium --version)
               [ "$got" = "$EXPECTED" ] || { echo "mycelium --version printed [$got], expected [$EXPECTED]"; exit 1; }
@@ -143,7 +181,7 @@ jobs:
           cp dist/mycelium dist/mycelium-stem dist/mycelium-artifact "out/$name/"
           tar -C out -czf "$name.tar.gz" "$name"
           ls -l "$name.tar.gz"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tarball-linux-${{ matrix.target }}
           path: mycelium-${{ env.VERSION }}-linux-${{ matrix.target }}.tar.gz
@@ -152,7 +190,7 @@ jobs:
       # The per-arch runtime image, pushed by digest only; the manifest that names a tag is made once in
       # `publish` from both digests. Skipped on a dry run.
       - if: needs.version.outputs.dry_run == 'false'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -171,7 +209,7 @@ jobs:
           echo "$digest" > "digest-${{ matrix.arch }}"
           echo "pushed $IMAGE@$digest"
       - if: needs.version.outputs.dry_run == 'false'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: digest-${{ matrix.arch }}
           path: digest-${{ matrix.arch }}
@@ -181,12 +219,16 @@ jobs:
     name: macOS aarch64
     needs: version
     runs-on: macos-latest
+    permissions:
+      contents: read
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.96.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@3cfd829add0beb9cf7406e52147d74ad3db19d01 # 1.96.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Build the binaries
         run: |
           set -euo pipefail
@@ -207,33 +249,46 @@ jobs:
           mkdir -p "out/$name"
           cp target/release/mycelium target/release/mycelium-stem target/release/mycelium-artifact "out/$name/"
           tar -C out -czf "$name.tar.gz" "$name"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tarball-macos-aarch64
           path: mycelium-${{ env.VERSION }}-macos-aarch64.tar.gz
           if-no-files-found: error
 
-  publish:
-    name: ${{ needs.version.outputs.dry_run == 'true' && 'Bundle (dry run)' || 'Release and image' }}
+
+  # The bundle: sums, attestation and its verification. Runs on every run, dry or not, so a pull request that changes
+  # this path attests and verifies the files as a tag would. Read-only, except the two grants signing needs.
+  bundle:
+    name: ${{ needs.version.outputs.dry_run == 'true' && 'Bundle, attested (dry run)' || 'Bundle, attested' }}
     needs: [version, linux, macos]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write       # the OIDC token Fulcio exchanges for a short-lived signing certificate
+      attestations: write   # the attestation, stored against this repository
     env:
       VERSION: ${{ needs.version.outputs.version }}
       DRY_RUN: ${{ needs.version.outputs.dry_run }}
       GH_TOKEN: ${{ github.token }}
+      # A pull request from a fork (or Dependabot's) gets no OIDC token, so it cannot attest; it says so and skips. A
+      # dispatch on a tag ref does not attest either: its certificate would name `release.yml@refs/tags/vX`, the
+      # identity the operator's check accepts, for a build that was never published. So an attestation naming a tag
+      # comes only from that tag's push. Every other run attests: a tag push, a dispatch on a branch, a pull request
+      # from a branch of this repository.
+      ATTEST: ${{ ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && github.ref_type != 'tag') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
       # The annotated tag's message is the Release body. `actions/checkout` fetches every tag object and then runs a
       # targeted `+<sha>:refs/tags/<tag>` fetch that overwrites the local tag ref with the *commit*, so
       # `%(contents:body)` read the squash commit's message on v2.37.0's first run (repaired by hand from the local
       # tag; #669's review reproduced the mechanism). Fetch the tag object itself — `--force`, or git refuses to
       # clobber the ref — and refuse a tag that is not annotated: RELEASING § 7 makes every release tag one. On a dry
       # run the version is Cargo.toml's, which may have no tag yet (§ 4 bumps before § 7 tags); then the step says so
-      # and proves nothing, rather than failing a dry run for a reason unrelated to the change. A tag re-pointed on the
-      # remote mid-run would be read here while the assets are the original commit's; the second push queues its own
-      # run, which re-uploads with --clobber.
+      # and proves nothing, rather than failing a dry run for a reason unrelated to the change. Checked here, before
+      # anything is signed; `publish` fetches it again to read it.
       - name: The tag object, not its commit
         run: |
           set -euo pipefail
@@ -245,7 +300,7 @@ jobs:
           kind=$(git cat-file -t "$tag")
           [ "$kind" = "tag" ] || { echo "::error::$tag is a $kind, not an annotated tag; RELEASING § 7 uses git tag -a (delete it, re-create it with -a, force-push it)"; exit 1; }
           echo "tag $tag: $(git tag -l --format='%(contents:subject)' "$tag")"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: tarball-*
           path: bundle
@@ -258,46 +313,177 @@ jobs:
           cat SHA256SUMS
           # Each tarball unpacks to one directory named after itself, with the three binaries and nothing else.
           for t in mycelium-*.tar.gz; do
-            tar -tzf "$t" | grep -vE "^${t%.tar.gz}/(mycelium|mycelium-stem|mycelium-artifact)?$" && { echo "unexpected entry in $t"; exit 1; } || true
+            entries=$(tar -tzf "$t")   # a tar that cannot be read fails the step here
+            if grep -vE "^${t%.tar.gz}/(mycelium|mycelium-stem|mycelium-artifact)?$" <<<"$entries"; then
+              echo "unexpected entry in $t"; exit 1
+            fi
           done
 
-      - if: env.DRY_RUN == 'true'
-        uses: actions/upload-artifact@v4
+      # One attestation whose subjects are the three tarballs and SHA256SUMS (actions/attest: with no predicate
+      # input it generates SLSA v1 build provenance; https://github.com/actions/attest#attestation-modes).
+      - if: env.ATTEST == 'true'
+        id: attest-files
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            bundle/mycelium-*.tar.gz
+            bundle/SHA256SUMS
+      - if: env.ATTEST == 'true'
+        name: Verify each file's attestation
+        env:
+          BUNDLE_PATH: ${{ steps.attest-files.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          cp "$BUNDLE_PATH" "bundle/mycelium-$VERSION.sigstore.json"
+          scripts/verify-release-attestation.sh files bundle "$VERSION"
+      - if: env.ATTEST != 'true'
+        name: No attestation (a fork's pull request, or a dispatch on a tag)
+        run: |
+          set -euo pipefail
+          [ "$DRY_RUN" = "true" ] || { echo "::error::a publishing run must attest"; exit 1; }
+          echo "::notice::not attested: a pull request from a fork or from Dependabot cannot mint an OIDC token, and a dispatch on a tag would sign as the tag. A pull request from a branch of this repository, a dispatch on a branch and a tag push all attest and verify."
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-bundle-${{ env.VERSION }}
           path: bundle/
           if-no-files-found: error
 
-      - if: env.DRY_RUN == 'false'
-        name: The Release — created from the tag's message if § 8 has not run, then the assets attached
+  # The Release and the image: a tag push only. Every file is verified again on this runner before it is attached. The
+  # image index is pushed under a staging tag named after the commit, attested and verified; only then is it tagged by
+  # version (by digest), the Release attached, and `latest` moved — to the verified digest (#827's review, F4).
+  publish:
+    name: Release and image
+    needs: [version, bundle]
+    if: needs.version.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # the Release and its assets
+      packages: write       # the image index, its tags, and the image attestations pushed beside it
+      id-token: write       # the image attestations' signing certificates
+      attestations: write   # the image attestations, stored against this repository
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # A second, independent refusal of anything but a tag push (the `version` job decides dry_run; this does not
+      # trust it), and of a tag re-pointed since the run started: the notes are read from the tag, the assets were
+      # built from GITHUB_SHA, so the two must name one commit (#827's review, F6).
+      - name: The tag object, not its commit
         run: |
           set -euo pipefail
           tag="v$VERSION"
+          [ "$GITHUB_EVENT_NAME" = "push" ] || { echo "::error::only a tag push publishes; this is a $GITHUB_EVENT_NAME"; exit 1; }
+          [ "$GITHUB_REF" = "refs/tags/$tag" ] || { echo "::error::run ref $GITHUB_REF is not refs/tags/$tag"; exit 1; }
+          git fetch --force origin "refs/tags/$tag:refs/tags/$tag" || { echo "::error::tag $tag is not on the remote"; exit 1; }
+          kind=$(git cat-file -t "$tag")
+          [ "$kind" = "tag" ] || { echo "::error::$tag is a $kind, not an annotated tag"; exit 1; }
+          now=$(git rev-parse "refs/tags/$tag^{commit}")
+          [ "$now" = "$GITHUB_SHA" ] || { echo "::error::$tag now points at $now, not $GITHUB_SHA, which this run built; the re-pointed tag's own run publishes it"; exit 1; }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-bundle-${{ env.VERSION }}
+          path: bundle
+      - name: Verify each file's attestation again, on the runner that uploads
+        run: scripts/verify-release-attestation.sh files bundle "$VERSION"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Pushed under `sha-<commit>`, a tag no reader is told to pull: the index must exist in the registry before its
+      # attestation can be pushed beside it. `:VERSION` and `:latest` follow verification.
+      - name: The multi-arch manifest, under a staging tag
+        id: index
+        run: |
+          set -euo pipefail
+          amd64=$(cat digests/digest-amd64); arm64=$(cat digests/digest-arm64)
+          docker buildx imagetools create -t "$IMAGE:sha-$GITHUB_SHA" "$IMAGE@$amd64" "$IMAGE@$arm64"
+          index=$(docker buildx imagetools inspect "$IMAGE:sha-$GITHUB_SHA" --format '{{json .Manifest}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')
+          docker buildx imagetools inspect "$IMAGE@$index"
+          { echo "amd64=$amd64"; echo "arm64=$arm64"; echo "index=$index"; } >> "$GITHUB_OUTPUT"
+      # One attestation per digest, each pushed to ghcr.io as an OCI referrer of the image it names. No storage record:
+      # GitHub creates those only for organisation-owned repositories (https://github.com/actions/attest#artifact-metadata-storage-records).
+      - id: attest-amd64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.index.outputs.amd64 }}
+          push-to-registry: true
+          create-storage-record: false
+      - id: attest-arm64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.index.outputs.arm64 }}
+          push-to-registry: true
+          create-storage-record: false
+      - id: attest-index
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.index.outputs.index }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Verify each image's attestation
+        env:
+          BUNDLE_AMD64: ${{ steps.attest-amd64.outputs.bundle-path }}
+          BUNDLE_ARM64: ${{ steps.attest-arm64.outputs.bundle-path }}
+          BUNDLE_INDEX: ${{ steps.attest-index.outputs.bundle-path }}
+          DIGEST_AMD64: ${{ steps.index.outputs.amd64 }}
+          DIGEST_ARM64: ${{ steps.index.outputs.arm64 }}
+          DIGEST_INDEX: ${{ steps.index.outputs.index }}
+        run: |
+          set -euo pipefail
+          cp "$BUNDLE_AMD64" "bundle/mycelium-$VERSION-image-amd64.sigstore.json"
+          cp "$BUNDLE_ARM64" "bundle/mycelium-$VERSION-image-arm64.sigstore.json"
+          cp "$BUNDLE_INDEX" "bundle/mycelium-$VERSION-image-index.sigstore.json"
+          scripts/verify-release-attestation.sh image "bundle/mycelium-$VERSION-image-amd64.sigstore.json" "$IMAGE@$DIGEST_AMD64"
+          scripts/verify-release-attestation.sh image "bundle/mycelium-$VERSION-image-arm64.sigstore.json" "$IMAGE@$DIGEST_ARM64"
+          scripts/verify-release-attestation.sh image "bundle/mycelium-$VERSION-image-index.sigstore.json" "$IMAGE@$DIGEST_INDEX"
+
+      # The version tag, by digest, to the verified index.
+      - name: Tag the verified image by version
+        env:
+          DIGEST_INDEX: ${{ steps.index.outputs.index }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create -t "$IMAGE:$VERSION" "$IMAGE@$DIGEST_INDEX"
+          got=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')
+          [ "$got" = "$DIGEST_INDEX" ] || { echo "::error::$IMAGE:$VERSION is $got, not the verified $DIGEST_INDEX"; exit 1; }
+
+      - name: The Release — created from the tag's message if § 8 has not run, then the assets attached
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          scripts/verify-release-attestation.sh assets bundle "$VERSION"
           if ! gh release view "$tag" >/dev/null 2>&1; then
             title=$(git tag -l --format='%(contents:subject)' "$tag")
             git tag -l --format='%(contents:body)' "$tag" > notes.md
             gh release create "$tag" --title "$title" --notes-file notes.md --verify-tag --latest
             echo "created the Release for $tag from the annotated tag"
           fi
-          gh release upload "$tag" bundle/mycelium-*.tar.gz bundle/SHA256SUMS --clobber
+          gh release upload "$tag" bundle/mycelium-*.tar.gz bundle/SHA256SUMS bundle/*.sigstore.json --clobber
           gh release view "$tag" --json assets --jq '.assets[].name'
 
-      - if: env.DRY_RUN == 'false'
-        uses: actions/download-artifact@v4
-        with:
-          pattern: digest-*
-          path: digests
-          merge-multiple: true
-      - if: env.DRY_RUN == 'false'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - if: env.DRY_RUN == 'false'
-        name: The multi-arch manifest, tagged by version and latest
+      # `latest` moves to the verified index digest, by digest; a single-index source is copied, not rebuilt, and the
+      # check after it fails the run if the registry's `latest` names any other digest.
+      - name: Move latest to the verified image
+        env:
+          DIGEST_INDEX: ${{ steps.index.outputs.index }}
         run: |
           set -euo pipefail
-          amd64=$(cat digests/digest-amd64); arm64=$(cat digests/digest-arm64)
-          docker buildx imagetools create -t "$IMAGE:$VERSION" -t "$IMAGE:latest" "$IMAGE@$amd64" "$IMAGE@$arm64"
-          docker buildx imagetools inspect "$IMAGE:$VERSION"
+          docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE@$DIGEST_INDEX"
+          got=$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Manifest}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')
+          [ "$got" = "$DIGEST_INDEX" ] || { echo "::error::$IMAGE:latest is $got, not the verified $DIGEST_INDEX"; exit 1; }
+          echo "$IMAGE:latest -> $DIGEST_INDEX (verified)"

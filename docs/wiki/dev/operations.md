@@ -135,8 +135,13 @@ stem is `stem,gateway,llm,object_store,compliance` (`mycelium-wasm-host`'s `comp
 stem takes a token table, `[oidc]` and `[authority]` — `start()` attaches the authority, as for the node). Linux binaries are bookworm-built (glibc 2.36, `libssl3`). The workflow refuses
 a tag whose version differs from `Cargo.toml`'s, smokes each Linux tarball in a clean container (`mycelium --version`
 equal to the tag, `wire-check` over the fixtures), and creates the Release from the annotated tag's message if
-RELEASING § 8 has not. The sums are integrity, not provenance: nothing signs a binary (`what-is-proven.md`, third
-table). Entry page: `docs/features/published-node.md`; log `.log/2026-10-23-published-node.md`.
+RELEASING § 8 has not. **Since security-operations SO3 (2026-11-22)** it also attests the tarballs, `SHA256SUMS`, the
+image index and both per-arch images (`actions/attest`, SLSA v1, Sigstore keyless) and verifies every attestation
+(`scripts/verify-release-attestation.sh`) before it uploads or moves `latest`, which is now its own step after the
+image verifies; permissions are per job and every action is pinned by SHA, gated by `scripts/check-release-workflow.py`.
+A dry run attests and verifies the files only — the image half first runs at a tag (`what-is-proven.md`,
+`binary-provenance`). Entry page: `docs/features/published-node.md`; logs `.log/2026-10-23-published-node.md`,
+`.log/2026-11-22-so3-signed-releases.md`.
 
 ## `mycelium declare` (adopter-surface X10, 2026-10-23)
 

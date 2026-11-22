@@ -3452,8 +3452,10 @@ supplied*.
 Wave 1a (identity for services, one MINOR):  I0 ──> I1 ──> I3 ──> S-exchange ──> I5
 Wave 1b (spikes, in parallel with 1a's PRs):  S-cancel ──> I4 · S-succeed ──> I2 · S-presence ──> I7   (one MINOR)
   with it, from the critique plan (D11):       CR2's first PR (the use marker) · CR13's counter · CR12
+  before its tag, from security-operations:     SO2 (SDK audits) · SO3 (attested release assets; no MINOR of their own)
 Wave 2 (developer surface, one MINOR):        N3, N5 ──> N4 (fleet, wiring) ──> N6 ──> N1 ──> E1
                                                I7 ──> N4 (identity) ──> N7 ──> E6
+  with it, from security-operations (D11):      SO1-1 ──> SO1-2 · SO1-3 (SIEM export; after wave 1b's release)
 Any time:                                      E2, E3, E4
 ```
 
