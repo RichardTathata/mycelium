@@ -94,7 +94,7 @@ work.
   re-send reaching a **restarted** provider while unanswered plants its hold there, so a call re-presented later is
   refused `revoked` — better than the crash bound below, which is unchanged for a gateway crash. **Not changed:** a
   forward delayed in order behind the gateway's own gossip is not made faster (behind a flood of mints the stop was
-  inside *F* in 4 runs of 10). `GET /stats` `call_cancel_forwards` (`attempts`, `retries`, `answered_first`,
+  inside *F* in 5 runs of 10, the test passing 4 of 10). `GET /stats` `call_cancel_forwards` (`attempts`, `retries`, `answered_first`,
   `answered_on_retry`, `answered_after_receipt`, `unanswered`, `superseded`, `joined`, `provider_joined`) and two
   counters ([metrics](../operations/metrics.md#contracts-axis--receipts-control-envelope-authorisation)) are the
   evidence on which a lane of its own for control signals is to be decided

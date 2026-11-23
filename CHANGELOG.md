@@ -31,7 +31,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   completed on its own. A re-send that reaches a restarted provider while unanswered plants its hold there, so a call
   re-presented later is refused `revoked`; a gateway crash between the forward and the sync is bounded as before.
   **Not fixed by it:** a forward delivered late, in order behind the gateway's own gossip — behind the same flood the
-  provider's stop was inside *F* in 4 runs of 10 (#826's review), never by anti-entropy. New: `GET /stats`
+  provider's stop was inside *F* in 5 runs of 10 and the test passed 4 of 10 (#826's review), never by anti-entropy. New: `GET /stats`
   `call_cancel_forwards` and the counters `mycelium_gateway_call_cancel_forward_attempts_total{attempt}` and
   `mycelium_gateway_call_cancel_forwards_total{outcome}` (`docs/operations/metrics.md`), the evidence on which a lane
   of its own for control signals is to be decided. A shutdown no longer waits for a pending forward's 5 s timeout.

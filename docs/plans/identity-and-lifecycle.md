@@ -3959,11 +3959,19 @@ Items found while building a row that the row does not own. Each names its home,
     **restarted** provider while unanswered plants its hold, so a call re-presented there later is refused
     `revoked` — better than O10's crash bound while the gateway lives; a gateway crash between the forward and the
     sync is bounded as O10 states. **The mints test's ordering assertion** (the acknowledgement not given when the
-    stop was seen) was a race of the test's poll whenever the forward's answer, not the disk, released the
-    acknowledgement (CI: the stop seen 2 ms after it, receipt `Stopped`); it now asserts the receipt's rung — a
-    `Stopped` from `cancel_call` means the provider's work had stopped, read in the cancel's own task — beside the
-    stop inside *F*, which still catches a forward that waits for the disk (the burst is about 3·*F* of syncs).
+    stop was seen) raced the test's poll whenever the forward's answer, not the disk, released the acknowledgement
+    (CI: the stop seen 2 ms after it, receipt `Stopped`). **Its first replacement was a weakening** (#826's confirm
+    round): with only the receipt's rung asserted, a round whose calibration overshot the disk — the CI run's 510
+    mints, predicted at 6 s, acknowledged at 461 ms; any run where writes are committed in groups — passed though a
+    forward that waited for the disk would have passed too. Now each round reads the gateway's record just after the
+    stop is seen: the first checkpoint there proves the revocation's write still pending (the revoking one enters the
+    KV only once synced), and only such a round counts; otherwise the burst is doubled and the round run again, three
+    rounds at most, and three inconclusive rounds fail. The rung check stays beside it. **Guards:** the provider's
+    join entry and the gateway's `forward_once` entry are removed by a drop guard, so a panic in `answer` or
+    `forward` leaves nothing for a repeat to wait on (a joiner of a dead answer answers on its own at once; one of a
+    dead forward reads `DeliveryUnknown`).
     Tests: `a_resent_forward_joins_the_providers_wait_and_does_not_overtake_its_answer`,
-    `repeated_cancels_of_one_term_run_one_forward`.
+    `repeated_cancels_of_one_term_run_one_forward`, `a_panic_in_the_providers_answer_leaves_nothing_for_a_repeat_to_wait_on`,
+    `a_panic_in_the_gateways_forward_leaves_nothing_for_a_later_cancel_to_join`.
   - **To close it:** the maintainer's decision on option B, and the mints test passing on #824 as often as it is run;
     the figures on the [ledger](../operations/what-is-proven.md#call-cancel-forward-resent).

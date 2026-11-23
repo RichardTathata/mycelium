@@ -30,3 +30,7 @@ Pages: the plan's §9 O13 (and O10's pointer to it), `docs/operations/what-is-pr
 - **One forward per term at the gateway** (`forward_once`): join while unsettled, replace once settled.
 - **A test that orders an acknowledgement against a poll of the provider races** whenever the forward's answer
   releases the acknowledgement; assert the receipt's rung inside the cancel's own task instead.
+- **A burst test must prove its burst held the disk, per round** (the confirm round): the revoking checkpoint is in
+  the gateway's KV only once synced, so the first checkpoint read just after the stop proves the write was pending;
+  an overshot calibration is inconclusive and re-run larger, never a pass.
+- **In-progress entries in papaya maps get a drop guard**, so a panic cannot leave an entry that later callers join.

@@ -356,6 +356,13 @@ impl InFlight {
         self.note.notify_waiters();
     }
 
+    /// Its forward ended without settling (a panic): whoever joined it is answered no answer, never a negative.
+    fn abandon(&self) {
+        if self.class.get().is_none() {
+            self.settled(&CancelClass::DeliveryUnknown);
+        }
+    }
+
     /// The running forward's receipt class, waiting up to `within_ms` for it.
     async fn receipt(&self, within_ms: u64) -> Option<CancelClass> {
         let deadline = mycelium_core::sim_seam::mono_instant() + Duration::from_millis(within_ms);
@@ -452,12 +459,14 @@ async fn forward_once(ctx: &Arc<TaskCtx>, term: &str, target: NodeId, checkpoint
             break;
         }
     }
+    // Removed however the forward ends — a panic in it included (#826's confirm round): an entry left unsettled would
+    // have every later cancel of the term join it, wait 6 s and send nothing.
+    let _entry = Entry { map: &stats.in_flight, key: term.to_string(), mine: Arc::clone(&mine), on_drop: InFlight::abandon };
     let wrapped = |class: CancelClass| {
         mine.settled(&class);
         settle(class);
     };
     forward(ctx, target, checkpoint, window_end_ms, &mine, wrapped).await;
-    let _ = stats.in_flight.pin().remove_if(term, |_, v| Arc::ptr_eq(v, &mine));
 }
 
 /// **Send the revoking checkpoint to `target` until it answers** (§9 O13, the maintainer's decision of 2026-11-22: the
@@ -487,6 +496,10 @@ async fn forward(ctx: &Arc<TaskCtx>, target: NodeId, checkpoint: &SignedRevocati
     #[cfg(test)]
     if test_hooks::forward_suppressed(&ctx.node_id) {
         return settle(CancelClass::DeliveryUnknown);
+    }
+    #[cfg(test)]
+    if test_hooks::take_panic(&test_hooks::PANIC_IN_FORWARD, &ctx.node_id) {
+        panic!("a test's planted panic in the cancel-forward");
     }
     let stats = &ctx.call_issuer.cancel_forwards;
     let mut shutdown = ctx.shutdown_tx.subscribe();
@@ -898,6 +911,10 @@ fn admit(ctx: &TaskCtx, req: &super::rpc::RpcRequest) -> Result<(PrincipalId, Si
 /// Hold the revocation, ask the work to stop, and say what happened — waiting up to [`CANCEL_CONFIRM_WAIT_MS`] for
 /// work whose agent promised to stop to end, if `wait`.
 async fn answer(ctx: &TaskCtx, by: &PrincipalId, signed: &SignedRevocationCheckpoint, wait: bool) -> Vec<u8> {
+    #[cfg(test)]
+    if test_hooks::take_panic(&test_hooks::PANIC_IN_ANSWER, &ctx.node_id) {
+        panic!("a test's planted panic in the provider's answer");
+    }
     let Some(authority) = ctx.execution_authority.get() else { return refused(ctx, "no_authority", "no execution authority") };
     // A provider that does not enforce registers no work and checks no admission (#799's review, M1): it cannot see
     // whether the call runs here, and a hold would refuse nothing. It says so, and holds nothing.
@@ -1001,11 +1018,12 @@ pub(crate) fn serve(agent: &crate::GossipAgent) {
                             let permit = permit.filter(|_| !test_hooks::over_confirm_cap(&ctx.node_id, MAX_CONFIRM_WAITS - waits.available_permits()));
                             let answering = Arc::clone(&answering);
                             tokio::spawn(async move {
+                                // Removed however this task ends — a panic in `answer` included (#826's confirm round):
+                                // an entry left behind would hold every later repeat of the term to its 2 s wait.
+                                let _entry = Entry { map: &answering, key: key.clone(), mine: Arc::clone(&mine), on_drop: Answering::abandon };
                                 let reply = answer(&ctx, &by, &signed, permit.is_some()).await;
                                 drop(permit);
                                 mine.done(&reply);
-                                // Only this answer's entry: a later one for the key is another's.
-                                let _ = answering.pin().remove_if(&key, |_, v| Arc::ptr_eq(v, &mine));
                                 super::rpc::rpc_respond_ctx(&ctx, &req, reply);
                             });
                         }
@@ -1016,17 +1034,42 @@ pub(crate) fn serve(agent: &crate::GossipAgent) {
     });
 }
 
+/// **An in-progress entry's guard** (#826's confirm round): removes `mine` from `map` when dropped — at the end of its
+/// task, or as a panic unwinds it — and only if it is still `mine` there; `on_drop` first tells anyone who joined it.
+struct Entry<'a, K: std::hash::Hash + Eq, V> {
+    map: &'a papaya::HashMap<K, Arc<V>>,
+    key: K,
+    mine: Arc<V>,
+    on_drop: fn(&V),
+}
+
+impl<K: std::hash::Hash + Eq, V> Drop for Entry<'_, K, V> {
+    fn drop(&mut self) {
+        (self.on_drop)(&self.mine);
+        let _ = self.map.pin().remove_if(&self.key, |_, v| Arc::ptr_eq(v, &self.mine));
+    }
+}
+
 /// One provider answer in progress, which repeats of the same forward join (§9 O13).
 #[derive(Default)]
 struct Answering {
     reply: OnceLock<Vec<u8>>,
     note: tokio::sync::Notify,
+    /// Its task ended without an answer (a panic): a joiner answers on its own at once.
+    abandoned: AtomicBool,
 }
 
 impl Answering {
     fn done(&self, reply: &[u8]) {
         let _ = self.reply.set(reply.to_vec());
         self.note.notify_waiters();
+    }
+
+    fn abandon(&self) {
+        if self.reply.get().is_none() {
+            self.abandoned.store(true, Ordering::SeqCst);
+            self.note.notify_waiters();
+        }
     }
 
     /// The answer, once given, waiting up to `within_ms` for it.
@@ -1038,6 +1081,9 @@ impl Answering {
             noted.as_mut().enable();
             if let Some(reply) = self.reply.get() {
                 return Some(reply.clone());
+            }
+            if self.abandoned.load(Ordering::SeqCst) {
+                return None;
             }
             let left = deadline.saturating_duration_since(mycelium_core::sim_seam::mono_instant());
             if left.is_zero() {
@@ -1136,6 +1182,14 @@ pub(crate) mod test_hooks {
 
     pub(super) fn over_confirm_cap(node: &crate::node_id::NodeId, waiting: usize) -> bool {
         CONFIRM_WAITS_CAP.pin().get(&node.to_string()).is_some_and(|cap| waiting > *cap)
+    }
+
+    /// Per node, once each (#826's confirm round): a panic in the gateway's next forward, or the provider's next answer.
+    pub(crate) static PANIC_IN_FORWARD: std::sync::LazyLock<papaya::HashMap<String, ()>> = std::sync::LazyLock::new(papaya::HashMap::new);
+    pub(crate) static PANIC_IN_ANSWER: std::sync::LazyLock<papaya::HashMap<String, ()>> = std::sync::LazyLock::new(papaya::HashMap::new);
+
+    pub(super) fn take_panic(map: &papaya::HashMap<String, ()>, node: &crate::node_id::NodeId) -> bool {
+        map.pin().remove(&node.to_string()).is_some()
     }
 
     /// Per gateway node: run once between the `/mcp` table's eviction scan and its removals.

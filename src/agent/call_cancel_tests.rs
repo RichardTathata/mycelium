@@ -582,8 +582,12 @@ async fn drain_time(g: &Arc<super::call_mint_tests::N>, target: &NodeId, burst: 
 /// while the caller's acknowledgement still waits for the disk.** A gateway with `[persistence]` under `mode` and a
 /// provider; a client's call runs at the provider; `burst` is queued at the gateway's WAL, sized from a calibration
 /// to drain in about three times *F* on this machine's disk; then `cancel_call`. Asserted, by structure: the call stops at
-/// the provider inside *F* (bound 1) — the forward did not wait for the syncs ahead, which take about 3·*F* — and the
-/// answer comes only once the revocation is on disk (the gateway's own record is the revoking checkpoint when it does).
+/// the provider inside *F* (bound 1) **while the revocation's durable write is still pending** — the gateway's own
+/// record, read just after the stop is seen, is still the first checkpoint, since the revoking one enters the KV only
+/// once its sync returns (#826's confirm round) — and the answer comes only once the revocation is on disk (the
+/// gateway's record is then the revoking checkpoint). A round whose burst did not hold the write until the stop (the
+/// calibration overshot the disk, as when writes are committed in groups) proves nothing: the burst is doubled and the
+/// round run again, at most three rounds, and three such rounds fail the test.
 ///
 /// **The order of the stop and the acknowledgement is not the promise** (#826's review). The acknowledgement waits for
 /// the disk *and* the forward's answer. When the disk is the later of the two, the acknowledgement comes after the
@@ -592,8 +596,8 @@ async fn drain_time(g: &Arc<super::call_mint_tests::N>, target: &NodeId, burst: 
 /// (#826's CI: the stop seen at 463.9 ms, the acknowledgement at 461.8 ms, the receipt `Stopped`). That is the poll's
 /// race, not a broken promise: a `Stopped` receipt is the provider's answer, sent only after the work ended. So what
 /// is asserted is the receipt's rung — **when `cancel_call` returns `Stopped`, the provider's work has stopped** —
-/// read inside the cancel's own task, not by a racing poll. Whether the burst still held the disk when the stop was
-/// seen is printed.
+/// read inside the cancel's own task, not by a racing poll, beside the pending write above, which is what shows the
+/// stop did not wait for the disk.
 async fn the_stop_beats_the_acknowledgement_behind(mode: crate::config::SyncMode, burst: Burst) {
     let (g, p, cert_dir) = pair(Opts { mint: true, persist: true, wal: Some((mode, 1_000_000)), ..Opts::default() }).await;
     let g = Arc::new(g);
@@ -602,56 +606,82 @@ async fn the_stop_beats_the_acknowledgement_behind(mode: crate::config::SyncMode
     // enough that a forward which waited for it would land outside bound 1 by a clear margin.
     let calibration = 200;
     let per = drain_time(&g, &target, burst, calibration).await / (calibration as u32 + 1);
-    let n = ((3 * F_MS) as u128 * 1_000_000 / per.as_nanos().max(1)).clamp(400, 50_000) as usize;
+    let mut n = ((3 * F_MS) as u128 * 1_000_000 / per.as_nanos().max(1)).clamp(400, 50_000) as usize;
+    let seq_of = |term: &str| g.kv(&call_checkpoint_key(&g.gateway(), term)).and_then(|b| serde_json::from_slice::<SignedRevocationCheckpoint>(&b).ok()).map(|c| c.checkpoint.seq);
 
-    let g2 = Arc::clone(&g);
-    let answered = tokio::spawn(async move { g2.client_call("slow").await });
-    p.running(1).await;
-    p.began(1).await;
-    // The client's call is the newest mint: the calibration's came before it.
-    let term = g.ctx().call_issuer.issued_terms().into_iter().max_by_key(|t| t[1..].parse::<u64>().unwrap_or(0)).expect("minted");
-    let tasks = queue_burst(&g, &target, burst, n, "burst").await;
-    let asked = std::time::Instant::now();
-    let (g2, t2, at_provider) = (Arc::clone(&g), term.clone(), Arc::clone(&p.authority));
-    let cancel = tokio::spawn(async move {
-        let r = g2.a.cancel_call(&t2).await;
-        (r, std::time::Instant::now(), at_provider.running_count())
-    });
-    let stopped = until(|| p.authority.running_count() == 0, Duration::from_secs(120)).await;
-    let stop_took = asked.elapsed();
-    let acknowledged_at_the_stop = cancel.is_finished();
-    let (receipt, acked, running_at_ack) = tokio::time::timeout(Duration::from_secs(300), cancel).await.expect("the cancel is answered").unwrap();
-    let ack_took = acked.saturating_duration_since(asked);
-    for t in tasks {
-        t.await.expect("a mint of the burst ran");
+    // A round counts only if the burst still held the revocation's durable write when the stop was seen (#826's
+    // confirm round): the revoking checkpoint (sequence 2) enters the gateway's KV only once its sync returns, so a
+    // first checkpoint (1) read at the stop proves the stop did not wait for the disk. A calibration that overshot —
+    // the disk drained the burst inside F, as when writes are committed in groups — is inconclusive, not a pass: the
+    // burst is doubled and the round run again, at most three rounds.
+    for round in 0..3 {
+        let g2 = Arc::clone(&g);
+        let answered = tokio::spawn(async move { g2.client_call("slow").await });
+        p.running(1).await;
+        // The client's call is the newest mint: the calibration's, and any earlier round's, came before it.
+        let term = g.ctx().call_issuer.issued_terms().into_iter().max_by_key(|t| t[1..].parse::<u64>().unwrap_or(0)).expect("minted");
+        let tasks = queue_burst(&g, &target, burst, n, "burst").await;
+        let asked = std::time::Instant::now();
+        let (g2, t2, at_provider) = (Arc::clone(&g), term.clone(), Arc::clone(&p.authority));
+        let cancel = tokio::spawn(async move {
+            let r = g2.a.cancel_call(&t2).await;
+            (r, std::time::Instant::now(), at_provider.running_count())
+        });
+        // The gateway's record read in the same poll that sees the stop.
+        let seq_at_stop = std::sync::atomic::AtomicU64::new(0);
+        let stopped = until(
+            || {
+                // The stop first, then the record: a first checkpoint read *after* the stop was seen proves the write
+                // still pending when the call had already stopped.
+                let done = p.authority.running_count() == 0;
+                if done {
+                    seq_at_stop.store(seq_of(&term).unwrap_or(0), Ordering::SeqCst);
+                }
+                done
+            },
+            Duration::from_secs(120),
+        )
+        .await;
+        let stop_took = asked.elapsed();
+        let seq_at_stop = seq_at_stop.load(Ordering::SeqCst);
+        let (receipt, acked, running_at_ack) = tokio::time::timeout(Duration::from_secs(300), cancel).await.expect("the cancel is answered").unwrap();
+        let ack_took = acked.saturating_duration_since(asked);
+        for t in tasks {
+            t.await.expect("a mint of the burst ran");
+        }
+        eprintln!(
+            "§9 O10, {mode:?} round {round} behind {n} {burst:?} (one drains in {per:?} here): the provider's stop seen {stop_took:?} after the cancel, the gateway's record then at sequence {seq_at_stop}; the cancel acknowledged {ack_took:?} after it; receipt {receipt:?}; forwards {}",
+            g.ctx().call_issuer.cancel_forwards.to_json()
+        );
+        assert!(stopped, "the call stopped at the provider");
+        assert!(
+            stop_took < Duration::from_millis(F_MS),
+            "the provider's stop came {stop_took:?} after the cancel, outside bound 1 (F = {F_MS} ms): the forward waited for the {n} {burst:?} ahead of the revocation's sync (the cancel was acknowledged after {ack_took:?})"
+        );
+        let receipt = receipt.expect("the revocation is on disk");
+        // The receipt names its rung: a `Stopped` answer is given only once the work has ended.
+        if receipt.class == CancelClass::Stopped {
+            assert_eq!(running_at_ack, 0, "cancel_call answered Stopped ({ack_took:?}) while the provider still ran the call");
+        }
+        // The provider answers `stopped`; under `flush` the answer can reach the gateway's caller too late for the
+        // forward's 5 s — the gateway's connection reader awaits the WAL for each inbound record (`append_inbound`), so
+        // the answer's frame waits behind the same burst — and is then `DeliveryUnknown`: never a negative (§9 O11's family).
+        assert!(matches!(receipt.class, CancelClass::Stopped | CancelClass::DeliveryUnknown), "the provider's stop, or no answer in time: {receipt:?}");
+        assert_eq!(seq_of(&term), Some(2), "acknowledged with the revoking checkpoint in the gateway's own record");
+        let reply = tokio::time::timeout(Duration::from_secs(10), answered).await.expect("the client is answered").unwrap();
+        assert!(reply.to_string().contains("cancelled"), "{reply}");
+        if seq_at_stop == 1 {
+            // Conclusive: the stop came inside F while the revocation's write still waited behind the burst.
+            assert_eq!(p.finished.load(Ordering::SeqCst), 0, "the tool never finished");
+            assert_eq!(g.ctx().wal.get().expect("persists").dropped_appends(), 0, "every append of the burst reached the WAL");
+            g.a.shutdown().await;
+            p.a.shutdown().await;
+            let _ = std::fs::remove_dir_all(&cert_dir);
+            return;
+        }
+        n = n.saturating_mul(2);
     }
-    eprintln!(
-        "§9 O10, {mode:?} behind {n} {burst:?} (one drains in {per:?} here): the provider's stop seen {stop_took:?} after the cancel; the cancel acknowledged {ack_took:?} after it (already when the stop was seen: {acknowledged_at_the_stop}); receipt {receipt:?}; forwards {}",
-        g.ctx().call_issuer.cancel_forwards.to_json()
-    );
-    assert!(stopped, "the call stopped at the provider");
-    assert!(
-        stop_took < Duration::from_millis(F_MS),
-        "the provider's stop came {stop_took:?} after the cancel, outside bound 1 (F = {F_MS} ms): the forward waited for the {n} {burst:?} ahead of the revocation's sync (the cancel was acknowledged after {ack_took:?})"
-    );
-    let receipt = receipt.expect("the revocation is on disk");
-    // The receipt names its rung (#826's review): a `Stopped` answer is given only once the work has ended.
-    if receipt.class == CancelClass::Stopped {
-        assert_eq!(running_at_ack, 0, "cancel_call answered Stopped ({ack_took:?}) while the provider still ran the call");
-    }
-    // The provider answers `stopped`; under `flush` the answer can reach the gateway's caller too late for the
-    // forward's 5 s — the gateway's connection reader awaits the WAL for each inbound record (`append_inbound`), so the
-    // answer's frame waits behind the same burst — and is then `DeliveryUnknown`: never a negative (§9 O11's family).
-    assert!(matches!(receipt.class, CancelClass::Stopped | CancelClass::DeliveryUnknown), "the provider's stop, or no answer in time: {receipt:?}");
-    let held = serde_json::from_slice::<SignedRevocationCheckpoint>(&g.kv(&call_checkpoint_key(&g.gateway(), &term)).unwrap()).unwrap();
-    assert!(held.checkpoint.seq == 2 && held.checkpoint.revoked.iter().any(|t| t.as_str() == term), "acknowledged with the revoking checkpoint in the gateway's own record: {:?}", held.checkpoint);
-    let reply = tokio::time::timeout(Duration::from_secs(10), answered).await.expect("the client is answered").unwrap();
-    assert!(reply.to_string().contains("cancelled"), "{reply}");
-    assert_eq!(p.finished.load(Ordering::SeqCst), 0, "the tool never finished");
-    assert_eq!(g.ctx().wal.get().expect("persists").dropped_appends(), 0, "every append of the burst reached the WAL");
-    g.a.shutdown().await;
-    p.a.shutdown().await;
-    let _ = std::fs::remove_dir_all(&cert_dir);
+    panic!("in three rounds, up to {} {burst:?}, the burst never held the revocation's durable write until the stop: the calibration ({per:?} a unit) overshot the disk, so the test showed nothing", n / 2);
 }
 
 /// §9 O10 under `sync_mode = "flush"`, behind a burst of synced appends at the gateway's WAL — what O10 promises the
@@ -1257,6 +1287,52 @@ async fn repeated_cancels_of_one_term_run_one_forward() {
     assert_eq!(r.class, CancelClass::DeliveryUnknown);
     assert!(until(|| forwards(&g)["superseded"].as_u64() == Some(1), Duration::from_secs(10)).await, "the settled forward was replaced: {}", forwards(&g));
     call_cancel::test_hooks::DROP_FIRST_SENDS.pin().remove(&node);
+    g.a.shutdown().await;
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **#826's confirm round: a panic in the provider's answer leaves no entry for a repeat to wait on.** The provider's
+/// next answer panics (`PANIC_IN_ANSWER`): that forward is answered nothing. The same checkpoint sent again is answered
+/// at once, on its own — it does not join the dead answer (`provider_joined` unchanged) or wait out its 2 s. Seen
+/// failing first with the entry's guard planted out (the removal back after the answer, as before): the repeat joined
+/// the dead entry and was answered only after 2 s.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_panic_in_the_providers_answer_leaves_nothing_for_a_repeat_to_wait_on() {
+    let (g, p, cert_dir) = pair(Opts { mint: true, ..Opts::default() }).await;
+    let (_, term) = g.framed(p.a.node_id(), "quick").await;
+    let revoking = call_issuer::test_sign_checkpoint(g.ctx(), &term, 2, g.now(), true);
+    call_cancel::test_hooks::PANIC_IN_ANSWER.pin().insert(p.a.node_id().to_string(), ());
+    let payload = serde_json::to_vec(&serde_json::json!({ "v": 1, "checkpoint": &revoking })).unwrap();
+    let lost = super::rpc::rpc_call_ctx(g.ctx(), p.a.node_id().clone(), Arc::from(CANCEL_RPC_KIND), Bytes::from(payload), Duration::from_millis(1_500)).await;
+    assert!(lost.is_err(), "the panicking answer answered nothing");
+    let joined_before = forwards(&p)["provider_joined"].as_u64();
+    let began = std::time::Instant::now();
+    let v = forward_from(g.ctx(), p.a.node_id(), &revoking).await;
+    let took = began.elapsed();
+    assert_eq!(v["class"], "not_registered", "answered from what the provider holds: {v}");
+    assert_eq!(forwards(&p)["provider_joined"].as_u64(), joined_before, "the repeat did not join the dead answer");
+    assert!(took < Duration::from_millis(1_500), "answered at once, not after the dead answer's wait: {took:?}");
+    g.a.shutdown().await;
+    p.a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **#826's confirm round: a panic in the gateway's forward leaves no entry for a later cancel to join.** The
+/// gateway's next forward panics (`PANIC_IN_FORWARD`): that cancel's receipt is `DeliveryUnknown`, never a negative. A
+/// second cancel of the term runs a forward of its own — it does not join the dead one (`joined` 0) — and is answered
+/// the provider's class. Seen failing first with the entry's guard planted out: the second cancel joined the dead
+/// forward, sent nothing and was answered `DeliveryUnknown` after 6 s.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_panic_in_the_gateways_forward_leaves_nothing_for_a_later_cancel_to_join() {
+    let (g, p, cert_dir) = pair(Opts { mint: true, ..Opts::default() }).await;
+    let (_, term) = g.framed(p.a.node_id(), "quick").await;
+    call_cancel::test_hooks::PANIC_IN_FORWARD.pin().insert(g.a.node_id().to_string(), ());
+    let r = tokio::time::timeout(Duration::from_secs(20), g.a.cancel_call(&term)).await.expect("answered").expect("recorded");
+    assert_eq!(r.class, CancelClass::DeliveryUnknown, "the panicked forward answered nothing: {r:?}");
+    let r = tokio::time::timeout(Duration::from_secs(20), g.a.cancel_call(&term)).await.expect("answered").expect("recorded");
+    assert_eq!(r.class, CancelClass::NotRegistered, "a forward of its own, answered by the provider: {r:?}");
+    assert_eq!(forwards(&g)["joined"].as_u64(), Some(0), "{}", forwards(&g));
     g.a.shutdown().await;
     p.a.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);
