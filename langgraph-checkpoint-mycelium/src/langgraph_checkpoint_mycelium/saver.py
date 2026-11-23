@@ -66,6 +66,62 @@ from langgraph.checkpoint.base import (
     get_checkpoint_id,
     get_checkpoint_metadata,
 )
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+
+class RefusedCheckpointEncoding(ValueError):
+    """A checkpoint payload is tagged with an encoding the default saver does not load (0.3.5).
+
+    The default serializer (:func:`default_serde`) refuses the ``"json"`` tag. LangGraph's JSON
+    reviver rebuilds langchain-core objects from an ``lc: 1`` constructor (its ``allowed_objects="core"``
+    set: prompt templates, runnables and the rest), so a row another member wrote would load as a real
+    ``PromptTemplate`` or ``RunnableSequence``. No supported path of this saver writes ``"json"``:
+    ``JsonPlusSerializer.dumps_typed`` in langgraph-checkpoint 3.0 and later emits only ``null``,
+    ``bytes``, ``bytearray`` and ``msgpack`` (and ``pickle`` when asked). Only 2.x's fallback, after a
+    ``UnicodeEncodeError``, wrote ``"json"``; such a row is refused by name rather than loaded. To read
+    one, pass a serializer of your own (``serde=JsonPlusSerializer(allowed_msgpack_modules=None)``
+    reads it as LangGraph does).
+    """
+
+    def __init__(self, type_tag: str) -> None:
+        self.type_tag = type_tag
+        super().__init__(
+            f"checkpoint payload tagged {type_tag!r} refused: the default saver never writes it, and "
+            "LangGraph would revive langchain-core objects from it; pass serde= to read such a row"
+        )
+
+
+class _SaverSerializer(JsonPlusSerializer):
+    """LangGraph's serializer in its strict msgpack mode, refusing the ``"json"`` tag at load."""
+
+    def loads_typed(self, data: tuple[str, bytes]) -> Any:
+        if data[0] == "json":
+            raise RefusedCheckpointEncoding(data[0])
+        return super().loads_typed(data)
+
+
+def default_serde() -> JsonPlusSerializer:
+    """The serializer the saver loads with when the caller passes none (0.3.5).
+
+    A checkpoint row is an unsigned record in the gossip KV: any admitted member, and any HTTP client
+    holding ``kv:write``, can write one, and the row names the type tag its payload is decoded with.
+    LangGraph's default ``JsonPlusSerializer()`` imports and calls any type a ``"msgpack"`` payload
+    names unless ``LANGGRAPH_STRICT_MSGPACK`` is set in the loading process, so a forged row ran code
+    here. This one is ``JsonPlusSerializer(allowed_msgpack_modules=None)``, LangGraph's strict mode
+    whatever that variable says: only ``SAFE_MSGPACK_TYPES`` (``langgraph.checkpoint.serde._msgpack``:
+    datetimes, UUIDs, the langchain-core messages and documents, ``Send``/``Command``/``Interrupt`` …)
+    are constructed. Any other type is never called: it loads as its raw arguments. It also refuses
+    the ``"json"`` tag (:class:`RefusedCheckpointEncoding`), which the saver never writes and from
+    which LangGraph revives langchain-core objects. Pickle stays off. LangGraph's
+    ``with_allowlist`` (used under ``LANGGRAPH_STRICT_MSGPACK=true`` to add a compiled graph's
+    state-schema types) keeps both rules: it copies this serializer.
+
+    A graph that checkpoints its own classes names them, or gets them back as plain dicts:
+    ``serde=JsonPlusSerializer(allowed_msgpack_modules=[MyState, …])``. A serializer the caller passes
+    replaces this one entirely, ``"json"`` included.
+    """
+    return _SaverSerializer(allowed_msgpack_modules=None)
+
 
 class IncompleteCheckpoint(Exception):
     """A checkpoint exists, but a payload it references cannot be fetched yet.
@@ -282,7 +338,9 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
     :param host:    Hostname or IP of the Mycelium HTTP gateway.
     :param port:    HTTP port of the gateway.
     :param timeout: Default request timeout in seconds.
-    :param serde:   Serializer (defaults to LangGraph's ``JsonPlusSerializer``).
+    :param serde:   Serializer. Defaults to :func:`default_serde`, LangGraph's ``JsonPlusSerializer`` in
+                    its strict mode (0.3.5: a row another member wrote cannot make the loader call a
+                    type outside LangGraph's safe set). A serializer the caller passes is used as given.
     :param token:   Gateway bearer, sent as ``Authorization: Bearer`` on both clients; when
                     ``None``, ``MYCELIUM_GATEWAY_TOKEN`` is used, as the Python SDK does (0.3.2 —
                     before it the saver could not present a bearer at all, so a token-protected
@@ -309,7 +367,7 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
         require_on_disk: bool = False,
         on_receipt: "Callable[[WriteReceipt], None] | None" = None,
     ) -> None:
-        super().__init__(serde=serde)
+        super().__init__(serde=default_serde() if serde is None else serde)
         self._base = _base_url(host, port, scheme)
         verify = _ssl_verify(ca_file)
         headers = _auth_headers(token)

@@ -181,6 +181,79 @@ through this saver; a **receipt names the gateway node's rung and nothing above 
 and the saver makes no governed call, so grants and provider-side enforcement belong to the doors the graph's tools
 go through.
 
+## What the serializer trusts (0.3.5)
+
+**The saver deserializes checkpoint rows that any admitted member can write.** A checkpoint row
+(`ckpt/…`, `ckptw/…`) is an unsigned record in the gossip KV, and it names both the blob ids and the
+type tag each payload is decoded with; `_assemble` (`saver.py`) hands that tag and the blob's bytes
+to `serde.loads_typed`. Any admitted member can write such a row — and so can any HTTP client
+holding `kv:write`, since the gateway's KV routes do not refuse these prefixes — and a blob it chose
+goes in through the blob tier (`llm:write`). The precondition LangGraph's advisories treat as
+post-exploitation, write access to the checkpoint store, is on a fleet simply membership.
+
+0.3.5 raises the floor to **`langgraph-checkpoint>=4.1.1`**. Two advisories reach this path:
+GHSA-wwqv-p2pp-99h5 / CVE-2025-64439 (HIGH: the `"json"` mode's `lc: 2` constructor envelope ran
+arbitrary code; fixed in 3.0.0) and GHSA-fjqc-hq36-qh5p / CVE-2026-48775 (method dispatch in the JSON
+reviver; fixed in 4.1.1). The same floor also clears GHSA-mhr3-j7m5-c7c9 / CVE-2026-27794 (pickle in
+LangGraph's `BaseCache`, fixed in 4.0.0), which the saver does not use.
+
+**The floor alone did not make a member-written row safe to load, so 0.3.5 changes the default.**
+Two paths stayed open under LangGraph's default `JsonPlusSerializer()`:
+
+- the `"msgpack"` mode imports and calls any type a payload names, logging `Deserializing
+  unregistered type …` and going on, unless `LANGGRAPH_STRICT_MSGPACK=true` is set in the loading
+  process: a payload naming `os.system` ran on 4.1.1 and 4.3.2;
+- the `"json"` mode refuses an `lc: 2` constructor outside its allow-list, but an `lc: 1` constructor
+  goes to langchain-core's reviver with `allowed_objects="core"`, about 146 classes: a forged row
+  loaded as a real `PromptTemplate` or `RunnableSequence` (no code ran at load, but the object is
+  the forger's).
+
+When you pass no `serde`, the saver now loads with **`default_serde()`**: LangGraph's
+`JsonPlusSerializer` with `allowed_msgpack_modules=None`, its strict mode whatever the variable says,
+and with the `"json"` tag refused. In msgpack only LangGraph's safe set is constructed
+(`SAFE_MSGPACK_TYPES` in `langgraph.checkpoint.serde._msgpack`: datetimes, UUIDs, decimals, sets,
+paths, the langchain-core messages and `Document`, `Send`, `Command`, `Interrupt` and LangGraph's
+other types); any other type is never called and loads as its raw arguments. A `"json"` payload
+raises **`RefusedCheckpointEncoding`**, naming the remedy. Nothing the saver writes is refused:
+langgraph-checkpoint 3.0 and later write only `msgpack`, `null`, `bytes` and `bytearray`. Only 2.x's
+fallback after a `UnicodeEncodeError` ever wrote `"json"`, and such an old row now fails to load by
+name rather than silently; pass `serde=JsonPlusSerializer(allowed_msgpack_modules=None)` to read it as
+LangGraph does. Pickle stays off. `tests/test_untrusted_rows.py` writes the forged rows — a channel
+value, a skeleton and a pending write naming `os.system` or `os.mkdir`, and `lc: 1` `PromptTemplate` and
+`RunnableSequence` rows, through `get_tuple`, `list`, `aget_tuple` and `alist` — and asserts that
+nothing runs and nothing forged is revived.
+
+**Upgrading from 0.3.4:** a graph that checkpoints its own classes (a Pydantic or dataclass state, a
+custom message type) now gets them back **as plain dicts or lists, silently**: nothing errors at load,
+and the failure shows later, in a node, as an `AttributeError` or a validation error. Name them:
+
+```python
+from langgraph_checkpoint_mycelium import MyceliumCheckpointSaver, default_serde
+checkpointer = MyceliumCheckpointSaver("127.0.0.1", 8101,
+    serde=default_serde().with_msgpack_allowlist([MyState, ("my_app.models", "Order")]))
+```
+
+(`with_msgpack_allowlist` keeps both refusals), or set `LANGGRAPH_STRICT_MSGPACK=true`, under which
+LangGraph adds a compiled graph's state-schema types to the saver's serializer itself
+(`BaseCheckpointSaver.with_allowlist`, which copies `default_serde()`'s rules too).
+
+**A `serde` you pass is used as given** — including a permissive one; the saver does not narrow it.
+**Encryption does not authenticate rows.** LangGraph's `EncryptedSerializer` hands a payload whose
+type tag names no cipher (`"msgpack"`, not `"msgpack+aes"`) to its inner serializer *without
+decrypting*, and its default inner serializer is the permissive `JsonPlusSerializer()`: a forged
+plaintext row ran code through it. Build it as `EncryptedSerializer(cipher, default_serde())`. It has
+no setting that requires a cipher tag (checked in 4.1.1 and 4.3.2), so a forged plaintext row is still
+decoded, by `default_serde()`'s rules.
+
+**What remains.** The rows are still unsigned. A member can still replace a checkpoint's *content*
+with any values of the allowed types: its state, which parent it names, and its pending writes —
+including a forged `Send` or `Command`, which steers the graph to its own nodes with the forger's
+arguments when the thread resumes. A member can also point a thread at another checkpoint, and the
+saver loads that as the thread's state. The follow-up — owner-signed checkpoint rows verified at read,
+as the project's [owner-signed rule](../docs/wiki/dev/owner-signed-records.md) asks of a record an
+agent resumes from — is not built
+([what is proven](../docs/operations/what-is-proven.md#checkpoint-rows-deserialized-unsigned)).
+
 ## What a write's receipt names (0.3.4)
 
 Every row and blob-index write returns the route's receipt, kept as `saver.last_receipt` (a `WriteReceipt`: the

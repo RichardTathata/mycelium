@@ -4,18 +4,22 @@ build-backend = "hatchling.build"
 
 [project]
 name        = "strands-session-mycelium"
-version     = "0.1.0"
+version     = "0.1.1"
 description = "A Strands Agents session store on the Mycelium mesh — an agent's conversation, state and a swarm's shared state in the fleet's KV"
 requires-python = ">=3.10"
 # Pinned to the Strands release whose SessionRepository this implements; `tests/test_interface.py`
-# fails when a release changes the interface, and CI installs exactly this version.
+# fails when a release changes the interface, and CI installs exactly this version. 1.65.0 (0.1.1): from 1.63.0 the
+# `mcp` range (`<2.4`) admits `mcp` 2.2.0+, which fixes GHSA-qx49-fqc8-xw99 and four others.
 dependencies = [
-    "strands-agents==1.61.1",
+    "strands-agents==1.65.0",
+    # strands-agents 1.65.0 allows `mcp>=1.23.0,<2.4`, which still admits the vulnerable 1.23-1.29 and 2.0-2.1;
+    # this floor makes an install upgrade an older `mcp` it finds (GHSA-qx49-fqc8-xw99 and four others, 2.2.0).
+    "mcp>=2.2.0",
     "mycelium-py>=0.2.11",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=9.0.3"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/strands_session_mycelium"]

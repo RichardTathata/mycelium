@@ -13,7 +13,7 @@ from strands.session.session_repository import SessionRepository
 
 from strands_session_mycelium import MyceliumSessionRepository
 
-PINNED = "1.61.1"
+PINNED = "1.65.0"
 
 # Each method's parameters — name and default — in order. Annotations are left out: their text varies
 # with the Python version, and a change of type alone shows up in the suites that use the method.
