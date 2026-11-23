@@ -1949,15 +1949,22 @@ async fn a_revocation_still_filters_after_the_verifier_restarts() {
         let _ = c.kv().set("restart/plant", format!("by-k1-{i}").into_bytes());
         if within_3s(|| b.kv().get("restart/plant").is_some()).await { plant = true; break; }
     }
+    // The forgery is A's, so it is A's delivery that has to be shown (#834's review): A's writer to B held the
+    // connection B's restart broke too (O2, #746), and a lost forgery also reads as `!landed`. A's writes are shown to
+    // reach B before it, and a write A makes after it to arrive, before `landed` is read. Not a stopgap.
+    let a_reaches = plant_lands(&a, &b, "restart/from-a").await;
     send_signed_as(&a, &nc, &k0_sk, "restart/as-c", b"by-k0");
+    let _ = a.kv().set("restart/after-a".to_string(), b"after".to_vec());
     let _ = c.kv().set("restart/plant-2", b"by-k1".to_vec());
     let plant = plant && within_3s(|| b.kv().get("restart/plant-2").is_some()).await;
+    let after = within_3s(|| b.kv().get("restart/after-a").is_some()).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     let landed = b.kv().get("restart/as-c").is_some();
     a.shutdown().await; b.shutdown().await; c.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&base);
     assert!(seen && rejoined && plant, "B saw the revocation ({seen}), came back ({rejoined}), and C's new-key writes arrived ({plant})");
+    assert!(a_reaches && after, "A's writes reach B after its restart, before ({a_reaches}) and after ({after}) the forgery");
     assert!(trusted_after.contains(&k1) && !trusted_after.contains(&k0), "at restart B trusts k1 and not k0: {trusted_after:?}");
     assert!(!landed, "REVOKED KEY: after B restarted, C's revoked key signed C's KV writes at B");
 }
@@ -2195,10 +2202,15 @@ async fn a_first_sighted_key_after_a_restart_cannot_revoke_an_anchored_member() 
     let _ = within_3s(|| b.kv().get(&sealed).is_some_and(|v| v.as_ref() == forged.as_slice())).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     let b = restart(b).await;
+    // Delivery first (#834's review): A held a writer to B's previous process, so A's first frames after the restart
+    // can be lost (O2, #746), and a lost revocation also leaves `k0` trusted — a pass whatever the fold does. A's
+    // writes are shown to reach the restarted B, and the revocation itself is shown to arrive, before the negative
+    // assertion is read. Not a stopgap: this stays when O2 is fixed.
+    let a_reaches = plant_lands(&a, &b, "first/from-a").await;
     let _ = a.kv().set(crate::agent::revocation::revocation_key(&nc, &k0), revocation_signed_by(&nc, k0, &a_sk));
     let (p2, v2) = revocation_v2_by(&nc, k0, &a_sk, vec![]);
     let _ = a.kv().set(p2.clone(), v2);
-    let _ = within_3s(|| b.kv().get(&p2).is_some()).await;
+    let p2_arrived = within_3s(|| b.kv().get(&p2).is_some()).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     let plant = plant_lands(&c, &b, "first/plant").await;
     let k0_trusted = crate::agent::helpers::known_verifying_keys(&b.task_ctx, &nc).contains(&k0);
@@ -2206,6 +2218,7 @@ async fn a_first_sighted_key_after_a_restart_cannot_revoke_an_anchored_member() 
     a.shutdown().await; b.shutdown().await; c.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&base);
+    assert!(a_reaches && p2_arrived, "A's writes reach B after its restart ({a_reaches}), and so does the revocation ({p2_arrived})");
     assert!(k0_trusted, "FIRST SIGHT: after B restarted, a self-signed key revoked C's anchored key");
     assert!(!ka_trusted, "and the self-signed key is not trusted for C");
     assert!(plant, "C's writes still arrive at B");
@@ -2236,7 +2249,14 @@ async fn a_fork_from_a_revoked_key_is_not_trusted_after_the_verifier_restarts() 
     tokio::time::sleep(Duration::from_millis(300)).await;
     let b = restart(b).await;
     let plant = plant_lands(&c, &b, "fork/plant").await;
+    // Delivery first (#834's review): A held a writer to B's previous process, so a forged frame A sends after the
+    // restart can be lost (O2, #746), and a lost one also reads as `!landed`. A's writes are shown to reach the
+    // restarted B before the forgery, and a write A makes after it is shown to arrive before `landed` is read. Not a
+    // stopgap: this stays when O2 is fixed.
+    let a_reaches = plant_lands(&a, &b, "fork/from-a").await;
     send_signed_as(&a, &nc, &thief, "fork/as-c", b"by-ka");
+    let _ = a.kv().set("fork/after".to_string(), b"after".to_vec());
+    let after = within_3s(|| b.kv().get("fork/after").is_some()).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let landed = b.kv().get("fork/as-c").is_some();
     let ka_trusted = crate::agent::helpers::known_verifying_keys(&b.task_ctx, &nc).contains(&ka);
@@ -2244,6 +2264,7 @@ async fn a_fork_from_a_revoked_key_is_not_trusted_after_the_verifier_restarts() 
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&base);
     assert!(seen && plant, "B saw the revocation, and C's write under its new key arrived after the restart");
+    assert!(a_reaches && after, "A's writes reach B after its restart, before ({a_reaches}) and after ({after}) the forgery");
     assert!(!ka_trusted, "RESTART: a key chained through C's revoked key is trusted for C after B restarted");
     assert!(!landed, "RESTART: a key chained through C's revoked key signs as C after B restarted");
 }
