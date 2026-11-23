@@ -926,20 +926,22 @@ async fn a_gateway_crash_between_the_forward_and_the_sync_leaves_no_record_and_a
     drop(p);
     tokio::time::sleep(Duration::from_millis(300)).await;
     let p = node(popts).await;
-    // STOPGAP for #746 (plan §9 O2, which stays open): the gateway may still hold a writer to the provider's previous
-    // process, so the gateway's first anti-entropy reply to the restarted provider can go down the dead connection and
-    // be lost, and the provider asks again only after its `resync_cooldown` (30 s here) — the wait below used to bet on
-    // that first reply. `connected_peers` is the writer map, so it reads true on the stale writer too; and the gateway
-    // still holds the old instance's key, so keys prove nothing (#821's CI). Instead, as `run_client_grant.mjs`'s
-    // `meshed()` does: a write each way, re-written until it arrives (the gateway's re-writes are what replace its
-    // stale writer with one to the live process), and then the sync asked for again over the path just shown to
-    // deliver both ways, until the call's checkpoint is held. Each step is bounded and none waits on a timer. Remove
-    // this once #746 is fixed in the transport.
+    // STOPGAP for #746 (plan §9 O2, which stays open; the transport fix reverts this): the gateway may still hold a
+    // writer whose connection goes to the provider's previous process, so its first anti-entropy reply to the restarted
+    // provider can go down the dead connection and be lost, and the provider asks again only after its
+    // `resync_cooldown` (30 s here) — the wait below used to bet on that first reply. The gateway still holds the old
+    // instance's key, so keys prove nothing (#821's CI). Instead, as `run_client_grant.mjs`'s `meshed()` does: a write
+    // each way, re-written until it arrives (the gateway's re-writes are what replace the stale *connection*: a failed
+    // write drops it and the next frame re-dials the live process; the writer task itself survives), and then the sync
+    // asked for again over the path just shown to deliver both ways, until the call's checkpoint is held. Each step is
+    // bounded. **What this no longer shows:** that the restarted provider gets the gateway's records unprompted, through
+    // its own anti-entropy. That was never this test's claim, and its failing is the O2 defect itself.
     assert!(write_reaches(&g, &p, "o2/forward", Duration::from_secs(20)).await, "a write at the gateway reaches the restarted provider");
     assert!(write_reaches(&p, &g, "o2/back", Duration::from_secs(20)).await, "a write at the restarted provider reaches the gateway");
     assert!(synced_from(&p, &gid, || p.kv(&cp).is_some(), Duration::from_secs(30)).await, "the restarted provider holds the gateway's records");
-    let reachable = || g.a.connected_peers().contains(&pid) && knows(&p.a, &gid);
-    assert!(reachable(), "the restarted provider is reachable from the gateway");
+    // The provider's key for the gateway arrives on its own schedule, unordered with the checkpoint: waited for, bounded.
+    // (`connected_peers` is the writer map's keys, stale entries included, so it proves nothing and is not asserted.)
+    assert!(until(|| knows(&p.a, &gid), Duration::from_secs(5)).await, "the restarted provider holds the gateway's key");
     let g = Arc::new(g);
     let (g2, pid2) = (Arc::clone(&g), pid.clone());
     let again = tokio::spawn(async move { g2.send(&pid2, framed).await });
@@ -962,7 +964,7 @@ async fn a_gateway_crash_between_the_forward_and_the_sync_leaves_no_record_and_a
 
 /// STOPGAP for #746 (plan §9 O2, open): whether a write at `from` reaches `to` within `within`, the write made again
 /// each half second until it does — so a frame lost into a connection to a restarted peer's previous process is not the
-/// last word, and the sender's failed write replaces that connection. `run_client_grant.mjs`'s `meshed()`, in Rust.
+/// last word: the sender's failed write drops that connection, and its next frame re-dials the live process. `run_client_grant.mjs`'s `meshed()`, in Rust.
 async fn write_reaches(from: &N, to: &N, key: &str, within: Duration) -> bool {
     let deadline = std::time::Instant::now() + within;
     let mut round = 0u64;
