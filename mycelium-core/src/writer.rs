@@ -198,6 +198,11 @@ pub async fn run_peer_writer(
             metrics::counter!("gossip_control_lane_dropped_total").increment(n);
         }
     };
+    let mut yield_tick = lane.as_ref().map(|_| crate::sim_seam::interval_ms(
+        format!("{}/{peer}", crate::control_lane::YIELD_STREAM),
+        crate::control_lane::CONTROL_LANE_YIELD_TICK_MS,
+        tokio::time::MissedTickBehavior::Delay,
+    ));
     let mut conn: Option<BufWriter<crate::stall::StallGuard<GossipStream>>> = None;
     // Identity-and-lifecycle I2 (#796's review, must-address 6): the roots generation the session's handshake was judged
     // under, and the peer's certificate. When the node's roots change, the session is re-judged before its next write,
@@ -237,12 +242,12 @@ pub async fn run_peer_writer(
                 }
             } => break,
             // A control lane's yield tick (M1): an idle lane still closes within the tick of the data
-            // writer losing its socket. A data writer never takes this arm.
+            // writer losing its socket. A data writer never takes this arm. A ticker made once per lane, not
+            // a sleep armed per iteration: a frame's arrival does not cancel and re-arm it, and the seam's
+            // ticker asks a cancelled tick again rather than skipping it (#832's review, F6).
             _ = async {
-                match lane {
-                    Some(_) => crate::sim_seam::sleep_ms(
-                        crate::control_lane::YIELD_STREAM, crate::control_lane::CONTROL_LANE_YIELD_TICK_MS,
-                    ).await,
+                match yield_tick.as_mut() {
+                    Some(t) => t.tick().await,
                     None => std::future::pending().await,
                 }
             } => {
@@ -310,6 +315,9 @@ pub async fn run_peer_writer(
             #[cfg(feature = "tls")]
             let judged_at = tls.as_ref().map_or(0, |t| t.roots_generation());
             let connect_started = crate::sim_seam::mono_now_ns();
+            // Whether the TCP connect succeeded before the attempt failed: a lane refused in its handshake (a
+            // per-source cap's accept-and-close) backs off long; a lane whose peer is down does not (F3).
+            let tcp_up = std::sync::atomic::AtomicBool::new(false);
             let attempt = async {
                 #[cfg(any(test, feature = "test-frame-filter"))]
                 {
@@ -323,6 +331,7 @@ pub async fn run_peer_writer(
                 }
                 let s = TcpStream::connect(peer.to_socket_addr()).await
                     .map_err(|e| format!("Connect to {peer} failed: {e}"))?;
+                tcp_up.store(true, Ordering::Relaxed);
                 let _ = s.set_nodelay(true);
                 #[cfg(unix)]
                 {
@@ -370,11 +379,13 @@ pub async fn run_peer_writer(
                 }
                 Ok(Err(e)) => {
                     if let Some(l) = lane.as_ref() {
-                        // A refused lane (a per-source cap closes the socket in the handshake) backs off
-                        // long, so it cannot keep taking the slot a data reconnect needs (M1).
-                        l.note_refused(&peer);
+                        // A lane refused in its handshake (a per-source cap closes the socket) backs off
+                        // long, so it cannot keep taking the slot a data reconnect needs (M1); a peer that
+                        // is down waits only the reconnect backoff (F3).
+                        let refused = tcp_up.load(Ordering::Relaxed);
+                        l.note_refused(&peer, refused, jittered(backoff));
                         lane_drop(&rx, 1);
-                        warn!("Control lane: {e}; no lane to {peer} for the refused backoff");
+                        warn!("Control lane: {e}; no lane to {peer} for the {} backoff", if refused { "refused" } else { "reconnect" });
                         break;
                     }
                     last_fail = Some((crate::sim_seam::mono_now_ns(), jittered(backoff)));
@@ -383,9 +394,10 @@ pub async fn run_peer_writer(
                 }
                 Err(_) => {
                     if let Some(l) = lane.as_ref() {
-                        l.note_refused(&peer);
+                        let refused = tcp_up.load(Ordering::Relaxed);
+                        l.note_refused(&peer, refused, jittered(backoff));
                         lane_drop(&rx, 1);
-                        warn!("Control lane connect to {peer} timed out after {:?}; no lane for the refused backoff", timing.connect);
+                        warn!("Control lane connect to {peer} timed out after {:?}; no lane for the {} backoff", timing.connect, if refused { "refused" } else { "reconnect" });
                         break;
                     }
                     last_fail = Some((crate::sim_seam::mono_now_ns(), jittered(backoff)));

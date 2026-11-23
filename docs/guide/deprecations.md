@@ -5716,12 +5716,19 @@ and a lane can take a permit a new peer's data connection needed. Size `max_conn
 
 **`max_connections_per_source` (off by default) must allow 2 per node behind one source address**, or those nodes set
 `control_lane = false`. The cap is read on the receiver and the switch on the sender, so no one node's configuration can
-check the pair (`validate()` says so and checks nothing). Under a cap that is too low the lane is refused: it is not
-tried again for 300 s, and the node's control frames go by the shared path only, counted in
+check the pair (`validate()` says so and checks nothing). Under a cap that is too low the lane is refused in its
+handshake: it is not tried again for 300 s, and the node's control frames go by the shared path only, counted in
 `control_lane_connect_failed` (under TLS; over plaintext an accept-and-close refusal is not seen as a failed connect,
-and the loss shows in `control_lane_dropped`). **A lane never keeps a data reconnect out of a per-source slot:** it
-opens only while the peer's data writer is connected (or the node has no data writer to that peer at all), and it
-closes within 1 s when the data writer loses its socket (`control_lane_yielded`).
+and the loss shows in `control_lane_dropped`). A lane whose TCP connect fails — the peer down or restarting — waits
+only the node's reconnect backoff. **The bound a lane puts on a data reconnect:** a lane opens only while the peer's
+data writer is connected (or the node has no data writer to that peer, or only an exited one), and it closes within
+1 s when the data writer is not connected (`control_lane_yielded`). So under a cap of 1 a lane opened while there
+was no data writer can cost the next data writer **one refused connect and one reconnect backoff**
+(`reconnect_backoff_secs`, jittered — 2.5–7.5 s at the default), during which that writer drops its frames, as any
+writer in its backoff does; it cannot keep the data writer out longer. A cap of 2 per node avoids it.
+
+**No lane to a removed member.** A control frame toward a member removed under closure plan C5 goes by the shared
+path only (`Removed`): the lane would be a connection of this node's own to it.
 
 **Mixed fleets.** Wire v12 is unchanged: no variant, field or version. An older receiver serves a lane like any
 connection; it keeps waiting, under `flush`, on the quorum-evidence append in the reader, which this release moves off

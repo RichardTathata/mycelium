@@ -21,7 +21,15 @@
 //!   reconnect needs ([`ControlLane::may_open`]);
 //! - an open lane **yields** — closes, counted in `yielded` — within [`CONTROL_LANE_YIELD_TICK_MS`] of
 //!   the data writer losing its socket ([`ControlLane::should_yield`], checked by the lane's writer);
-//! - a lane whose connect fails is not tried again for [`CONTROL_LANE_REFUSED_BACKOFF_MS`];
+//! - a lane whose handshake is refused after its TCP connect succeeded — what a per-source cap's
+//!   accept-and-close looks like — is not tried again for [`CONTROL_LANE_REFUSED_BACKOFF_MS`]; a lane
+//!   whose TCP connect fails (the peer down or restarting) waits only the node's reconnect backoff;
+//! - no lane is opened to a removed member (closure plan C5);
+//! - **the bound on a data reconnect, stated:** a lane opened while the peer had no data writer (or an
+//!   exited, unreaped one) holds the per-source slot when a new data writer connects, so under a cap of
+//!   1 that writer can be refused **once** and sit one reconnect backoff (`reconnect_backoff_secs`,
+//!   jittered), dropping its frames; the lane yields within the tick, so it cannot keep the data writer
+//!   out longer (#832's review, F2);
 //! - **a relay never puts a frame it received on a lane** (D7): nothing on the receive path calls
 //!   [`ControlLane::send`]; relays forward through the shard only.
 //!
@@ -42,7 +50,7 @@ use std::sync::{
 ///   and #826's re-sends are at most one per attempt.
 ///
 /// The reply to a request of one of these kinds (`rpc.result`, toward the request's sender) rides the
-/// lane too; see [`may_carry`].
+/// lane too, and only that reply; see [`ControlFrame`] and [`may_carry`].
 pub const CONTROL_KINDS: &[&str] = &["sys.call-cancel.v1"];
 
 /// A kind the lane admits **only in test builds**, so a test can drive the lane without a real control
@@ -76,11 +84,27 @@ pub fn is_control_kind(kind: &str) -> bool {
     CONTROL_KINDS.contains(&kind)
 }
 
-/// Whether a frame of `kind` sent for the control kind `control_kind` may ride the lane: `control_kind`
-/// is a control kind, and the frame is either a request of that kind or its `rpc.result` reply.
-pub fn may_carry(kind: &str, control_kind: &str) -> bool {
-    is_control_kind(control_kind)
-        && (kind == control_kind || kind == crate::signal::signal_kind::RPC_RESULT)
+/// What a frame offered to the lane is ([`crate::ops::emit_signal_control`]).
+#[derive(Debug, Clone, Copy)]
+pub enum ControlFrame<'a> {
+    /// A request: its own kind must be a control kind.
+    Request,
+    /// The `rpc.result` reply to `request`, the request this node received: the request's kind must be a
+    /// control kind — checked as a request's is — and the reply goes to the request's sender only (#832's
+    /// review, F5: a caller naming a control kind could otherwise put any reply on the lane).
+    ReplyTo(&'a crate::signal::Signal),
+}
+
+/// Whether a frame of `kind` to `target` may ride the lane (the closed set, D2): a request whose kind is a
+/// control kind, or the `rpc.result` reply to a received request whose kind is one, sent to that
+/// request's sender.
+pub fn may_carry(kind: &str, frame: ControlFrame<'_>, target: &NodeId) -> bool {
+    match frame {
+        ControlFrame::Request => is_control_kind(kind),
+        ControlFrame::ReplyTo(req) => {
+            kind == crate::signal::signal_kind::RPC_RESULT && is_control_kind(&req.kind) && req.sender == *target
+        }
+    }
 }
 
 /// What became of a frame's lane copy ([`crate::ops::emit_signal_control`]). The shared copy is offered
@@ -95,9 +119,12 @@ pub enum LaneVerdict {
     Off,
     /// The kind may not ride the lane, or the frame is over [`CONTROL_LANE_MAX_FRAME_BYTES`] (`refused`).
     Refused,
+    /// The target is a removed member (closure plan C5): no lane is opened to it (#832's review, F1).
+    Removed,
     /// The peer's data writer exists and has no connected socket: no lane opens (M1).
     DataUnconnected,
-    /// A lane connect to the peer failed within [`CONTROL_LANE_REFUSED_BACKOFF_MS`].
+    /// A lane connect to the peer failed recently: within [`CONTROL_LANE_REFUSED_BACKOFF_MS`] of a refused
+    /// handshake, or within the reconnect backoff of a failed TCP connect.
     Backoff,
     /// The node is shutting down, or the lane closed twice under the copy.
     Unavailable,
@@ -119,7 +146,10 @@ pub struct ControlLaneStats {
     pub sent:            AtomicU64,
     /// Copies refused because the lane's channel was full.
     pub full:            AtomicU64,
-    /// Lane connects (TCP + TLS handshake) that failed; each starts the refused backoff.
+    /// Lane connects that failed. A failure **after** the TCP connect succeeded — the handshake refused,
+    /// which is how a per-source cap's accept-and-close looks — starts the long refused backoff
+    /// ([`CONTROL_LANE_REFUSED_BACKOFF_MS`]); a TCP connect that failed or timed out (the peer down or
+    /// restarting) starts only the node's reconnect backoff (#832's review, F3).
     pub connect_failed:  AtomicU64,
     /// Lanes closed because the peer's data writer lost its socket (M1).
     pub yielded:         AtomicU64,
@@ -212,9 +242,12 @@ impl ControlLane {
         self.data_unconnected(peer)
     }
 
-    /// A lane connect to `peer` failed: no lane opens to it for [`CONTROL_LANE_REFUSED_BACKOFF_MS`].
-    pub(crate) fn note_refused(&self, peer: &NodeId) {
-        let until = crate::sim_seam::mono_now_ns().saturating_add(CONTROL_LANE_REFUSED_BACKOFF_MS * 1_000_000);
+    /// A lane connect to `peer` failed. `handshake_refused` (the TCP connect succeeded and the handshake
+    /// did not: a per-source refusal) means no lane opens to it for [`CONTROL_LANE_REFUSED_BACKOFF_MS`];
+    /// otherwise (the peer down or restarting) for `reconnect`, the node's reconnect backoff.
+    pub(crate) fn note_refused(&self, peer: &NodeId, handshake_refused: bool, reconnect: std::time::Duration) {
+        let ms = if handshake_refused { CONTROL_LANE_REFUSED_BACKOFF_MS } else { reconnect.as_millis() as u64 };
+        let until = crate::sim_seam::mono_now_ns().saturating_add(ms.saturating_mul(1_000_000));
         self.refused_until.pin().insert(peer.clone(), until);
         self.stats.connect_failed.fetch_add(1, Ordering::Relaxed);
         #[cfg(feature = "metrics")]
@@ -228,9 +261,21 @@ impl ControlLane {
         self.refused_until.pin().remove(peer);
     }
 
+    /// **Test-only:** how much of `peer`'s connect backoff is left, if one runs.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn backoff_left_for_test(&self, peer: &NodeId) -> Option<std::time::Duration> {
+        let until = *self.refused_until.pin().get(peer)?;
+        Some(std::time::Duration::from_nanos(until.saturating_sub(crate::sim_seam::mono_now_ns())))
+    }
+
     /// Offer `frame`, already encoded, to the lane toward `target`, opening it if the rules allow. Called
     /// only by [`crate::ops::emit_signal_control`], after the shared copy was offered.
     pub(crate) fn send(self: &Arc<Self>, ctx: &crate::CoreCtx, target: &NodeId, frame: Bytes) -> LaneVerdict {
+        // Closure plan C5: never a connection of our own to a removed member. The data path has none either:
+        // a removed member is not in `peers`, so it is no forwarding target (#832's review, F1).
+        if ctx.removed.is_node_removed(target) {
+            return LaneVerdict::Removed;
+        }
         if let Err(v) = self.may_open(target) {
             return v;
         }
@@ -254,6 +299,8 @@ impl ControlLane {
         // A copy enqueued as an idle lane shuts down lands in a closed channel: respawn and retry once, as
         // the shard's `send_to_peer!` does, so it is not counted as sent and lost.
         if verdict == crate::sim_seam::ChanVerdict::Closed {
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(hook) = TEST_ON_CLOSED.pin().get(&target.to_string()) { hook(self); }
             let Some(tx) = spawn() else { return LaneVerdict::Unavailable };
             verdict = tx.try_send_counted(&stream, frame);
         }
@@ -310,6 +357,14 @@ impl ControlLane {
     }
 }
 
+/// **Test-only:** run when a lane copy finds its channel closed, before the respawn — so a test can stand in
+/// for the GC reaping the exited writer in that window (the idle-exit race the retry is for).
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[allow(clippy::type_complexity)]
+pub static TEST_ON_CLOSED: std::sync::LazyLock<papaya::HashMap<String, Arc<dyn Fn(&ControlLane) + Send + Sync>>> =
+    std::sync::LazyLock::new(papaya::HashMap::new);
+
 /// `gossip_control_lanes_connected`: the live lane writers — published where the lane map changes,
 /// apart from `gossip_peers_connected`, which counts data writers only (M3).
 pub fn publish_lane_gauge(writers: &papaya::HashMap<NodeId, WriterEntry>) {
@@ -333,9 +388,18 @@ mod tests {
         assert!(is_control_kind("sys.call-cancel.v1"));
         assert!(!is_control_kind("rpc.result"), "a reply rides the lane only for a control request");
         assert!(!is_control_kind("sys.replica-sync.v1"));
-        assert!(may_carry("rpc.result", "sys.call-cancel.v1"));
-        assert!(may_carry("sys.call-cancel.v1", "sys.call-cancel.v1"));
-        assert!(!may_carry("rpc.result", "mcp.invoke"));
-        assert!(!may_carry("mcp.invoke", "sys.call-cancel.v1"));
+        let peer = NodeId::new("127.0.0.1", 7001).unwrap();
+        let req = |kind: &str| crate::signal::Signal {
+            kind: Arc::from(kind), scope: crate::signal::SignalScope::Individual(peer.clone()),
+            payload: Bytes::new(), sender: peer.clone(), nonce: 1,
+        };
+        assert!(may_carry("sys.call-cancel.v1", ControlFrame::Request, &peer));
+        assert!(!may_carry("mcp.invoke", ControlFrame::Request, &peer));
+        assert!(!may_carry("rpc.result", ControlFrame::Request, &peer), "a reply is not a request");
+        assert!(may_carry("rpc.result", ControlFrame::ReplyTo(&req("sys.call-cancel.v1")), &peer));
+        assert!(!may_carry("rpc.result", ControlFrame::ReplyTo(&req("mcp.invoke")), &peer), "the reply to a non-control request");
+        let elsewhere = NodeId::new("127.0.0.1", 7002).unwrap();
+        assert!(!may_carry("rpc.result", ControlFrame::ReplyTo(&req("sys.call-cancel.v1")), &elsewhere), "a reply goes to the request's sender only");
+        assert!(!may_carry("mcp.invoke", ControlFrame::ReplyTo(&req("sys.call-cancel.v1")), &peer), "only an `rpc.result` is a reply");
     }
 }

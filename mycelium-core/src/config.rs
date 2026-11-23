@@ -1225,9 +1225,12 @@ pub struct GossipConfig {
     /// may hold **two** connections to this node while control traffic flows — its data connection and
     /// its lane. A cap here must allow 2 per node behind one source address, or those peers set
     /// `control_lane = false`: the cap is on the receiver and the switch on the sender. Under a cap that
-    /// is too low a peer's lane is refused (and not tried again for 300 s) and its control frames go by
-    /// the shared path only; a lane never keeps a data reconnect out (it opens only while the data writer
-    /// is connected, and yields within 1 s when it is not).
+    /// is too low a peer's lane is refused in its handshake (and not tried again for 300 s) and its control
+    /// frames go by the shared path only. **The bound on a data reconnect:** a lane opens only while the
+    /// peer's data writer is connected or absent, and yields within 1 s when the data writer is not
+    /// connected; a lane opened while the peer had no data writer (or an exited one) can therefore cost a
+    /// new data writer, under a cap of 1, one refused connect and one reconnect backoff
+    /// (`reconnect_backoff_secs`, jittered) of dropped frames — never longer.
     pub max_connections_per_source: usize,
     /// **The control lane** (B1, `docs/design/control-lane.md`): a second connection per peer, opened
     /// lazily and idle-evicted like a data writer, that carries a copy of each frame of the closed set of
@@ -3579,6 +3582,29 @@ mod tests {
             let err = GossipConfig::default().apply_env_overrides().expect_err("a typo refuses");
             assert!(matches!(err, GossipError::InvalidField { field: "require_identity_proofs", .. }), "{typo:?}: {err}");
         }
+    }
+
+    /// **`GOSSIP_CONTROL_LANE` sets `control_lane`** (B1): `true`/`1` on, `false`/`0` off, anything else
+    /// refused by name; unset leaves the default, on. Seen failing first with the variable not read.
+    #[test]
+    fn the_control_lane_setting_parses_from_the_environment() {
+        let _lock = env_test_lock();
+        let var = "GOSSIP_CONTROL_LANE";
+        let _guard = EnvGuard(&_lock, var, std::env::var(var).ok());
+        set_test_env(&_lock, var, None);
+        let mut cfg = GossipConfig::default();
+        cfg.apply_env_overrides().unwrap();
+        assert!(cfg.control_lane, "on by default");
+        for (v, want) in [("1", true), ("true", true), ("0", false), ("false", false)] {
+            set_test_env(&_lock, var, Some(v));
+            let mut cfg = GossipConfig::default();
+            cfg.control_lane = !want;
+            cfg.apply_env_overrides().expect("a boolean applies");
+            assert_eq!(cfg.control_lane, want, "{v}");
+        }
+        set_test_env(&_lock, var, Some("off"));
+        let err = GossipConfig::default().apply_env_overrides().expect_err("a typo refuses");
+        assert!(matches!(err, GossipError::InvalidField { field: "GOSSIP_CONTROL_LANE", .. }), "{err}");
     }
 
     // ── WS-B M4 fan-out resolution ────────────────────────────────────────

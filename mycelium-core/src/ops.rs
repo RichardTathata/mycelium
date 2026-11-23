@@ -119,9 +119,9 @@ pub fn emit_signal(
 /// **same bytes** — the same nonce, so the receiver's seen-set drops whichever copy is second — are
 /// offered to the control lane toward `target`.
 ///
-/// `control_kind` names the control kind the frame serves: `kind` itself for a request, the request's
-/// kind for its `rpc.result` reply. A frame that may not ride the lane
-/// ([`crate::control_lane::may_carry`]), or is over
+/// `frame` says what the frame is: a request (its kind must be a control kind), or the `rpc.result` reply
+/// to a request this node received (that request's kind must be one, and the reply goes to its sender). A
+/// frame that may not ride the lane ([`crate::control_lane::may_carry`]), or is over
 /// [`CONTROL_LANE_MAX_FRAME_BYTES`](crate::control_lane::CONTROL_LANE_MAX_FRAME_BYTES), goes by the
 /// shared path only, counted `refused`. Nothing on the receive path calls this: a relay never puts a
 /// frame it received on a lane (D7).
@@ -130,7 +130,7 @@ pub fn emit_signal_control(
     kind:         Arc<str>,
     target:       crate::node_id::NodeId,
     payload:      Bytes,
-    control_kind: &str,
+    frame_of:     crate::control_lane::ControlFrame<'_>,
 ) -> crate::control_lane::ControlSend {
     use crate::control_lane::{LaneVerdict, CONTROL_LANE_MAX_FRAME_BYTES};
     let nonce = crate::sim_seam::rng_u64_from(NONCE_STREAM, 1);
@@ -162,9 +162,11 @@ pub fn emit_signal_control(
     let lane = if target == ctx.node_id {
         // Addressed to this node: delivered above, nothing to carry.
         LaneVerdict::Unavailable
-    } else if !crate::control_lane::may_carry(&kind, control_kind) || frame.len() > CONTROL_LANE_MAX_FRAME_BYTES {
-        ctx.control_lane.stats.refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        tracing::warn!(%kind, control_kind, bytes = frame.len(), "a frame the control lane does not carry: sent by the shared path only");
+    } else if !crate::control_lane::may_carry(&kind, frame_of, &target) || frame.len() > CONTROL_LANE_MAX_FRAME_BYTES {
+        let n = ctx.control_lane.stats.refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n == 0 || (n + 1).is_multiple_of(64) {
+            tracing::warn!(%kind, bytes = frame.len(), refused = n + 1, "a frame the control lane does not carry: sent by the shared path only");
+        }
         LaneVerdict::Refused
     } else {
         ctx.control_lane.send(ctx, &target, frame)

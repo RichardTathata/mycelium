@@ -7,7 +7,7 @@
 use crate::test_util::alloc_port;
 use crate::{GossipAgent, GossipConfig, NodeId};
 use bytes::Bytes;
-use mycelium_core::control_lane::{LaneVerdict, CONTROL_LANE_DEPTH, TEST_CONTROL_KIND};
+use mycelium_core::control_lane::{ControlFrame, LaneVerdict, CONTROL_LANE_DEPTH, CONTROL_LANE_REFUSED_BACKOFF_MS, TEST_CONTROL_KIND};
 use mycelium_core::ops::emit_signal_control;
 use mycelium_core::writer::{WriteHold, TEST_CONNECT_HOLD, TEST_WRITE_HOLD};
 use std::sync::{atomic::Ordering, Arc};
@@ -44,7 +44,7 @@ fn lane_connected(a: &GossipAgent, peer: &NodeId) -> bool {
 
 /// One frame of the test control kind from `a` to `to`, its payload the number `i`.
 fn emit(a: &GossipAgent, to: &NodeId, i: u64) -> mycelium_core::control_lane::ControlSend {
-    emit_signal_control(&a.task_ctx, Arc::from(TEST_CONTROL_KIND), to.clone(), Bytes::from(i.to_le_bytes().to_vec()), TEST_CONTROL_KIND)
+    emit_signal_control(&a.task_ctx, Arc::from(TEST_CONTROL_KIND), to.clone(), Bytes::from(i.to_le_bytes().to_vec()), ControlFrame::Request)
 }
 
 /// Collect the numbers of the test-kind frames `rx` receives until it has `want` distinct ones, bounded.
@@ -300,6 +300,8 @@ async fn a_refused_lane_connect_falls_back_and_backs_off() {
     assert_eq!(collect(&mut rx, 1, Duration::from_secs(10)).await, [1].into(), "the shared copy delivered the frame");
     assert!(data_connected(&a, &nb), "the data connection was undisturbed");
 
+    let left = a.task_ctx.control_lane.backoff_left_for_test(&nb).expect("a backoff runs");
+    assert!(left > Duration::from_secs(60) && left <= Duration::from_millis(CONTROL_LANE_REFUSED_BACKOFF_MS), "a refused handshake backs off long: {left:?}");
     assert_eq!(emit(&a, &nb, 2).lane, LaneVerdict::Backoff, "BACKOFF: a lane was opened again inside the refused backoff");
     assert_eq!(collect(&mut rx, 1, Duration::from_secs(10)).await, [2].into(), "the shared copy delivered the second frame");
     assert_eq!(stats.connect_failed.load(Ordering::Relaxed), 1, "no second connect inside the backoff");
@@ -319,7 +321,8 @@ async fn a_refused_lane_connect_falls_back_and_backs_off() {
 /// A has no data writer to B, so its lane opens first and takes B's one slot. Then A's data writer is
 /// started and refused: it sits unconnected, the lane **yields** (`yielded` = 1), B's slot frees, and the data
 /// writer connects on its next attempt — gossip to B resumes. A never idles a writer out here, so without the
-/// yield the lane would hold the slot for good.
+/// yield the lane would hold the slot for good. **The bound this shows, stated** (#832's review, F2): the data
+/// writer is refused once and waits one reconnect backoff — a lane cannot keep it out longer than that.
 ///
 /// Seen failing first with the yield check removed (`ControlLane::should_yield` always `false`): the data
 /// writer was refused on every attempt while the lane stayed open.
@@ -343,7 +346,7 @@ async fn a_data_writer_reconnects_past_an_open_lane() {
         "STARVED: A's data writer never reconnected past the open lane",
     );
     assert_eq!(stats.yielded.load(Ordering::Relaxed), 1, "the lane yielded to the unconnected data writer");
-    assert!(b.system_stats().inbound_per_source_refused >= 1, "the data writer was refused while the lane held the slot");
+    assert!(b.system_stats().inbound_per_source_refused >= 1, "the stated bound: the data writer was refused while the lane held the slot");
     let mut resumed = false;
     for _ in 0..75 {
         let _ = mycelium_core::ops::emit_signal(&a.task_ctx, Arc::from("test.b1.data"), crate::SignalScope::Individual(nb.clone()), Bytes::from_static(b"d"));
@@ -527,8 +530,10 @@ impl Drop for GaugeTestAgent {
     }
 }
 
-/// **T7, C5 member removal:** removing a member closes its lane — the lane is an mTLS connection to it. Seen
-/// failing first with the lane left out of the removal (a blind remove of the data writer only).
+/// **T7, C5 member removal:** removing a member closes its lane — the lane is an mTLS connection to it — and the
+/// next control frame toward it opens none (`Removed`). Seen failing first with the lane left out of the removal
+/// (a blind remove of the data writer only), and with the removed-member check left out of the lane's send
+/// (#832's review, F1: a removal that names no key does not stop the handshake, so the lane reconnected).
 #[cfg(all(feature = "tls", feature = "compliance"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_writer_site_handles_the_lane_member_removal() {
@@ -557,6 +562,13 @@ async fn every_writer_site_handles_the_lane_member_removal() {
     let signed = SignedMemberRemoval { signature: operator.sign(&removal.canonical_bytes()).to_bytes().to_vec(), removal };
     assert_eq!(a.offer_member_removal(&signed), Some(RemovalOffer::Accepted));
     assert!(!lane_present(&a, &nb), "SITE: a removed member kept its control lane");
+    // #832's review, F1: the next control frame toward the removed member opens no lane, and no connection.
+    // As if A's data writer to B had idled out and been reaped: no data writer, the case where M7 opens a lane.
+    mycelium_core::writer::evict_peer_writer(&a.peer_writers, &nb);
+    let opened = a.task_ctx.control_lane.stats.sent.load(Ordering::Relaxed);
+    assert_eq!(emit(&a, &nb, 2).lane, LaneVerdict::Removed, "REOPENED: a lane was opened to a removed member");
+    assert!(!lane_present(&a, &nb), "no lane writer to the removed member");
+    assert_eq!(a.task_ctx.control_lane.stats.sent.load(Ordering::Relaxed), opened);
 
     a.shutdown().await;
     b.shutdown().await;
@@ -639,4 +651,96 @@ async fn a_relay_never_puts_a_received_frame_on_a_lane() {
     a.shutdown().await;
     r.shutdown().await;
     p.shutdown().await;
+}
+
+/// **F3: a lane whose peer is down waits only the reconnect backoff.** A's lane goes to a port nothing listens
+/// on: the TCP connect fails, `connect_failed` is counted, and the backoff left is the node's reconnect backoff
+/// (here 1 s, jittered to at most 1.5 s), not the 300 s a refused handshake starts (T6 asserts that arm).
+/// Seen failing first with every failed connect starting the 300 s backoff (#832's review, F3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lane_to_a_peer_that_is_down_waits_only_the_reconnect_backoff() {
+    let pa = alloc_port();
+    let mut c = GossipConfig::default();
+    c.bind_port = pa;
+    c.reconnect_backoff_secs = 1;
+    let a = GossipAgent::new(id(pa), c);
+    a.start().await.unwrap();
+    let down = id(alloc_port());
+    let stats = &a.task_ctx.control_lane.stats;
+    assert_eq!(emit(&a, &down, 1).lane, LaneVerdict::Sent, "a peer with no data writer gets a lane");
+    assert!(until(Duration::from_secs(15), || stats.connect_failed.load(Ordering::Relaxed) == 1).await, "the failed connect was not counted");
+    let left = a.task_ctx.control_lane.backoff_left_for_test(&down).expect("a backoff runs");
+    assert!(left <= Duration::from_millis(1_500), "LONG: a peer that is down turned the lane off for {left:?}");
+    a.shutdown().await;
+}
+
+/// **F4: a lane copy that finds its channel closed is retried once on a respawned lane.** A's lane entry to B
+/// is replaced by one whose receiver has gone (a lane writer that idled out as the copy was enqueued); a test
+/// hook stands in for the GC reaping it before the respawn. The copy is `Sent` on the new lane and B gets it.
+/// Seen failing first with the retry removed: the copy was `Unavailable` and never reached B.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_lane_is_respawned_and_the_copy_retried() {
+    let (a, b, _na, nb) = pair(|c| c.health_check_interval_secs = 60, |_| {}).await;
+    let mut rx = b.mesh().signal_rx_with_capacity(TEST_CONTROL_KIND, 64);
+    let lane = &a.task_ctx.control_lane;
+    let (tx, dead_rx) = tokio::sync::mpsc::channel(4);
+    drop(dead_rx);
+    lane.writers().pin().insert(nb.clone(), mycelium_core::writer::WriterEntry {
+        tx: mycelium_core::outbound::WriterTx::new(tx, a.task_ctx.gossip_txs.unsent().clone()),
+        peer_shutdown: Arc::new(tokio::sync::watch::channel(false).0),
+        abort_handle: None,
+        dropped: Arc::default(),
+        connected: Arc::default(),
+    });
+    let key = nb.to_string();
+    let reaped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let r = Arc::clone(&reaped);
+    let peer = nb.clone();
+    mycelium_core::control_lane::TEST_ON_CLOSED.pin().insert(key.clone(), Arc::new(move |l: &mycelium_core::control_lane::ControlLane| {
+        r.fetch_add(1, Ordering::SeqCst);
+        l.writers().pin().remove(&peer);
+    }));
+    let sent = emit(&a, &nb, 5);
+    mycelium_core::control_lane::TEST_ON_CLOSED.pin().remove(&key);
+    assert_eq!(sent.lane, LaneVerdict::Sent, "RETRY: the copy was not retried on a respawned lane");
+    assert_eq!(reaped.load(Ordering::SeqCst), 1, "the copy found the closed channel");
+    assert_eq!(collect(&mut rx, 1, Duration::from_secs(10)).await, [5].into());
+    assert!(until(Duration::from_secs(10), || lane_connected(&a, &nb)).await, "the respawned lane connected");
+    assert_eq!(lane.stats.sent.load(Ordering::Relaxed), 1, "counted sent once");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **F4 and F5: what the lane refuses, counted.** A request of a kind outside the closed set, a frame over
+/// 64 KiB, and an `rpc.result` that answers a non-control request (or goes to another node than the request's
+/// sender) are each `Refused`, counted in `control_lane_refused`, their shared copy offered, and no lane is
+/// opened. Seen failing first with the refusal removed from `emit_signal_control`: a lane opened for each.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn what_the_lane_does_not_carry_is_refused_and_counted() {
+    let (a, b, _na, nb) = pair(|c| c.health_check_interval_secs = 60, |_| {}).await;
+    let lane = &a.task_ctx.control_lane;
+    let send = |kind: &str, payload: Bytes, frame: ControlFrame<'_>, to: &NodeId| emit_signal_control(&a.task_ctx, Arc::from(kind), to.clone(), payload, frame);
+    let small = || Bytes::from_static(b"x");
+
+    let not_control = send("mcp.invoke", small(), ControlFrame::Request, &nb);
+    assert_eq!(not_control.lane, LaneVerdict::Refused, "REFUSED: a non-control kind rode the lane");
+    assert!(not_control.shared, "its shared copy was offered");
+    let big = send(TEST_CONTROL_KIND, Bytes::from(vec![0u8; 65 * 1024]), ControlFrame::Request, &nb);
+    assert_eq!(big.lane, LaneVerdict::Refused, "REFUSED: a frame over 64 KiB rode the lane");
+    let req = |kind: &str, from: &NodeId| crate::Signal {
+        kind: Arc::from(kind), scope: crate::SignalScope::Individual(a.node_id().clone()),
+        payload: Bytes::new(), sender: from.clone(), nonce: 9,
+    };
+    let reply_to_other = send("rpc.result", small(), ControlFrame::ReplyTo(&req("mcp.invoke", &nb)), &nb);
+    assert_eq!(reply_to_other.lane, LaneVerdict::Refused, "REFUSED: the reply to a non-control request rode the lane");
+    let elsewhere = id(alloc_port());
+    let misaddressed = send("rpc.result", small(), ControlFrame::ReplyTo(&req(TEST_CONTROL_KIND, &nb)), &elsewhere);
+    assert_eq!(misaddressed.lane, LaneVerdict::Refused, "REFUSED: a reply rode the lane to a node other than the request's sender");
+    assert_eq!(lane.stats.refused.load(Ordering::Relaxed), 4);
+    assert_eq!((lane.stats.sent.load(Ordering::Relaxed), lane.open_count()), (0, 0), "no lane was opened");
+
+    let reply = send("rpc.result", small(), ControlFrame::ReplyTo(&req(TEST_CONTROL_KIND, &nb)), &nb);
+    assert_eq!(reply.lane, LaneVerdict::Sent, "the reply to a control request rides the lane to its sender");
+    a.shutdown().await;
+    b.shutdown().await;
 }

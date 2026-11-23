@@ -1,6 +1,9 @@
 # A control lane on each peer connection (B1): design note
 
-**Status:** PR 1, the mechanism, built (2026-11-22): the lane connection and its writer map, the M1 rules, the M3 sites,
+**Status:** PR 1, the mechanism, built (2026-11-22; #832, with its review's F1–F7 answered on 2026-11-23: no lane to
+a removed member; the 300 s backoff only after a refused handshake; the real bound on a data reconnect stated, one
+refused connect and one reconnect backoff; a reply rides only for a received control request, to its sender; the
+yield tick a ticker, not a per-iteration sleep): the lane connection and its writer map, the M1 rules, the M3 sites,
 M4's evidence append, `CONTROL_KINDS`, `control_lane`, the counters and D7 (`mycelium-core/src/control_lane.rs`; tests
 `src/control_lane_tests.rs`). **No frame kind uses the lane yet**: PR 2 moves `sys.call-cancel.v1` and its reply onto
 it (§6). B1 was decided 2026-11-22. An independent review (2026-11-22) found the note *sound with changes*, and this
@@ -222,7 +225,10 @@ keyed one-connection-per-peer:
 off the reader into a spawned task. The apply stays inline first, so "apply, then hand to the WAL" holds. The spawned
 appends are bounded by the evidence rate limit of one per (kind, sender) per second. `append_try` was considered and
 not chosen: a dropped append would be counted in `dropped_appends`, which the O10 tests assert is zero. The inline
-await for other kinds is left as is; that is a data-path question outside B1. **Old receivers keep the coupling:** a
+await for other kinds is left as is; that is a data-path question outside B1. **M4 covers request kinds only** (`is_control_kind(&sig.kind)` in `connection.rs`): a lane frame of kind
+`rpc.result` — PR 2's reply — still appends inline. That is safe today only because `rpc.result` has no local worker
+and so writes no evidence (`quorum_evidence_payload`, `has_worker`). PR 2 must keep the reply evidence-free, or
+widen the condition. **Old receivers keep the coupling:** a
 new gateway with an old provider gets the first lane frame through, and a later lane frame can wait behind the
 provider's WAL backlog under `flush`.
 
