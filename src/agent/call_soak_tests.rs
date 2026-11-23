@@ -762,14 +762,24 @@ async fn soak(s: Soak) -> Report {
     // deletes its own records; the tombstones reach the provider.
     let floor = last_until_ms + 2 * SKEW_MS + 1_000;
     assert!(until(|| g.now() > floor, Duration::from_secs(30)).await, "the collector's floor passes");
-    let held_before = g.call_keys();
-    let _ = call_issuer::collect(g.ctx(), g.now());
+    let (held_before, counted_before) = (g.call_keys(), c.call_records_collected.load(Ordering::Relaxed));
+    let ours = call_issuer::collect(g.ctx(), g.now()).call_records;
     assert!(g.ctx().call_issuer.issued_terms().is_empty(), "the gateway holds no call as issued");
     assert_eq!(g.call_keys(), 0, "the gateway's own call/ records are collected");
-    let records_collected = c.call_records_collected.load(Ordering::Relaxed) as usize;
-    // Not an equality (#816's review): the node's own collector runs the same pass each minute on another task, and
-    // two passes that overlap both count a key. What is asserted is the KV, above; the counter is a floor.
-    assert!(records_collected >= 2 * s.n, "two records a call were collected: {records_collected} (the gateway held {held_before} at the last collection)");
+    // What is asserted is the KV, above; the counter is asserted as the promise that every record collected is counted
+    // — once its pass has ended. A pass adds what it deleted when it ends, and the node's own collector runs the same
+    // pass each minute on another task, so a pass can be part-way when this one runs: it has deleted records it has
+    // not counted yet (on a runner slow enough for a minute pass to fall in the soak — #830's CI: 1 979 of 2 000, the
+    // 21 a minute pass had deleted not yet added). So the count is waited for, not read once. Not an equality (#816's
+    // review): two passes that overlap both count a key. Seen failing first with a plant: the collector's interval at
+    // 1 s and a pass's count added 5 s after it ended — *"1240 (before the last collection 1240 …)"* read at once.
+    let counted = || c.call_records_collected.load(Ordering::Relaxed) as usize;
+    assert!(
+        until(|| counted() >= 2 * s.n, Duration::from_secs(60)).await,
+        "two records a call were collected and counted: {} (before the last collection {counted_before}, the gateway holding {held_before}; that collection's own {ours})",
+        counted()
+    );
+    let records_collected = counted();
     assert!(until(|| p.call_keys() == 0, Duration::from_secs(120)).await, "the provider's copies go with the gateway's tombstones: {} left", p.call_keys());
 
     let rss_end = rss_kib();
