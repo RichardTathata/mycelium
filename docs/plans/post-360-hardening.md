@@ -2328,6 +2328,40 @@ In `revocation.rs`'s own tests the `anchors_durable_for` waits behind a planted 
 (`tokio::time::timeout`); the rest wait on an unplanted append, which settles within the journal's 5 s `ACK_TIMEOUT`
 (`SettleAppend` settles it on every exit), and none of them retries a fold.
 
+**Known flake, closed (2026-11-23): a counter read before its pass had added to it, a test race.**
+`agent::call_soak_tests::a_thousand_cancellable_calls_half_cancelled_while_running_all_reconcile` (#816, the I4 soak)
+— *"two records a call were collected: 1979 (the gateway held 1499 at the last collection)"*, on PR #830's CI (run
+45077884612, job 137379118818, the strict `compliance,a2a,provisional-consent-grade,provisional-ca-generation` lib
+line); its retry passed. The branch changed no Rust. `call_issuer::collect` adds what it deleted to
+`call_records_collected` once, when the pass ends, and the node's own collector runs the same pass each minute on
+another task; the soak read the counter straight after its own pass. The run's figures add up to exactly that: the
+1 000/1 000 line had the gateway holding 1 520 `call/` records, so earlier passes had counted 480; 21 more were gone
+when the soak's pass began (1 499 held), and the soak's pass deleted and counted those 1 499 — 480 + 1 499 = 1 979,
+the 21 deleted by a minute pass that had not yet added its count. Nothing was lost: the KV assertion just before it
+(`call_keys() == 0`) held. On a runner where the soak takes 100 s the first minute pass falls inside it, and a later one
+can overlap the soak's own; here the soak takes 17 s and none did. Fixed in the test: the KV is still asserted at once,
+and the counter is asserted as the promise — every record collected is counted once its pass has ended — by waiting
+for it (bounded at 60 s) instead of reading it once; the failure message gives the count before the soak's pass and
+that pass's own. Seen failing first with a plant (the collector's interval at 1 s and a pass's count added 5 s late,
+from a task of its own): the old read, run with the new message, failed — *"1240 (before the last collection 1240, the gateway holding 0 …)"*;
+the fixed test under the same plant passed (2 000 counted). **Rule 1:**
+`grep -rn "call_records_collected\|grant_records_collected" src` — the soak is the only test that reads either; the
+node's status route (`http/node.rs`) reports them as running totals.
+
+**Seen beside it, the same test, not this race (open; a product finding already recorded).** The same test failed
+twice more on 2026-11-22 at bound 1 — *"outside bound 1 (2358 ms … against F = 2000 ms): call 661 (A2a) … revocation
+signed +3 ms, stop asked at the provider +2342 ms"* (run 45056106389, job 137311572579) and *"(2819 ms …): call 643
+(A2a) … revocation signed +9 ms, stop asked at the provider +2828 ms"* (#828, run 45079033934, job 137382736706), each
+passing on retry. Both at batches 640 and 660, where on runners this slow the gateway's first collector pass falls (each run passed 400 calls at 42–43 s; on
+#830's run, which got further, no `call/` record was collected by 400 calls and 480 by 800, at 85 s); the gateway signed the revocation in
+milliseconds and the provider was asked to stop 2.3–2.8 s later, with no transport drop. That is the open finding of
+[what-is-proven.md, *a cancel reaches the provider without waiting its turn*](../operations/what-is-proven.md#call-cancel-behind-collector):
+a cancel-forward travels on the gateway's gossip connection behind what was sent before it — here the collector's
+tombstones, each signed and verified — and its sibling there, the collector's own cost: a synchronous pass on a runtime
+worker. Measured here (debug, Apple M2 Max, the soak with the collector's interval planted at 10 s, 4 000 calls): a pass
+deleting 760–1 742 records took 1.1–1.6 s on one worker, and bound 1 held (8 ms max) — this machine does not reach the
+CI runner's slowdown, so it was not reproduced. Not fixed here; bound 1 is the soak's promise and is not relaxed.
+
 **Known flakes, open (seen during the v2.36.0 work, 2026-10-19; not yet investigated):**
 - `agent::exposure::tests::doors::the_shadow_profile_counts_and_holds_nothing` (Y5/Y11, the exposure policy's shadow
   rung) — *"legacy held: … the actor's history kept changing while this decision was made on it"*, once on PR #765's
