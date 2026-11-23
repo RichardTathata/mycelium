@@ -1227,10 +1227,11 @@ pub struct GossipConfig {
     /// `control_lane = false`: the cap is on the receiver and the switch on the sender. Under a cap that
     /// is too low a peer's lane is refused in its handshake (and not tried again for 300 s) and its control
     /// frames go by the shared path only. **The bound on a data reconnect:** a lane opens only while the
-    /// peer's data writer is connected or absent, and yields within 1 s when the data writer is not
-    /// connected; a lane opened while the peer had no data writer (or an exited one) can therefore cost a
-    /// new data writer, under a cap of 1, one refused connect and one reconnect backoff
-    /// (`reconnect_backoff_secs`, jittered) of dropped frames — never longer.
+    /// peer's data writer is connected or absent, and yields when the data writer is not connected, within
+    /// a quarter of the reconnect backoff — before a refused writer's retry. So under a cap of 1 a lane
+    /// opened while the peer had no data writer (or an exited one) can cost **each** new data writer one
+    /// refused connect and one reconnect backoff (`reconnect_backoff_secs`, jittered) of dropped frames;
+    /// at `reconnect_backoff_secs = 0`, retries within the 50 ms tick instead.
     pub max_connections_per_source: usize,
     /// **The control lane** (B1, `docs/design/control-lane.md`): a second connection per peer, opened
     /// lazily and idle-evicted like a data writer, that carries a copy of each frame of the closed set of

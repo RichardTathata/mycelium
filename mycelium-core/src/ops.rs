@@ -169,7 +169,7 @@ pub fn emit_signal_control(
         }
         LaneVerdict::Refused
     } else {
-        ctx.control_lane.send(ctx, &target, frame)
+        ctx.control_lane.send(ctx, &target, frame, matches!(frame_of, crate::control_lane::ControlFrame::ReplyTo(_)))
     };
     crate::control_lane::ControlSend { shared, lane }
 }

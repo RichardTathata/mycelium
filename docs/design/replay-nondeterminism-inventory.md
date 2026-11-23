@@ -157,13 +157,14 @@ is itself nondeterministic; one sequence each is what lets each replay independe
 **The control lane's streams (B1, 2026-11-22, `docs/design/control-lane.md` §4.4).** A control lane is one more peer
 writer: its sends go through `chan_try_send` on `writer/control/{peer}`, so a recording holds each lane's verdicts
 apart from the data writer's (`forward/…`, `ping/…`), and its yield tick is a seam **ticker** on
-`writer/control-yield/{peer}`, made once per lane (#832's review, F6). It was first a `sleep_ms` armed in every
+`writer/control-yield/{peer}`, made once per lane (#832's review, F6), its period a quarter of the reconnect backoff
+(50 ms–1 s, F2). It was first a `sleep_ms` armed in every
 iteration of the writer's `select!`, which a frame's arrival cancelled: `Record` writes a sleep only when it completes,
 and an unpaused `Replay` asks for it on its first poll, so the first recording with an idle lane would have diverged.
 The ticker's state moves only after a tick completes, so a tick a sibling arm cancels is asked again, not skipped — the
 same contract as every other periodic loop here. **What remains, stated:** an unpaused replay still consults the
 ticker's next entry on the first poll of a tick, as it does for every ticker; and `call_cancel::answer` keeps the
-cancellable-sleep shape the lane had (a `sleep_ms` raced against the work's end), a known instance outside B1. The
+cancellable-sleep shape the lane had (a `sleep_ms` raced against the work's end), a known instance outside B1, so a recording of a provider answering a cancel diverges on unpaused replay: tracked in #833. The
 lane's `run_peer_writer` otherwise reuses the data writer's sites (the `jitter` draw, `mono_now_ns`), so the gate's
 baseline row for `writer.rs` does not move. The name is formatted per control frame — a cold path, at most 64
 in flight per peer — not cached as the gossip streams' are. Two sockets to one peer are real network timing, which is

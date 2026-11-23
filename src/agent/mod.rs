@@ -801,13 +801,14 @@ pub struct SystemStats {
     pub control_lane_full: u64,
     /// Cumulative lane connects that failed — under TLS, a peer's `max_connections_per_source` refusing
     /// the second connection shows here, a handshake refused after the TCP connect, and starts a 300 s
-    /// backoff for that peer's lane; a TCP connect that fails (the peer down) waits only the reconnect
-    /// backoff. **Plaintext:**
+    /// backoff for that peer's lane; a TCP connect that fails (the peer down), or a handshake that times
+    /// out, waits only the reconnect backoff. **Plaintext:**
     /// an accept-and-close refusal is not seen as a failed connect; the loss shows in
     /// [`control_lane_dropped`](Self::control_lane_dropped).
     pub control_lane_connect_failed: u64,
     /// Cumulative lanes closed because the peer's data writer is not connected. Under a per-source cap of
-    /// 1 a lane can cost a new data writer one refused connect and one reconnect backoff, never longer.
+    /// 1 a lane can cost each new data writer one refused connect and one reconnect backoff (at
+    /// `reconnect_backoff_secs = 0`, retries within the 50 ms yield tick).
     pub control_lane_yielded: u64,
     /// Cumulative copies a lane took and did not write (a failed connect or write, a yield). Not in
     /// [`dropped_frames`](Self::dropped_frames); the shared copy of each was sent.

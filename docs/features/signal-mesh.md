@@ -75,8 +75,9 @@ does not depend on membership).
   second. So a control frame does not wait behind gossip in this node's writer or the peer's reader, and a lane that
   is down, full or refused costs only the speed-up — forwarding stays unconditional, and **a relay never puts a frame
   it received on a lane**. A lane opens only while the peer's data writer is connected (or none exists), yields
-  within 1 s when the data writer is not connected (so under a per-source cap of 1 it can cost a new data writer one
-  refused connect and one reconnect backoff, never longer), is never opened to a removed member, and after a refused
+  within a quarter of the reconnect backoff when the data writer is not connected (so under a per-source cap of 1 it
+  can cost each new data writer one refused connect and one reconnect backoff), is never opened to a removed member
+  or, for a reply, to a peer this node does not know, and after a refused
   handshake is not tried for 300 s (after a failed TCP connect, only the reconnect backoff); it costs one
   more inbound connection at the peer, so a [`max_connections_per_source`](../reference/configuration.md#max_connections_per_source)
   cap must allow 2 per node behind one address ([deprecations §126](../guide/deprecations.md)). Counted in

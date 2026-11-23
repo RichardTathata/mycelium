@@ -5719,13 +5719,16 @@ and a lane can take a permit a new peer's data connection needed. Size `max_conn
 check the pair (`validate()` says so and checks nothing). Under a cap that is too low the lane is refused in its
 handshake: it is not tried again for 300 s, and the node's control frames go by the shared path only, counted in
 `control_lane_connect_failed` (under TLS; over plaintext an accept-and-close refusal is not seen as a failed connect,
-and the loss shows in `control_lane_dropped`). A lane whose TCP connect fails — the peer down or restarting — waits
-only the node's reconnect backoff. **The bound a lane puts on a data reconnect:** a lane opens only while the peer's
-data writer is connected (or the node has no data writer to that peer, or only an exited one), and it closes within
-1 s when the data writer is not connected (`control_lane_yielded`). So under a cap of 1 a lane opened while there
-was no data writer can cost the next data writer **one refused connect and one reconnect backoff**
-(`reconnect_backoff_secs`, jittered — 2.5–7.5 s at the default), during which that writer drops its frames, as any
-writer in its backoff does; it cannot keep the data writer out longer. A cap of 2 per node avoids it.
+and the loss shows in `control_lane_dropped`). A lane whose TCP connect fails — the peer down or restarting — or whose
+handshake times out waits only the node's reconnect backoff. **The bound a lane puts on a data reconnect:** a lane opens only while the peer's
+data writer is connected (or the node has no data writer to that peer, or only an exited one), and it closes when
+the data writer is not connected (`control_lane_yielded`): at once if a control frame finds it so, otherwise within
+its yield tick — a quarter of `reconnect_backoff_secs`, between 50 ms and 1 s. A refused data writer retries no
+sooner than half its backoff, so under a cap of 1 **each data writer is refused at most once** past a lane opened
+while there was no data writer, and waits one reconnect backoff (jittered — 2.5–7.5 s at the default), dropping its
+frames as any writer in its backoff does. *Once per data writer*, not once ever: a writer that idles out and is
+reaped lets a lane open again, and its successor can be refused once in turn. At `reconnect_backoff_secs = 0` the
+retry is immediate and the bound is the 50 ms tick, not "once". A cap of 2 per node avoids all of it.
 
 **No lane to a removed member.** A control frame toward a member removed under closure plan C5 goes by the shared
 path only (`Removed`): the lane would be a connection of this node's own to it.

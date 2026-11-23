@@ -588,7 +588,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `mycelium_core::control_lane::CONTROL_KINDS` (`sys.call-cancel.v1` and its reply). `ops::emit_signal_control` encodes
   a frame once and sends it by the shared path exactly as `emit_signal` does, and offers the same bytes to the lane; the
   receiver's seen-set drops the second copy. A lane opens only while the peer's data writer is connected (or there is
-  none), yields within 1 s when the data writer is not connected, is never opened to a removed member, and after a
+  none), yields when the data writer is not connected (at once, or within a quarter of the reconnect backoff, so a
+  data writer is refused at most once under a per-source cap of 1), is never opened to a removed member, and after a
   refused handshake is not tried for 300 s (a peer that is down waits the reconnect backoff); a
   relay never puts a received frame on one. At the receiver, a control kind's quorum-evidence append leaves the
   connection reader. `GossipConfig::control_lane` (default `true`, `GOSSIP_CONTROL_LANE`), nine `SystemStats` fields,

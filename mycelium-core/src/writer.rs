@@ -167,7 +167,7 @@ fn jittered(backoff: Duration) -> Duration {
 ///
 /// With `lane` set the task is a peer's **control lane** (B1, [`crate::control_lane`]) and differs in
 /// four ways: it closes when the peer's data writer has no connected socket (before each batch and on a
-/// [`CONTROL_LANE_YIELD_TICK_MS`](crate::control_lane::CONTROL_LANE_YIELD_TICK_MS) tick, counted
+/// [`yield_tick_ms`](crate::control_lane::yield_tick_ms) tick, counted
 /// `yielded`); a failed connect starts the lane's refused backoff and ends the task; a failed write ends
 /// the task; and every frame it takes and does not write is counted in the lane's `dropped`. It never
 /// sits in a reconnect backoff: the next control frame opens a new lane, if the rules allow.
@@ -200,7 +200,7 @@ pub async fn run_peer_writer(
     };
     let mut yield_tick = lane.as_ref().map(|_| crate::sim_seam::interval_ms(
         format!("{}/{peer}", crate::control_lane::YIELD_STREAM),
-        crate::control_lane::CONTROL_LANE_YIELD_TICK_MS,
+        crate::control_lane::yield_tick_ms(backoff),
         tokio::time::MissedTickBehavior::Delay,
     ));
     let mut conn: Option<BufWriter<crate::stall::StallGuard<GossipStream>>> = None;
@@ -394,7 +394,9 @@ pub async fn run_peer_writer(
                 }
                 Err(_) => {
                     if let Some(l) = lane.as_ref() {
-                        let refused = tcp_up.load(Ordering::Relaxed);
+                        // A timeout is a slow peer, never a per-source refusal (an immediate accept-and-close):
+                        // the reconnect backoff, whether or not the TCP connect succeeded (#832's review, F3).
+                        let refused = false;
                         l.note_refused(&peer, refused, jittered(backoff));
                         lane_drop(&rx, 1);
                         warn!("Control lane connect to {peer} timed out after {:?}; no lane for the {} backoff", timing.connect, if refused { "refused" } else { "reconnect" });

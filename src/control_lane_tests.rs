@@ -247,6 +247,12 @@ async fn a_lane_reader_does_not_wait_for_the_wal() {
 /// Two TLS nodes on one CA. B is configured by `tweak_b`; A bootstraps to B only when `a_boots_b`.
 #[cfg(feature = "tls")]
 async fn tls_pair(tag: &str, a_boots_b: bool, tweak_b: impl Fn(&mut GossipConfig)) -> (GossipAgent, GossipAgent, NodeId, NodeId, std::path::PathBuf) {
+    tls_pair_with(tag, a_boots_b, |_| {}, tweak_b).await
+}
+
+/// [`tls_pair`], with A's configuration adjusted by `tweak_a` too.
+#[cfg(feature = "tls")]
+async fn tls_pair_with(tag: &str, a_boots_b: bool, tweak_a: impl Fn(&mut GossipConfig), tweak_b: impl Fn(&mut GossipConfig)) -> (GossipAgent, GossipAgent, NodeId, NodeId, std::path::PathBuf) {
     let (pa, pb) = (alloc_port(), alloc_port());
     let (na, nb) = (id(pa), id(pb));
     let dir = std::env::temp_dir().join(format!("myc-b1-{tag}-{pa}"));
@@ -269,7 +275,9 @@ async fn tls_pair(tag: &str, a_boots_b: bool, tweak_b: impl Fn(&mut GossipConfig
     tweak_b(&mut cb);
     let b = GossipAgent::new(nb.clone(), cb);
     b.start().await.unwrap();
-    let a = GossipAgent::new(na.clone(), mk(pa, if a_boots_b { vec![nb.clone()] } else { vec![] }));
+    let mut ca = mk(pa, if a_boots_b { vec![nb.clone()] } else { vec![] });
+    tweak_a(&mut ca);
+    let a = GossipAgent::new(na.clone(), ca);
     a.start().await.unwrap();
     (a, b, na, nb, dir)
 }
@@ -317,19 +325,17 @@ async fn a_refused_lane_connect_falls_back_and_backs_off() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// **T6b (M1): a data writer reconnects past an open lane** (under TLS). B takes one connection per source.
-/// A has no data writer to B, so its lane opens first and takes B's one slot. Then A's data writer is
-/// started and refused: it sits unconnected, the lane **yields** (`yielded` = 1), B's slot frees, and the data
-/// writer connects on its next attempt — gossip to B resumes. A never idles a writer out here, so without the
-/// yield the lane would hold the slot for good. **The bound this shows, stated** (#832's review, F2): the data
-/// writer is refused once and waits one reconnect backoff — a lane cannot keep it out longer than that.
-///
-/// Seen failing first with the yield check removed (`ControlLane::should_yield` always `false`): the data
-/// writer was refused on every attempt while the lane stayed open.
+/// **T6b (M1, #832's review F2): a data writer is refused at most once past an open lane** (under TLS). B takes
+/// one connection per source. A has no data writer to B, so its lane opens first and takes B's one slot. Then
+/// A's data writer is started: its first connect is refused, it sits unconnected, the lane **yields**
+/// (`yielded` = 1) within its tick — a quarter of the reconnect backoff — B's slot frees, and the data writer
+/// connects on its retry, no sooner than half its backoff: refused **exactly once**. Gossip to B resumes. Run at
+/// the default backoff (5 s) and at 1 s. Seen failing first with the yield check removed (`should_yield`
+/// always `false`: the data writer was refused on every attempt while the lane stayed open); the tick's own
+/// bound is `the_yield_tick_beats_a_refused_writers_retry` (core).
 #[cfg(feature = "tls")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_data_writer_reconnects_past_an_open_lane() {
-    let (a, b, _na, nb, dir) = tls_pair("t6b", false, |c| c.max_connections_per_source = 1).await;
+async fn a_data_writer_is_refused_at_most_once_past_an_open_lane(tag: &str, backoff_secs: u64) {
+    let (a, b, _na, nb, dir) = tls_pair_with(tag, false, |c| c.reconnect_backoff_secs = backoff_secs, |c| c.max_connections_per_source = 1).await;
     let mut rx = b.mesh().signal_rx_with_capacity(TEST_CONTROL_KIND, 64);
     let stats = &a.task_ctx.control_lane.stats;
 
@@ -337,6 +343,7 @@ async fn a_data_writer_reconnects_past_an_open_lane() {
     assert_eq!(emit(&a, &nb, 1).lane, LaneVerdict::Sent, "a peer with no data writer gets a lane (M7)");
     assert_eq!(collect(&mut rx, 1, Duration::from_secs(15)).await, [1].into(), "the frame crossed the lane: A has no other route to B");
     assert!(lane_connected(&a, &nb), "the lane holds B's one per-source slot");
+    let refused_before = b.system_stats().inbound_per_source_refused;
 
     // A's data writer to B: refused while the lane holds the slot, then admitted once it yields.
     let mut data_rx = b.mesh().signal_rx_with_capacity("test.b1.data", 64);
@@ -346,7 +353,10 @@ async fn a_data_writer_reconnects_past_an_open_lane() {
         "STARVED: A's data writer never reconnected past the open lane",
     );
     assert_eq!(stats.yielded.load(Ordering::Relaxed), 1, "the lane yielded to the unconnected data writer");
-    assert!(b.system_stats().inbound_per_source_refused >= 1, "the stated bound: the data writer was refused while the lane held the slot");
+    assert_eq!(
+        b.system_stats().inbound_per_source_refused - refused_before, 1,
+        "ONCE: the data writer was refused more than once past the lane (backoff {backoff_secs} s)",
+    );
     let mut resumed = false;
     for _ in 0..75 {
         let _ = mycelium_core::ops::emit_signal(&a.task_ctx, Arc::from("test.b1.data"), crate::SignalScope::Individual(nb.clone()), Bytes::from_static(b"d"));
@@ -358,6 +368,18 @@ async fn a_data_writer_reconnects_past_an_open_lane() {
     a.shutdown().await;
     b.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(feature = "tls")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_data_writer_reconnects_past_an_open_lane() {
+    a_data_writer_is_refused_at_most_once_past_an_open_lane("t6b", 5).await;
+}
+
+#[cfg(feature = "tls")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_data_writer_reconnects_past_an_open_lane_at_a_one_second_backoff() {
+    a_data_writer_is_refused_at_most_once_past_an_open_lane("t6b1", 1).await;
 }
 
 /// **T7, the shutdown sweep:** a node's shutdown closes its lanes and empties the lane map, and the
@@ -696,12 +718,18 @@ async fn a_closed_lane_is_respawned_and_the_copy_retried() {
     let reaped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let r = Arc::clone(&reaped);
     let peer = nb.clone();
+    /// Removes the hook on every exit, a panic included (#832's review, F4).
+    struct Unhook(String);
+    impl Drop for Unhook {
+        fn drop(&mut self) { mycelium_core::control_lane::TEST_ON_CLOSED.pin().remove(&self.0); }
+    }
     mycelium_core::control_lane::TEST_ON_CLOSED.pin().insert(key.clone(), Arc::new(move |l: &mycelium_core::control_lane::ControlLane| {
         r.fetch_add(1, Ordering::SeqCst);
         l.writers().pin().remove(&peer);
     }));
+    let unhook = Unhook(key);
     let sent = emit(&a, &nb, 5);
-    mycelium_core::control_lane::TEST_ON_CLOSED.pin().remove(&key);
+    drop(unhook);
     assert_eq!(sent.lane, LaneVerdict::Sent, "RETRY: the copy was not retried on a respawned lane");
     assert_eq!(reaped.load(Ordering::SeqCst), 1, "the copy found the closed channel");
     assert_eq!(collect(&mut rx, 1, Duration::from_secs(10)).await, [5].into());
@@ -743,4 +771,80 @@ async fn what_the_lane_does_not_carry_is_refused_and_counted() {
     assert_eq!(reply.lane, LaneVerdict::Sent, "the reply to a control request rides the lane to its sender");
     a.shutdown().await;
     b.shutdown().await;
+}
+
+/// **F2: a lane yields at once to an unconnected data writer.** A's lane to B is open; then A's data writer to B
+/// is evicted and a new one started and held in its connect, so it exists without a socket. The next control
+/// frame finds it so: `DataUnconnected`, and the lane is evicted there and then, not left for its tick. Seen
+/// failing first with the eviction left out of `may_open`: the lane stayed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lane_yields_at_once_to_an_unconnected_data_writer() {
+    let (a, b, _na, nb) = pair(|c| { c.health_check_interval_secs = 60; c.reconnect_backoff_secs = 30; }, |_| {}).await;
+    let _rx = b.mesh().signal_rx(TEST_CONTROL_KIND);
+    assert_eq!(emit(&a, &nb, 1).lane, LaneVerdict::Sent);
+    assert!(until(Duration::from_secs(10), || lane_connected(&a, &nb)).await);
+    let mut hooks = Hooks(Vec::new());
+    let held = hooks.hold(&TEST_CONNECT_HOLD, nb.to_string());
+    mycelium_core::writer::evict_peer_writer(&a.peer_writers, &nb);
+    a.connect_peer(nb.clone());
+    assert!(until(Duration::from_secs(10), || held.reached.load(Ordering::SeqCst) >= 1).await, "the data writer reached its held connect");
+    assert!(!data_connected(&a, &nb) && a.peer_writers.pin().get(&nb).is_some_and(|e| e.is_live()), "a data writer exists without a socket");
+    assert_eq!(emit(&a, &nb, 2).lane, LaneVerdict::DataUnconnected);
+    assert!(!lane_present(&a, &nb), "LINGERED: the lane was left for its tick to yield to the unconnected data writer");
+    assert_eq!(a.task_ctx.control_lane.stats.yielded.load(Ordering::Relaxed), 1, "yielded once, by the eviction or its tick");
+    drop(hooks);
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **F5: no lane for a reply to a peer this node does not know.** A reply's target is the request's `sender`,
+/// which the signal layer does not authenticate. An `rpc.result` to a control request "from" an address A has
+/// no data writer to and no `peers` entry for opens no lane (`UnknownPeer`) and makes no connect
+/// (`connect_failed` stays 0). Seen failing first with the guard removed: A dialled the address.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reply_to_an_unknown_sender_opens_no_lane() {
+    let pa = alloc_port();
+    let mut c = GossipConfig::default();
+    c.bind_port = pa;
+    c.reconnect_backoff_secs = 1;
+    let a = GossipAgent::new(id(pa), c);
+    a.start().await.unwrap();
+    let forged = id(alloc_port());
+    let req = crate::Signal {
+        kind: Arc::from(TEST_CONTROL_KIND), scope: crate::SignalScope::Individual(a.node_id().clone()),
+        payload: Bytes::new(), sender: forged.clone(), nonce: 11,
+    };
+    let sent = emit_signal_control(&a.task_ctx, Arc::from("rpc.result"), forged.clone(), Bytes::from_static(b"r"), ControlFrame::ReplyTo(&req));
+    assert_eq!(sent.lane, LaneVerdict::UnknownPeer, "DIALLED: a reply opened a lane to an unknown sender");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(a.task_ctx.control_lane.stats.connect_failed.load(Ordering::Relaxed), 0, "no connect was made");
+    assert!(!lane_present(&a, &forged));
+    a.shutdown().await;
+}
+
+/// **F3's edge: a handshake that times out after the TCP connect waits only the reconnect backoff** (under
+/// TLS). A's lane goes to a socket that accepts and never answers the handshake; `handshake_timeout_ms` cuts it
+/// off. A timeout is a slow peer, not a per-source refusal (an immediate accept-and-close), so the backoff left
+/// is the reconnect backoff, not 300 s. Seen failing first with the timeout arm taking the long backoff after a
+/// TCP connect.
+#[cfg(feature = "tls")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lane_whose_handshake_times_out_waits_only_the_reconnect_backoff() {
+    let (a, b, _na, _nb, dir) = tls_pair_with("f3t", false, |c| c.handshake_timeout_ms = 300, |_| {}).await;
+    let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = silent.local_addr().unwrap().port();
+    let holder = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((s, _)) = silent.accept().await { held.push(s); }
+    });
+    let mute = id(port);
+    let stats = &a.task_ctx.control_lane.stats;
+    assert_eq!(emit(&a, &mute, 1).lane, LaneVerdict::Sent);
+    assert!(until(Duration::from_secs(15), || stats.connect_failed.load(Ordering::Relaxed) == 1).await, "the timed-out handshake was counted");
+    let left = a.task_ctx.control_lane.backoff_left_for_test(&mute).expect("a backoff runs");
+    assert!(left <= Duration::from_millis(1_500), "LONG: a handshake timeout turned the lane off for {left:?}");
+    holder.abort();
+    a.shutdown().await;
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
 }

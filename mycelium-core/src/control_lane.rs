@@ -19,17 +19,26 @@
 //!   data writer at all (a partial mesh: the call's own reachability decides, M7) — never while a data
 //!   writer exists without a connected socket, where the lane could take the per-source slot its
 //!   reconnect needs ([`ControlLane::may_open`]);
-//! - an open lane **yields** — closes, counted in `yielded` — within [`CONTROL_LANE_YIELD_TICK_MS`] of
-//!   the data writer losing its socket ([`ControlLane::should_yield`], checked by the lane's writer);
-//! - a lane whose handshake is refused after its TCP connect succeeded — what a per-source cap's
-//!   accept-and-close looks like — is not tried again for [`CONTROL_LANE_REFUSED_BACKOFF_MS`]; a lane
-//!   whose TCP connect fails (the peer down or restarting) waits only the node's reconnect backoff;
+//! - an open lane **yields** — closes, counted in `yielded` — when the data writer is not connected: at
+//!   once when [`ControlLane::may_open`] finds it so, and otherwise within the lane's yield tick
+//!   ([`yield_tick_ms`]: a quarter of the reconnect backoff, between 50 ms and
+//!   [`CONTROL_LANE_YIELD_TICK_MS`]), checked by the lane's writer ([`ControlLane::should_yield`]);
+//! - a lane whose handshake is refused (the socket closed) after its TCP connect succeeded — what a
+//!   per-source cap's accept-and-close looks like — is not tried again for
+//!   [`CONTROL_LANE_REFUSED_BACKOFF_MS`]; a lane whose TCP connect fails (the peer down or restarting), or
+//!   whose handshake times out (a slow peer), waits only the node's reconnect backoff;
 //! - no lane is opened to a removed member (closure plan C5);
-//! - **the bound on a data reconnect, stated:** a lane opened while the peer had no data writer (or an
-//!   exited, unreaped one) holds the per-source slot when a new data writer connects, so under a cap of
-//!   1 that writer can be refused **once** and sit one reconnect backoff (`reconnect_backoff_secs`,
-//!   jittered), dropping its frames; the lane yields within the tick, so it cannot keep the data writer
-//!   out longer (#832's review, F2);
+//! - **the bound on a data reconnect, stated** (#832's review, F2): a lane opened while the peer had no
+//!   data writer (or an exited, unreaped one) holds the per-source slot when a new data writer connects,
+//!   so under a cap of 1 that writer's first connect can be refused. The lane then yields within its tick,
+//!   a quarter of the reconnect backoff, before the writer's retry (at least half the backoff, jittered),
+//!   so **each data writer is refused at most once** and waits one reconnect backoff, dropping its frames
+//!   as any writer in backoff does. Once per data writer, not once ever: a writer that idles out and is
+//!   reaped lets a lane open again, and its successor can be refused once in turn. At
+//!   `reconnect_backoff_secs = 0` the retry is immediate and the bound is the 50 ms tick, not "once";
+//! - no lane opens for a **reply** to a peer this node has neither a data writer to nor a `peers` entry
+//!   for (#832's review, F5): a reply's target is the request's `sender`, which the signal layer does not
+//!   authenticate, so a forged sender must not make this node dial an address of the forger's choosing;
 //! - **a relay never puts a frame it received on a lane** (D7): nothing on the receive path calls
 //!   [`ControlLane::send`]; relays forward through the shard only.
 //!
@@ -66,9 +75,19 @@ pub const CONTROL_LANE_DEPTH: usize = 64;
 pub const CONTROL_LANE_WRITE_BOUND_MS: u64 = 10_000;
 /// How long after a failed lane connect no lane is opened to that peer again (D5, M1).
 pub const CONTROL_LANE_REFUSED_BACKOFF_MS: u64 = 300_000;
-/// How often an idle lane checks whether the peer's data writer lost its socket (M1): the lane yields
-/// within this bound. A busy lane also checks before each batch.
+/// The longest a lane's yield tick runs (M1): an idle lane checks at least this often whether the peer's
+/// data writer lost its socket. A busy lane also checks before each batch. See [`yield_tick_ms`].
 pub const CONTROL_LANE_YIELD_TICK_MS: u64 = 1_000;
+/// The shortest yield tick, for a reconnect backoff of 0.
+pub const CONTROL_LANE_YIELD_TICK_MIN_MS: u64 = 50;
+
+/// A lane's yield tick for a node whose reconnect backoff is `backoff`: a quarter of it, between
+/// [`CONTROL_LANE_YIELD_TICK_MIN_MS`] and [`CONTROL_LANE_YIELD_TICK_MS`]. A refused data writer retries no
+/// sooner than half its backoff (`writer::jittered`), so the lane has yielded by then and the writer is
+/// refused at most once (#832's review, F2).
+pub fn yield_tick_ms(backoff: std::time::Duration) -> u64 {
+    (backoff.as_millis() as u64 / 4).clamp(CONTROL_LANE_YIELD_TICK_MIN_MS, CONTROL_LANE_YIELD_TICK_MS)
+}
 /// The largest frame the lane carries; a larger copy is refused (counted) and only the shared copy goes.
 pub const CONTROL_LANE_MAX_FRAME_BYTES: usize = 64 * 1024;
 
@@ -92,6 +111,12 @@ pub enum ControlFrame<'a> {
     /// The `rpc.result` reply to `request`, the request this node received: the request's kind must be a
     /// control kind — checked as a request's is — and the reply goes to the request's sender only (#832's
     /// review, F5: a caller naming a control kind could otherwise put any reply on the lane).
+    ///
+    /// **The request's `sender` is not authenticated by the signal layer.** So a reply never opens a lane
+    /// to a peer this node has no data writer to and no `peers` entry for ([`LaneVerdict::UnknownPeer`]),
+    /// and **a caller (B1's PR 2) may pass `ReplyTo` only for a request that passed its receive boundary**
+    /// — its envelope verified, its `via` its sender. A refusal is answered by the shared path only: a
+    /// forged request must not make this node dial an address of the forger's choosing.
     ReplyTo(&'a crate::signal::Signal),
 }
 
@@ -121,6 +146,9 @@ pub enum LaneVerdict {
     Refused,
     /// The target is a removed member (closure plan C5): no lane is opened to it (#832's review, F1).
     Removed,
+    /// A reply to a peer this node has no data writer to and no `peers` entry for: no lane is opened
+    /// for it (#832's review, F5).
+    UnknownPeer,
     /// The peer's data writer exists and has no connected socket: no lane opens (M1).
     DataUnconnected,
     /// A lane connect to the peer failed recently: within [`CONTROL_LANE_REFUSED_BACKOFF_MS`] of a refused
@@ -231,6 +259,17 @@ impl ControlLane {
             });
         }
         if self.data_unconnected(peer) {
+            // The lane yields now rather than at its next tick (#832's review, F2): a data writer that exists
+            // without a socket is the case the yield is for.
+            let lane = self.writers.pin().get(peer).map(|e| e.is_live());
+            if lane == Some(true) {
+                self.stats.yielded.fetch_add(1, Ordering::Relaxed);
+                #[cfg(feature = "metrics")]
+                metrics::counter!("gossip_control_lane_yielded_total").increment(1);
+            }
+            if lane.is_some() {
+                self.evict(peer);
+            }
             return Err(LaneVerdict::DataUnconnected);
         }
         Ok(())
@@ -270,11 +309,15 @@ impl ControlLane {
 
     /// Offer `frame`, already encoded, to the lane toward `target`, opening it if the rules allow. Called
     /// only by [`crate::ops::emit_signal_control`], after the shared copy was offered.
-    pub(crate) fn send(self: &Arc<Self>, ctx: &crate::CoreCtx, target: &NodeId, frame: Bytes) -> LaneVerdict {
+    pub(crate) fn send(self: &Arc<Self>, ctx: &crate::CoreCtx, target: &NodeId, frame: Bytes, reply: bool) -> LaneVerdict {
         // Closure plan C5: never a connection of our own to a removed member. The data path has none either:
         // a removed member is not in `peers`, so it is no forwarding target (#832's review, F1).
         if ctx.removed.is_node_removed(target) {
             return LaneVerdict::Removed;
+        }
+        // A reply's target is an unauthenticated `sender`: no M7 lane for it (#832's review, F5).
+        if reply && self.data.pin().get(target).is_none() && ctx.peers.pin().get(target).is_none() {
+            return LaneVerdict::UnknownPeer;
         }
         if let Err(v) = self.may_open(target) {
             return v;
@@ -380,6 +423,19 @@ pub fn publish_lane_gauge(writers: &papaya::HashMap<NodeId, WriterEntry>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **F2: the yield tick is shorter than a refused data writer's soonest retry** (half its backoff), so a
+    /// data writer is refused at most once. Seen failing first with the tick fixed at 1 s.
+    #[test]
+    fn the_yield_tick_beats_a_refused_writers_retry() {
+        use std::time::Duration;
+        for secs in [1u64, 2, 5, 30, 300] {
+            let backoff = Duration::from_secs(secs);
+            assert!(yield_tick_ms(backoff) < backoff.as_millis() as u64 / 2, "TICK: {secs} s backoff, {} ms tick", yield_tick_ms(backoff));
+        }
+        assert_eq!(yield_tick_ms(Duration::from_secs(5)), CONTROL_LANE_YIELD_TICK_MS);
+        assert_eq!(yield_tick_ms(Duration::ZERO), CONTROL_LANE_YIELD_TICK_MIN_MS);
+    }
 
     /// The set is closed: exactly the kinds the design names, and a test kind only in test builds.
     #[test]
