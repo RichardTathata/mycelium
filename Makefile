@@ -196,7 +196,8 @@ check:
 	./scripts/check-release-blockers.sh                         # a release blocker the tree states (warns; --release fails, RELEASING.md § 2)
 	./scripts/check-release-blockers.sh --self-test             # …and it refuses a planted blocker, passes a clear one
 	./scripts/with-pyyaml.sh scripts/check-release-workflow.py  # the release workflow verifies each attestation before it uploads or moves latest; actions pinned (SO3)
-	./scripts/with-pyyaml.sh scripts/check-release-workflow.py --self-test  # …and each planted fault (41: reorderings, conditions, triggers, pins, unverified assets) fails it
+	./scripts/with-pyyaml.sh scripts/check-release-workflow.py --self-test  # …and each planted fault (76: reorderings, conditions, triggers, pins, unverified assets, verify-step shell, env, latest) fails it
+	python3 scripts/release-is-latest.py --self-test             # `latest` moves only for the highest vX.Y.Z (2.9.0 < 2.10.0; a 2.40.x patch after 2.41.0 does not)
 	./scripts/verify-release-attestation.sh --self-test         # …and the upload set's shape check refuses symlinks, directories, dotfiles, extras (SO3, F7)
 	./scripts/test-check-sim-seams.sh                           # …and it sees every timer-alias spelling (planted files)
 	./scripts/with-pyyaml.sh scripts/check-test-inventory.py    # every test requirement runs in some CI step, with its features (verification policy rule 3)

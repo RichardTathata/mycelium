@@ -270,6 +270,8 @@ jobs:
       - run: ./scripts/with-pyyaml.sh scripts/check-release-workflow.py
       - run: ./scripts/with-pyyaml.sh scripts/check-release-workflow.py --self-test
       - run: ./scripts/verify-release-attestation.sh --self-test
+      # …and `latest` moves only for the highest vX.Y.Z tag (the maintainer's decision, 2026-11-22).
+      - run: python3 scripts/release-is-latest.py --self-test
       - run: ./scripts/check-wiki-mutation-fence.sh
       # Post-360 plan row F: every locally-originated KV write leaves through `make_kv_wire_msg`, so a
       # TLS node signs it — a bare `Data` frame at a write site would be refused by a fleet that

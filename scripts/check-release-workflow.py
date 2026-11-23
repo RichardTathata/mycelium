@@ -4,9 +4,13 @@
 WHY IT EXISTS
   `.github/workflows/release.yml` attests every asset and verifies each attestation before it attaches the asset to a
   Release or moves an image tag. A workflow change cannot be unit-tested, so this checks the file's shape instead. It
-  is deliberately an allow-list: a trigger, a permission, an action, a step condition or a publishing command it does
-  not know fails it, so a change to the publishing path is a change to this file too, made in the open. Its first
-  version checked a narrower shape and missed all seventeen of #827's review plants; each is now a self-test case.
+  is two things, and says which: an **allow-list** for the workflow's triggers, permissions, actions, step conditions,
+  the `gh release` and `imagetools` commands, the env keys each level may set, the lines a verification step may run,
+  publish's refusals and what the version step may write — anything there it does not know fails it, so a change to the publishing path is a change to this file too,
+  made in the open; and a **deny-list** for the rest of a step's shell, which can do anything a shell can, so a
+  publishing route it has no pattern for passes (KNOWN, below). Its first version checked a narrower shape and missed
+  all seventeen of #827's review plants; its second missed thirteen of the re-review's fifteen; its third, sixteen of
+  #830's review's nineteen (mostly the environment a verification runs in). Each is a self-test case.
 
 THE RULES (each failure names its rule)
   triggers     `on:` is only `push` (of `v*` tags, nothing else), `pull_request` and `workflow_dispatch` — no
@@ -14,25 +18,56 @@ THE RULES (each failure names its rule)
   permissions  the top level is `permissions: {}`; every job states a mapping (never `write-all`/`read-all`);
                `id-token`/`attestations: write` only in a job that attests, and both there; `contents: write` only in
                `publish`; `packages: write` only in `linux` and `publish`.
+  env          an allow-list per level: the workflow sets only `IMAGE`, `NODE_FEATURES`, `STEM_FEATURES`; a job only
+               `VERSION`, `DRY_RUN`, `GH_TOKEN`, `ATTEST`; a step only `BUNDLE_*`, `DIGEST_*` and `LATEST`. So no
+               `PATH`, `BASH_ENV`, `ENV`, `LD_*`, `GITHUB_*`, `GIT_*` or `GH_*` (a fake `gh`, a stub sourced into the
+               verification script, another run's identity) and no step-level `VERSION` or `IMAGE` (another subject).
+               No step writes `$GITHUB_ENV` or `$GITHUB_PATH`, which would set the same for every later step.
   jobs         no job-level `uses:` (reusable workflows); no `continue-on-error` anywhere.
   conditions   a job- or step-level `if:` is one of the few this workflow uses, where it uses it (`publish` runs only
                on `dry_run == 'false'`; its steps have no condition at all).
   pinned       every step `uses:` is a known action at a full 40-hex SHA; every checkout sets
                `persist-credentials: false`.
-  dry-run      `version` sets `dry_run=false` once, inside `if [[ "${GITHUB_EVENT_NAME}" == "push" &&
-               "${GITHUB_REF_TYPE}" == "tag" ]]`, after the tag's ancestry check; `publish` refuses again by itself
-               anything but a push of the tag, and a tag that no longer points at GITHUB_SHA.
+  dry-run      `version`'s only writes to GITHUB_OUTPUT are `version=$tag`, `dry_run=false`, `version=$crate`,
+               `dry_run=true`, in that order, the first two inside `if [[ "${GITHUB_EVENT_NAME}" == "push" &&
+               "${GITHUB_REF_TYPE}" == "tag" ]]` and after the tag's ancestry check, which is exactly `origin/main` and
+               `origin/release-*` and is acted on; `publish`'s first step refuses again by itself anything but a push
+               of the tag, and a tag that no longer points at GITHUB_SHA — each refusal checked as its exact line.
   shell        no `|| true`, `|| :`, `set +e`, `curl`, `wget`, `gh api`, `uploads.github.com`, `docker push` or
-               registry tool (`crane`, `oras`, `skopeo`, `regctl`) in any step; lines joined across `\\` and
-               comments dropped before any matching, so a verification in a comment is no verification.
+               registry tool (`crane`, `oras`, `skopeo`, `regctl`) in any step; every `||` ends `{ …; exit 1; }`
+               with no other `exit` or `return` in the block, so no guard is made non-fatal; a script under
+               `scripts/` is named only as the command a line starts with, or in the two `release-is-latest.py`
+               lines, so no step rewrites one before it runs; lines joined across `\\` and comments dropped before any matching, so a
+               verification in a comment is no verification.
   verify       a verification is a line that is exactly `scripts/verify-release-attestation.sh <mode> …`, nothing
-               chained to it; every `actions/attest` is followed in its job by the matching verification.
+               chained to it, and the script is named nowhere else; a step that verifies files or images runs only
+               `set -euo pipefail`, `cp "$BUNDLE_…" "bundle/mycelium-$VERSION….sigstore.json"` and verification lines
+               (no `exit`, no `if`); every `actions/attest` is followed in its job by the matching verification. The
+               files attestation's subjects are exactly the tarballs and `SHA256SUMS`; the three image attestations
+               are `attest-amd64`, `attest-arm64`, `attest-index`, each of its own digest; the image verification
+               names the amd64, arm64 and index digests once each, each with its own bundle, each from its own step's
+               output.
   upload       `gh release create` names no asset; `gh release upload` names exactly the three verified globs, after
                `… assets` in the same step and after the files' and every image's verification; nothing else
-               publishes (gh release and imagetools only in `publish`, a registry push only by digest in `linux`).
+               publishes (gh release and imagetools only in `publish`; `buildx build` only in `linux`; a push —
+               `push=true`, `--push`, `type=registry` — only in `linux`, and only by digest, with no tag).
   tags         `publish` tags the image exactly three times, each with one `-t`: `sha-$GITHUB_SHA` from the two
                per-arch digests before any attestation; `$VERSION` from the verified digest after the images verify;
                `latest` from the verified digest in the job's last step, after the upload. `:latest` appears nowhere else.
+  latest       `latest` moves only for the highest `vX.Y.Z` (maintainer, 2026-11-22): `publish` has one step
+               `highest`, before the Release, that runs exactly `git ls-remote --tags origin 'refs/tags/v*' |
+               scripts/release-is-latest.py "$VERSION"` into its output; `gh release create` passes exactly
+               `--latest="$LATEST"` and the step that moves `:latest` first leaves (`exit 0`) unless `$LATEST` is
+               `true`, both with `LATEST` from that output, then asks the remote again and leaves unless it still
+               answers `true` (a higher tag pushed during the run).
+
+KNOWN (shell this does not catch; each sits behind the run-time refusals, the `publish` job's `if:` and the
+`release-tags` ruleset, and is answered by review)
+  HTTP from an interpreter (`python3 -c 'urllib…'`, `node -e 'fetch…'`); a command reached through indirection (`G="gh
+  release"; $G upload …`, `eval`, `sh -c`, an encoded string); anything else a shell can do with `GH_TOKEN` or the
+  registry login, outside the commands and lines the allow-lists above name — a file written somewhere a later
+  command reads (a git config, `~/.docker/config.json`, `~/.config/gh`), say, rather than through `env:` or under
+  `scripts/`.
 
 USAGE
   scripts/with-pyyaml.sh scripts/check-release-workflow.py              # check the workflow
@@ -65,6 +100,57 @@ ATTEST_EXPR = ("${{ ((github.event_name == 'push' && github.ref_type == 'tag') |
                " && github.ref_type != 'tag') || (github.event_name == 'pull_request' && github.event.pull_request.head"
                ".repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'true' || 'false' }}")
 TRIGGER_GUARD = '[[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" ]]'
+# The version step's only writes to GITHUB_OUTPUT, in this order: the tag branch's two, then the dry run's two.
+VERSION_OUTPUTS = ['echo "version=$tag" >> "$GITHUB_OUTPUT"', 'echo "dry_run=false" >> "$GITHUB_OUTPUT"',
+                   'echo "version=$crate" >> "$GITHUB_OUTPUT"', 'echo "dry_run=true" >> "$GITHUB_OUTPUT"']
+ANCESTRY = ["for b in $(git for-each-ref --format='%(refname)' refs/remotes/origin/main 'refs/remotes/origin/release-*'); do",
+            'if git merge-base --is-ancestor "$GITHUB_SHA" "$b"; then on_line="$b"; break; fi', "done"]
+# A step that verifies files or images runs these lines and nothing else (no `exit`, no `if`, no other command).
+VERIFY_STEP_LINE = re.compile(r'^(set -euo pipefail|cp "\$BUNDLE_(PATH|AMD64|ARM64|INDEX)" '
+                              r'"bundle/mycelium-\$VERSION(-image-(amd64|arm64|index))?\.sigstore\.json")$')
+FILES_SUBJECTS = ["bundle/mycelium-*.tar.gz", "bundle/SHA256SUMS"]
+ARCHES = ("amd64", "arm64", "index")
+# The image verification: each bundle copied from its own attestation, verified against its own digest, once each.
+IMAGE_ENV = {**{f"BUNDLE_{a.upper()}": f"${{{{ steps.attest-{a}.outputs.bundle-path }}}}" for a in ARCHES},
+             **{f"DIGEST_{a.upper()}": f"${{{{ steps.index.outputs.{a} }}}}" for a in ARCHES}}
+IMAGE_LINES = sorted([f'cp "$BUNDLE_{a.upper()}" "bundle/mycelium-$VERSION-image-{a}.sigstore.json"' for a in ARCHES]
+                     + [f'scripts/verify-release-attestation.sh image "bundle/mycelium-$VERSION-image-{a}.sigstore.json"'
+                        f' "$IMAGE@$DIGEST_{a.upper()}"' for a in ARCHES])
+# `latest` moves only for the highest vX.Y.Z (scripts/release-is-latest.py; maintainer, 2026-11-22).
+HIGHEST = ["set -euo pipefail",
+           "latest=$(git ls-remote --tags origin 'refs/tags/v*' | scripts/release-is-latest.py \"$VERSION\")",
+           'echo "latest=$latest" >> "$GITHUB_OUTPUT"']
+LATEST_ENV = "${{ steps.highest.outputs.latest }}"
+LATEST_GUARD = 'if [ "$LATEST" != "true" ]; then'
+# An env key that would change what the runner, git or gh believe about the run.
+# The env keys each level may set; anything else fails (PATH, BASH_ENV, ENV, LD_*, GITHUB_*, GH_* aside from GH_TOKEN,
+# and VERSION or IMAGE below the level that sets them, are what a fake `gh` or a different subject would need).
+ENV_ALLOWED = {"workflow": {"IMAGE", "NODE_FEATURES", "STEM_FEATURES"},
+               "job": {"VERSION", "DRY_RUN", "GH_TOKEN", "ATTEST"},
+               "step": {"BUNDLE_PATH", "LATEST"} | {f"{p}_{a.upper()}" for p in ("BUNDLE", "DIGEST") for a in ARCHES}}
+ENV_DANGER = re.compile(r"^(PATH|BASH_ENV|ENV|LD_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|GIT_.*|GH_.*)$")
+# The scripts a run line may name: each only as the exact lines below, or as the command that starts the line.
+SCRIPT_LINES = {"latest=$(git ls-remote --tags origin 'refs/tags/v*' | scripts/release-is-latest.py \"$VERSION\")",
+                "again=$(git ls-remote --tags origin 'refs/tags/v*' | scripts/release-is-latest.py \"$VERSION\")"}
+# publish's first step: its refusals, as their exact lines.
+PUBLISH_GUARDS = [
+    '[ "$GITHUB_EVENT_NAME" = "push" ] || { echo "::error::only a tag push publishes; this is a $GITHUB_EVENT_NAME"; exit 1; }',
+    '[ "$GITHUB_REF" = "refs/tags/$tag" ] || { echo "::error::run ref $GITHUB_REF is not refs/tags/$tag"; exit 1; }',
+    'now=$(git rev-parse "refs/tags/$tag^{commit}")',
+    '[ "$now" = "$GITHUB_SHA" ] || { echo "::error::$tag now points at $now, not $GITHUB_SHA, which this run built; the'
+    ' re-pointed tag\'s own run publishes it"; exit 1; }']
+LATEST_AGAIN = ["again=$(git ls-remote --tags origin 'refs/tags/v*' | scripts/release-is-latest.py \"$VERSION\")",
+                'if [ "$again" != "true" ]; then']
+
+
+def env_errors(where, level, env):
+    E = []
+    for k in env or {}:
+        if str(k) not in ENV_ALLOWED[level]:
+            why = "which changes what a shell, git or gh runs or believes" if ENV_DANGER.match(str(k)) else \
+                f"not a key this workflow sets at the {level} level"
+            E.append(f"env: {where} sets {k}, {why}")
+    return E
 
 
 def lines(run):
@@ -107,6 +193,7 @@ def check(wf):
     push = on.get("push")
     if push != {"tags": ["v*"]}:
         E.append(f"triggers: push must be exactly tags ['v*'], not {push!r}")
+    E += env_errors("the workflow", "workflow", wf.get("env"))
     if "permissions" not in wf or wf["permissions"] != {}:
         E.append(f"permissions: the top level must be `permissions: {{}}`, not {wf.get('permissions', '(absent)')!r}")
     for jn, job in jobs.items():
@@ -116,6 +203,7 @@ def check(wf):
             E.append(f"jobs: {jn} has continue-on-error")
         if "if" in job and str(job["if"]).strip() not in CONDITIONS.get((jn, "job"), set()):
             E.append(f"conditions: job {jn} has `if: {job['if']}`")
+        E += env_errors(f"job {jn}", "job", job.get("env"))
         perms = job.get("permissions")
         if not isinstance(perms, dict):
             E.append(f"permissions: job {jn} states {perms!r}, not a mapping of scopes")
@@ -140,6 +228,13 @@ def check(wf):
                 E.append(f"jobs: {where} has continue-on-error")
             if "if" in s and str(s["if"]).strip() not in CONDITIONS.get((jn, "step"), set()):
                 E.append(f"conditions: {where} has `if: {s['if']}`")
+            E += env_errors(where, "step", s.get("env"))
+            ls = lines(s.get("run"))
+            if verifies(s, "files") or verifies(s, "image"):
+                for ln in ls:
+                    if not (VERIFY.match(ln) or VERIFY_STEP_LINE.match(ln)):
+                        E.append(f"verify: {where} verifies and also runs `{ln[:80]}` (only `set -euo pipefail`, the"
+                                 " bundle's `cp` and verification lines)")
             u = s.get("uses")
             if u:
                 m = SHA.match(str(u).split()[0])
@@ -151,7 +246,26 @@ def check(wf):
                     E.append(f"pinned: {where} checks out without persist-credentials: false")
                 if str(u).startswith("docker/login-action@") and jn not in ("linux", "publish"):
                     E.append(f"upload: {where} logs in to a registry outside linux and publish")
-            for ln in lines(s.get("run")):
+            for ln in ls:
+                bare = re.sub(r"\$\{\{.*?\}\}", "", ln)
+                for k in [m.end() for m in re.finditer(r"\|\|", bare)]:
+                    blk = re.match(r"\s*\{(.*);\s*exit 1;\s*\}\s*$", bare[k:])
+                    if not blk or re.search(r"\b(exit|return)\b", blk.group(1)):
+                        E.append(f"shell: {where} has a `||` that does not end `{{ …; exit 1; }}` (and exit nowhere else"
+                                 f" in it): {ln[:80]}")
+                if "verify-release-attestation.sh" in ln and not VERIFY.match(ln):
+                    E.append(f"verify: {where} names the verification script other than to run it: {ln[:80]}")
+                if "scripts/" in ln and not (ln.startswith("scripts/") or ln in SCRIPT_LINES):
+                    E.append(f"shell: {where} names a script under scripts/ other than to run it: {ln[:80]}")
+                if re.search(r"GITHUB_(ENV|PATH)\b", ln):
+                    E.append(f"env: {where} writes GITHUB_ENV or GITHUB_PATH, which change every later step: {ln[:80]}")
+                w = words(ln)
+                if "buildx build" in ln and jn != "linux":
+                    E.append(f"upload: {where} builds an image outside linux: {ln[:80]}")
+                pushes = "push=true" in ln or "--push" in w or "type=registry" in ln
+                if pushes and not (jn == "linux" and "push-by-digest=true" in ln and "name=$IMAGE," in ln
+                                   and "--push" not in w and not {"-t", "--tag"} & set(w)):
+                    E.append(f"upload: {where} pushes an image other than by digest from linux: {ln[:80]}")
                 for pat, what in FORBIDDEN:
                     if re.search(pat, ln):
                         E.append(f"shell: {where} has {what}: {ln[:80]}")
@@ -160,8 +274,6 @@ def check(wf):
                         E.append(f"upload: {where} runs `gh release {sub}`, which this workflow does not use")
                 if (re.search(r"\bgh\s+release\s+(create|upload)\b", ln) or "imagetools create" in ln) and jn != "publish":
                     E.append(f"upload: {where} publishes outside the publish job: {ln[:80]}")
-                if "push=true" in ln and not (jn == "linux" and "push-by-digest=true" in ln and "name=$IMAGE," in ln):
-                    E.append(f"upload: {where} pushes an image other than by digest from linux: {ln[:80]}")
                 if ":latest" in ln and not (jn == "publish" and s.get("name") == "Move latest to the verified image"):
                     E.append(f"tags: {where} names :latest")
     if str(((jobs.get("bundle") or {}).get("env") or {}).get("ATTEST", "")).strip() != ATTEST_EXPR:
@@ -205,6 +317,13 @@ def check_version(job):
             E.append("dry-run: dry_run=false is set outside the push-of-a-tag branch")
         if not any("merge-base --is-ancestor" in ls[i] for i in range(g + 1, f)):
             E.append("dry-run: the tag's commit is not checked to be on main or a release-* branch before publishing")
+        if ANCESTRY != next((ls[i:i + 3] for i in range(g + 1, f) if ls[i].startswith("for b in ")), None):
+            E.append(f"dry-run: the ancestry check is not exactly main and release-* ({ANCESTRY[0]})")
+        if not any(ls[i].startswith('[[ -n "$on_line" ]] ||') for i in range(g + 1, f)):
+            E.append("dry-run: the ancestry check's answer is not acted on")
+    outs = [ln for ln in ls if "GITHUB_OUTPUT" in ln]
+    if outs != VERSION_OUTPUTS:
+        E.append(f"dry-run: version writes {outs} to GITHUB_OUTPUT, not exactly {VERSION_OUTPUTS}")
     if any("dry_run" in ln and "GITHUB_OUTPUT" in ln for s in steps if s is not v for ln in lines(s.get("run"))):
         E.append("dry-run: another step writes dry_run=false")
     return E
@@ -222,6 +341,8 @@ def check_job_order(jobs):
             w = s.get("with") or {}
             if "subject-path" in w and not any(v > i for v in files):
                 E.append(f"verify: {jn} step {i} attests files and nothing after it verifies them")
+            if "subject-path" in w and str(w["subject-path"]).split() != FILES_SUBJECTS:
+                E.append(f"verify: {jn} step {i} attests {str(w['subject-path']).split()}, not exactly {FILES_SUBJECTS}")
             if w.get("push-to-registry") in (True, "true") and not any(v > i for v in image):
                 E.append(f"verify: {jn} step {i} attests an image and nothing after it verifies it")
     pub = jobs.get("publish")
@@ -234,10 +355,12 @@ def check_job_order(jobs):
     steps = pub.get("steps") or []
     runs = [lines(s.get("run")) for s in steps]
     first = next((r for r in runs if r), [])
-    if not any('"$GITHUB_EVENT_NAME" = "push"' in ln for ln in first):
-        E.append("dry-run: publish's first step does not refuse, by itself, anything but a push")
-    if not any('rev-parse "refs/tags/$tag^{commit}"' in ln for ln in first) or not any('= "$GITHUB_SHA"' in ln for ln in first):
-        E.append("dry-run: publish's first step does not refuse a tag that no longer points at GITHUB_SHA")
+    if PUBLISH_GUARDS[0] not in first:
+        E.append("dry-run: publish's first step does not refuse, by itself, anything but a push (as its exact line)")
+    if PUBLISH_GUARDS[1] not in first:
+        E.append("dry-run: publish's first step does not refuse a run whose ref is not the tag (as its exact line)")
+    if not set(PUBLISH_GUARDS[2:]) <= set(first):
+        E.append("dry-run: publish's first step does not refuse a tag that no longer points at GITHUB_SHA (as its exact lines)")
     attest_img = [i for i, s in enumerate(steps) if str(s.get("uses", "")).startswith("actions/attest@")
                   and (s.get("with") or {}).get("push-to-registry") in (True, "true")]
     files = [i for i, s in enumerate(steps) if verifies(s, "files")]
@@ -245,6 +368,17 @@ def check_job_order(jobs):
     image_done = min((v for v in image if attest_img and v > max(attest_img)), default=None)
     if len(attest_img) != 3:
         E.append(f"verify: publish attests {len(attest_img)} images, not the two per-arch images and the index")
+    ids = {steps[i].get("id"): (steps[i].get("with") or {}).get("subject-digest") for i in attest_img}
+    if ids != {f"attest-{a}": f"${{{{ steps.index.outputs.{a} }}}}" for a in ARCHES}:
+        E.append(f"verify: the image attestations are {ids}, not attest-amd64/arm64/index of their own digests")
+    for i in image:
+        env = steps[i].get("env") or {}
+        got = sorted(ln for ln in runs[i] if ln != "set -euo pipefail")
+        if got != IMAGE_LINES:
+            E.append(f"verify: publish step {i} does not verify the amd64, arm64 and index digests once each, each"
+                     " from its own bundle")
+        if {k: env.get(k) for k in IMAGE_ENV} != IMAGE_ENV:
+            E.append(f"verify: publish step {i}'s bundles and digests are not each from its own step's output")
     if image_done is None:
         E.append("verify: publish has no step that verifies all three images after they are attested")
     upload_at = None
@@ -253,6 +387,9 @@ def check_job_order(jobs):
         for j, ln in enumerate(r):
             w = words(ln)
             if w[:3] == ["gh", "release", "create"]:
+                lat = [t for t in w[3:] if t.startswith("--latest")]
+                if lat != ["--latest=$LATEST"] or (steps[i].get("env") or {}).get("LATEST") != LATEST_ENV:
+                    E.append(f"latest: gh release create passes {lat}, not --latest=\"$LATEST\" from {LATEST_ENV}")
                 pos, k = [], 3
                 while k < len(w):
                     if w[k] in ("--title", "--notes-file", "-t", "-F"):
@@ -309,8 +446,19 @@ def check_job_order(jobs):
                 E.append(f"tags: {kind} is set from {src}, not the verified index digest")
             if image_done is None or i <= image_done:
                 E.append(f"tags: {kind} moves before the images are verified")
+    hi = [i for i, s in enumerate(steps) if s.get("id") == "highest"]
+    if len(hi) != 1 or runs[hi[0]] != HIGHEST:
+        E.append(f"latest: publish has no step `highest` that runs exactly {HIGHEST[1:]}")
+    elif upload_at is not None and hi[0] > upload_at:
+        E.append("latest: the highest-release answer comes after the Release is created")
     if "latest" in tags:
         i, _ = tags["latest"]
+        r, env = runs[i], steps[i].get("env") or {}
+        if env.get("LATEST") != LATEST_ENV or r[1:2] != [LATEST_GUARD] or r[3:5] != ["exit 0", "fi"] \
+                or not r[2:3] or not r[2].startswith("echo ") or r[5:7] != LATEST_AGAIN or r[8:10] != ["exit 0", "fi"] \
+                or not r[7:8] or not r[7].startswith("echo ") or not r[10:11] or "imagetools create" not in r[10]:
+            E.append(f"latest: the step that moves latest does not first leave it when {LATEST_ENV} is not true, and"
+                     " again when the remote, asked just before the move, no longer answers true")
         if i != len(steps) - 1:
             E.append("tags: latest is not set in publish's last step")
         if upload_at is not None and i < upload_at:
@@ -391,6 +539,51 @@ def plants():
     P["a dispatch on a tag attests as the tag"] = lambda w: w["jobs"]["bundle"]["env"].update(ATTEST="${{ 'true' }}")
     P["set +e before verify"] = lambda w: edit(w, "publish", "Verify each image's attestation", "set -euo pipefail", "set +e")
     P["gh release edit"] = lambda w: edit(w, "publish", UP, "gh release view \"$tag\" --json", "gh release edit \"$tag\" --draft=false; gh release view \"$tag\" --json")
+    # #827's re-review: fifteen fresh plants (thirteen closed here; two are listed as known in the docstring).
+    VI = "Verify each image's attestation"
+    VF = 'scripts/verify-release-attestation.sh files bundle "$VERSION"'
+    G = "GITHUB_REF_TYPE"
+    P["exit 0 before a verification"] = lambda w: find(w, "publish", V).update({"run": "exit 0\n" + VF})
+    P["a verification inside if false"] = lambda w: find(w, "publish", V).update({"run": "if false; then\n" + VF + "\nfi"})
+    P["the amd64 digest verified three times"] = lambda w: edit(w, "publish", VI, '"$IMAGE@$DIGEST_INDEX"', '"$IMAGE@$DIGEST_AMD64"')
+    P["a bundle verified against another digest"] = lambda w: edit(w, "publish", VI, 'image-arm64.sigstore.json" "$IMAGE@$DIGEST_ARM64"', 'image-arm64.sigstore.json" "$IMAGE@$DIGEST_AMD64"')
+    P["buildx --push in publish"] = lambda w: w["jobs"]["publish"]["steps"].insert(6, {"name": "x", "run": 'docker buildx build --push -t "$IMAGE:$VERSION" .'})
+    P["buildx type=registry in publish"] = lambda w: w["jobs"]["publish"]["steps"].insert(6, {"name": "x", "run": "docker buildx build --output type=registry,name=$IMAGE:$VERSION ."})
+    P["a second, dynamic dry_run write"] = lambda w: edit(w, "version", G, 'echo "dry_run=true" >> "$GITHUB_OUTPUT"', 'echo "dry_run=true" >> "$GITHUB_OUTPUT"\necho "dry_run=${FORCE:-false}" >> "$GITHUB_OUTPUT"')
+    P["publish's push guard made non-fatal"] = lambda w: edit(w, "publish", "The tag object", '[ "$GITHUB_EVENT_NAME" = "push" ] || { echo "::error::only a tag push publishes; this is a $GITHUB_EVENT_NAME"; exit 1; }', '[ "$GITHUB_EVENT_NAME" = "push" ] || echo "not a push"')
+    P["the ancestry check made non-fatal"] = lambda w: edit(w, "version", G, '[[ -n "$on_line" ]] || { echo "::error::v$tag ($GITHUB_SHA) is on neither main nor a release-* branch"; exit 1; }', '[[ -n "$on_line" ]] || echo "not on a line"')
+    P["the ancestry check against any branch"] = lambda w: edit(w, "version", G, "'refs/remotes/origin/release-*'", "'refs/remotes/origin/*'")
+    P["the verify script overwritten"] = lambda w: find(w, "publish", V).update({"run": "cp /dev/null scripts/verify-release-attestation.sh\n" + VF})
+    P["a step's env overrides GITHUB_REF"] = lambda w: find(w, "publish", V).update({"env": {"GITHUB_REF": "refs/pull/1/merge"}})
+    P["the files attestation widened"] = lambda w: find(w, "bundle", "actions/attest").update({"with": {"subject-path": "bundle/*"}})
+    # Beside them: the same three rules from other sides.
+    P["a digest's env names another output"] = lambda w: find(w, "publish", VI)["env"].update(DIGEST_INDEX="${{ steps.index.outputs.amd64 }}")
+    P["an image attestation of another digest"] = lambda w: find(w, "publish", "attest-index")["with"].update({"subject-digest": "${{ steps.index.outputs.amd64 }}"})
+    P["buildx build outside linux"] = lambda w: w["jobs"]["bundle"]["steps"].insert(2, {"name": "x", "run": "docker buildx build --output type=local,dest=bundle ."})
+    P["a tagged buildx --push in linux"] = lambda w: edit(w, "linux", "Push the", '--output "type=image,name=$IMAGE,push-by-digest=true,name-canonical=true,push=true"', '--push -t "$IMAGE:$VERSION"')
+    P["GH_REPO redirects gh"] = lambda w: w["jobs"]["publish"]["env"].update(GH_REPO="someone/else")
+    # latest only for the highest version (maintainer, 2026-11-22).
+    L = "Move latest"
+    P["the Release always marked latest"] = lambda w: edit(w, "publish", UP, '--latest="$LATEST"', "--latest")
+    P["latest moved whatever the answer"] = lambda w: edit(w, "publish", L, 'if [ "$LATEST" != "true" ]; then', 'if false; then')
+    P["latest's answer hard-coded"] = lambda w: find(w, "publish", L)["env"].update(LATEST="true")
+    P["the highest-release answer forced"] = lambda w: edit(w, "publish", "release-is-latest", 'echo "latest=$latest"', 'echo "latest=true"')
+    P["the highest-release step dropped"] = lambda w: w["jobs"]["publish"]["steps"].remove(find(w, "publish", "release-is-latest"))
+    # #830's review (rev827/plants3.py): the environment a verification runs in, and the guards' exact lines.
+    T = "The tag object"
+    K = 'kind=$(git cat-file -t "$tag")'
+    P["PATH on a verification step"] = lambda w: find(w, "publish", V).update({"env": {"PATH": "/tmp/fake:/usr/bin:/bin"}})
+    P["BASH_ENV at a job's level"] = lambda w: w["jobs"]["publish"]["env"].update(BASH_ENV="/tmp/stub.sh")
+    P["LD_PRELOAD at the workflow's level"] = lambda w: w["env"].update(LD_PRELOAD="/tmp/x.so")
+    P["a step writes GITHUB_PATH"] = lambda w: edit(w, "publish", T, K, 'echo /tmp/fake >> "$GITHUB_PATH"\n' + K)
+    P["a step writes GITHUB_ENV"] = lambda w: edit(w, "publish", T, K, 'echo "BASH_ENV=/tmp/stub.sh" >> "$GITHUB_ENV"\n' + K)
+    P["VERSION overridden on the highest step"] = lambda w: find(w, "publish", "release-is-latest").update({"env": {"VERSION": "999.0.0"}})
+    P["IMAGE overridden on Move latest"] = lambda w: find(w, "publish", "Move latest")["env"].update(IMAGE="ghcr.io/evil/x")
+    P["a guard that exits 0 before its exit 1"] = lambda w: edit(w, "publish", T, '|| { echo "::error::only a tag push publishes; this is a $GITHUB_EVENT_NAME"; exit 1; }', "|| { exit 0; exit 1; }")
+    P["the push guard rewritten with &&"] = lambda w: edit(w, "publish", T, '[ "$GITHUB_EVENT_NAME" = "push" ] || { echo "::error::only a tag push publishes; this is a $GITHUB_EVENT_NAME"; exit 1; }', '[ "$GITHUB_EVENT_NAME" = "push" ] && echo push')
+    P["the tag-commit guard rewritten with &&"] = lambda w: edit(w, "publish", T, '[ "$now" = "$GITHUB_SHA" ] || {', '[ "$now" = "$GITHUB_SHA" ] && echo same || {')
+    P["the re-check before the move dropped"] = lambda w: edit(w, "publish", L, 'if [ "$again" != "true" ]; then', "if false; then")
+    P["release-is-latest overwritten"] = lambda w: edit(w, "publish", T, K, "printf 'print(1)' > scripts/release-is-latest.py\n" + K)
     return P
 
 

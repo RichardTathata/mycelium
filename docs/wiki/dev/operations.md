@@ -138,10 +138,12 @@ equal to the tag, `wire-check` over the fixtures), and creates the Release from 
 RELEASING § 8 has not. **Since security-operations SO3 (2026-11-22)** it also attests the tarballs, `SHA256SUMS`, the
 image index and both per-arch images (`actions/attest`, SLSA v1, Sigstore keyless) and verifies every attestation
 (`scripts/verify-release-attestation.sh`) before it uploads or moves `latest`, which is now its own step after the
-image verifies; permissions are per job and every action is pinned by SHA, gated by `scripts/check-release-workflow.py`.
-A dry run attests and verifies the files only — the image half first runs at a tag (`what-is-proven.md`,
+image verifies; permissions are per job and every action is pinned by SHA, gated by `scripts/check-release-workflow.py`
+(an allow-list for triggers, permissions, actions, conditions, the `gh`/`imagetools` commands and the verification
+steps' lines; a deny-list for other shell). `latest` — the Release's label and `:latest` — moves only for the highest
+`vX.Y.Z` tag (`scripts/release-is-latest.py`, 2026-11-22). A dry run attests and verifies the files only — the image half first runs at a tag (`what-is-proven.md`,
 `binary-provenance`). Entry page: `docs/features/published-node.md`; logs `.log/2026-10-23-published-node.md`,
-`.log/2026-11-22-so3-signed-releases.md`.
+`.log/2026-11-22-so3-signed-releases.md`, `.log/2026-11-22-release-latest-highest.md`.
 
 ## `mycelium declare` (adopter-surface X10, 2026-10-23)
 
