@@ -6,7 +6,7 @@ use crate::tls::NodeTls;
 use bytes::Bytes;
 use std::{
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
@@ -36,6 +36,70 @@ pub static TEST_CONNECT_PAUSE_MS: std::sync::LazyLock<papaya::HashMap<String, u6
 #[doc(hidden)]
 pub static TEST_WRITE_PAUSE_MS: std::sync::LazyLock<papaya::HashMap<String, u64>> =
     std::sync::LazyLock::new(papaya::HashMap::new);
+
+/// **Test-only** hold on a writer's batch, after the queue is drained into the buffer and before the
+/// flush, **until released** (not a finite sleep, as [`TEST_WRITE_PAUSE_MS`] is). Keyed by
+/// [`hook_key`]: the destination peer (`NodeId` as a string) for its data writer, `control/{peer}` for
+/// its control lane (B1), so a test can hold one connection to a peer and not the other.
+#[cfg(any(test, feature = "test-frame-filter", feature = "test-support"))]
+#[doc(hidden)]
+pub static TEST_WRITE_HOLD: std::sync::LazyLock<papaya::HashMap<String, Arc<WriteHold>>> =
+    std::sync::LazyLock::new(papaya::HashMap::new);
+
+/// **Test-only** hold before a writer's connect, until released — keyed as [`TEST_WRITE_HOLD`]. The
+/// writer holds the frame that opened it, and its channel fills behind it.
+#[cfg(any(test, feature = "test-frame-filter", feature = "test-support"))]
+#[doc(hidden)]
+pub static TEST_CONNECT_HOLD: std::sync::LazyLock<papaya::HashMap<String, Arc<WriteHold>>> =
+    std::sync::LazyLock::new(papaya::HashMap::new);
+
+/// **Test-only:** a hold a writer waits in until [`WriteHold::release`].
+#[cfg(any(test, feature = "test-frame-filter", feature = "test-support"))]
+#[doc(hidden)]
+pub struct WriteHold {
+    released: watch::Sender<bool>,
+    /// How many batches have reached the hold.
+    pub reached: AtomicU64,
+}
+
+#[cfg(any(test, feature = "test-frame-filter", feature = "test-support"))]
+impl WriteHold {
+    /// A hold not yet released.
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self { released: watch::channel(false).0, reached: AtomicU64::new(0) })
+    }
+    /// Let every batch waiting in the hold, and every later one, go on.
+    pub fn release(&self) {
+        let _ = self.released.send(true);
+    }
+    async fn wait(&self) {
+        self.reached.fetch_add(1, Ordering::SeqCst);
+        let mut rx = self.released.subscribe();
+        let _ = rx.wait_for(|v| *v).await;
+    }
+}
+
+/// The key a writer's test hooks are looked up by: the peer for a data writer, `control/{peer}` for a
+/// control lane.
+#[cfg(any(test, feature = "test-frame-filter", feature = "test-support"))]
+fn hook_key(peer: &NodeId, lane: bool) -> String {
+    if lane { format!("control/{peer}") } else { peer.to_string() }
+}
+
+/// Clears a writer's `connected` flag on every exit of its task — a `break`, an abort, a panic.
+struct ConnectedFlag(Arc<AtomicBool>);
+
+impl ConnectedFlag {
+    fn set(&self, v: bool) {
+        self.0.store(v, Ordering::Release);
+    }
+}
+
+impl Drop for ConnectedFlag {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 /// The time bounds one peer writer runs under (row B, post-360 hardening): how long it may sit idle,
 /// how long a connect plus TLS handshake may take, and the progress bound its writes and flushes run
@@ -97,6 +161,16 @@ fn jittered(backoff: Duration) -> Duration {
 /// ([`crate::outbound`]) until it is flushed to the socket or dropped — by any path,
 /// a `break` and an abort included — so a graceful shutdown waits for it *before* the
 /// signal rather than racing it (the shutdown-sweep flake, 2026-10-19).
+///
+/// `connected` is set while the task holds a connected socket (after the handshake, until the socket
+/// is dropped or the task exits) — what the control lane's rules read (B1, M1).
+///
+/// With `lane` set the task is a peer's **control lane** (B1, [`crate::control_lane`]) and differs in
+/// four ways: it closes when the peer's data writer has no connected socket (before each batch and on a
+/// [`CONTROL_LANE_YIELD_TICK_MS`](crate::control_lane::CONTROL_LANE_YIELD_TICK_MS) tick, counted
+/// `yielded`); a failed connect starts the lane's refused backoff and ends the task; a failed write ends
+/// the task; and every frame it takes and does not write is counted in the lane's `dropped`. It never
+/// sits in a reconnect backoff: the next control frame opens a new lane, if the rules allow.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_peer_writer(
     peer: NodeId,
@@ -108,7 +182,22 @@ pub async fn run_peer_writer(
     dropped_frames: Arc<AtomicU64>,
     peer_dropped: Arc<AtomicU64>,
     tls: Option<Arc<NodeTls>>,
+    connected: Arc<AtomicBool>,
+    lane: Option<Arc<crate::control_lane::ControlLane>>,
 ) {
+    let connected = ConnectedFlag(connected);
+    #[cfg(any(test, feature = "test-frame-filter", feature = "test-support"))]
+    let hook = hook_key(&peer, lane.is_some());
+    // A lane's frames that it took and will not write: counted in the lane's `dropped` (with the frame
+    // in hand, `+ 1`), not in the data path's `dropped_frames`.
+    let lane_drop = |rx: &crate::outbound::CountedRx<Bytes>, in_hand: usize| {
+        if let Some(l) = lane.as_ref() {
+            let n = (rx.len() + in_hand) as u64;
+            l.stats.dropped.fetch_add(n, Ordering::Relaxed);
+            #[cfg(feature = "metrics")]
+            metrics::counter!("gossip_control_lane_dropped_total").increment(n);
+        }
+    };
     let mut conn: Option<BufWriter<crate::stall::StallGuard<GossipStream>>> = None;
     // Identity-and-lifecycle I2 (#796's review, must-address 6): the roots generation the session's handshake was judged
     // under, and the peer's certificate. When the node's roots change, the session is re-judged before its next write,
@@ -147,7 +236,40 @@ pub async fn run_peer_writer(
                     None    => std::future::pending().await,
                 }
             } => break,
+            // A control lane's yield tick (M1): an idle lane still closes within the tick of the data
+            // writer losing its socket. A data writer never takes this arm.
+            _ = async {
+                match lane {
+                    Some(_) => crate::sim_seam::sleep_ms(
+                        crate::control_lane::YIELD_STREAM, crate::control_lane::CONTROL_LANE_YIELD_TICK_MS,
+                    ).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(l) = lane.as_ref()
+                    && l.should_yield(&peer)
+                {
+                    l.stats.yielded.fetch_add(1, Ordering::Relaxed);
+                    #[cfg(feature = "metrics")]
+                    metrics::counter!("gossip_control_lane_yielded_total").increment(1);
+                    lane_drop(&rx, 0);
+                    debug!("Control lane to {peer} yields: its data writer has no connected socket");
+                    break;
+                }
+                continue;
+            }
         };
+        // A control lane yields before each batch, too (M1).
+        if let Some(l) = lane.as_ref()
+            && l.should_yield(&peer)
+        {
+            l.stats.yielded.fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "metrics")]
+            metrics::counter!("gossip_control_lane_yielded_total").increment(1);
+            lane_drop(&rx, 1);
+            debug!("Control lane to {peer} yields: its data writer has no connected socket");
+            break;
+        }
         if let Some(ref mut d) = idle_deadline {
             *d = ttime::Instant::now() + idle_timeout;
         }
@@ -174,6 +296,7 @@ pub async fn run_peer_writer(
                 t.note_session_closed(false, der);
                 warn!("Dropping the session to {peer}: its certificate does not verify against this node's new roots");
                 conn = None;
+                connected.set(false);
                 session = None;
             }
         }
@@ -186,11 +309,17 @@ pub async fn run_peer_writer(
             // bumps the generation, so a handshake tagged with the current generation ran under the current roots.
             #[cfg(feature = "tls")]
             let judged_at = tls.as_ref().map_or(0, |t| t.roots_generation());
+            let connect_started = crate::sim_seam::mono_now_ns();
             let attempt = async {
                 #[cfg(any(test, feature = "test-frame-filter"))]
                 {
-                    let pause = TEST_CONNECT_PAUSE_MS.pin().get(&peer.to_string()).copied();
+                    let pause = TEST_CONNECT_PAUSE_MS.pin().get(&hook).copied();
                     if let Some(ms) = pause { crate::sim_seam::sleep_ms("writer/test-connect-pause", ms).await; }
+                }
+                #[cfg(any(test, feature = "test-frame-filter", feature = "test-support"))]
+                {
+                    let hold = TEST_CONNECT_HOLD.pin().get(&hook).cloned();
+                    if let Some(h) = hold { h.wait().await; }
                 }
                 let s = TcpStream::connect(peer.to_socket_addr()).await
                     .map_err(|e| format!("Connect to {peer} failed: {e}"))?;
@@ -230,14 +359,35 @@ pub async fn run_peer_writer(
                     // 16 KB buffer coalesces a full burst of small gossip frames into
                     // one or two kernel write calls; explicit flush sends after drain.
                     conn = Some(BufWriter::with_capacity(16_384, crate::stall::StallGuard::new(gs)));
+                    connected.set(true);
                     last_fail = None;
+                    if let Some(l) = lane.as_ref() {
+                        let ms = crate::sim_seam::mono_since(connect_started).as_millis() as u64;
+                        l.stats.last_connect_ms.store(ms, Ordering::Relaxed);
+                        #[cfg(feature = "metrics")]
+                        metrics::histogram!("gossip_control_lane_connect_ms").record(ms as f64);
+                    }
                 }
                 Ok(Err(e)) => {
+                    if let Some(l) = lane.as_ref() {
+                        // A refused lane (a per-source cap closes the socket in the handshake) backs off
+                        // long, so it cannot keep taking the slot a data reconnect needs (M1).
+                        l.note_refused(&peer);
+                        lane_drop(&rx, 1);
+                        warn!("Control lane: {e}; no lane to {peer} for the refused backoff");
+                        break;
+                    }
                     last_fail = Some((crate::sim_seam::mono_now_ns(), jittered(backoff)));
                     warn!("{e}");
                     continue;
                 }
                 Err(_) => {
+                    if let Some(l) = lane.as_ref() {
+                        l.note_refused(&peer);
+                        lane_drop(&rx, 1);
+                        warn!("Control lane connect to {peer} timed out after {:?}; no lane for the refused backoff", timing.connect);
+                        break;
+                    }
                     last_fail = Some((crate::sim_seam::mono_now_ns(), jittered(backoff)));
                     warn!("Connect to {} timed out after {:?} (handshake_timeout_ms)", peer, timing.connect);
                     continue;
@@ -285,8 +435,13 @@ pub async fn run_peer_writer(
             // frames are in this writer's hand and in no queue, which is what the shutdown flush cannot see.
             #[cfg(any(test, feature = "test-frame-filter"))]
             {
-                let pause = TEST_WRITE_PAUSE_MS.pin().get(&peer.to_string()).copied();
+                let pause = TEST_WRITE_PAUSE_MS.pin().get(&hook).copied();
                 if let Some(ms) = pause { crate::sim_seam::sleep_ms("writer/test-pause", ms).await; }
+            }
+            #[cfg(any(test, feature = "test-frame-filter", feature = "test-support"))]
+            {
+                let hold = TEST_WRITE_HOLD.pin().get(&hook).cloned();
+                if let Some(h) = hold { h.wait().await; }
             }
             if wrote_any {
                 c.flush().await.map_err(|e| crate::stall::is_stall(&e))?;
@@ -308,9 +463,18 @@ pub async fn run_peer_writer(
                 warn!("Write to {} made no progress within {:?} (peer_write_stall_timeout_ms)", peer, stall.stall);
             }
             conn = None;
+            connected.set(false);
             #[cfg(feature = "tls")]
             {
                 session = None;
+            }
+            if lane.is_some() {
+                // The batch in hand was lost with the socket; a lane does not back off and retry, it
+                // closes, and the next control frame opens a new one if the rules allow.
+                lane_drop(&rx, held.len().max(1));
+                warn!("Write to control lane {} failed; the lane closes", peer);
+                held.release();
+                break;
             }
             // +1 for the frame that caused the write failure (already dequeued, never sent).
             let dropped = rx.len() + 1;
@@ -342,6 +506,11 @@ pub struct WriterEntry {
     /// Cumulative frames dropped to this peer during reconnect backoff.
     /// Subset of the global `dropped_frames` counter; useful for identifying slow peers.
     pub dropped:       Arc<AtomicU64>,
+    /// Whether the task holds a connected socket now — set after its handshake, cleared when the socket
+    /// is dropped and when the task ends. One flag for the entry's whole life (the pending sentinel and
+    /// the live entry share it). Read by the control lane's rules (B1, M1): no lane opens to a peer whose
+    /// data writer exists unconnected, and an open lane yields when it becomes so.
+    pub connected:     Arc<AtomicBool>,
 }
 
 impl WriterEntry {
@@ -372,6 +541,41 @@ pub fn get_or_spawn_writer(
     tls: Option<Arc<NodeTls>>,
     unsent: &crate::outbound::Unsent,
 ) -> Option<crate::outbound::WriterTx> {
+    claim_or_spawn(peer, writers, chan_depth, backoff, timing, shutdown_tx, dropped_frames, tls, unsent, None)
+}
+
+/// [`get_or_spawn_writer`] for `peer`'s **control lane** (B1): in `lane`'s own map, at
+/// [`CONTROL_LANE_DEPTH`](crate::control_lane::CONTROL_LANE_DEPTH), its drops counted in the lane's
+/// `dropped`, and the lane gauge published instead of `gossip_peers_connected` (M3).
+pub(crate) fn get_or_spawn_lane(
+    peer: &NodeId,
+    lane: &Arc<crate::control_lane::ControlLane>,
+    backoff: Duration,
+    timing: &WriterTiming,
+    shutdown_tx: &Arc<watch::Sender<bool>>,
+    tls: Option<Arc<NodeTls>>,
+    unsent: &crate::outbound::Unsent,
+) -> Option<crate::outbound::WriterTx> {
+    claim_or_spawn(
+        peer, lane.writers(), crate::control_lane::CONTROL_LANE_DEPTH, backoff, timing, shutdown_tx,
+        &lane.stats.dropped, tls, unsent, Some(Arc::clone(lane)),
+    )
+}
+
+/// The claim-then-spawn protocol behind [`get_or_spawn_writer`] and [`get_or_spawn_lane`].
+#[allow(clippy::too_many_arguments)]
+fn claim_or_spawn(
+    peer: &NodeId,
+    writers: &papaya::HashMap<NodeId, WriterEntry>,
+    chan_depth: usize,
+    backoff: Duration,
+    timing: &WriterTiming,
+    shutdown_tx: &Arc<watch::Sender<bool>>,
+    dropped_frames: &Arc<AtomicU64>,
+    tls: Option<Arc<NodeTls>>,
+    unsent: &crate::outbound::Unsent,
+    lane: Option<Arc<crate::control_lane::ControlLane>>,
+) -> Option<crate::outbound::WriterTx> {
     // Guard: refuse to spawn during shutdown.
     if *shutdown_tx.borrow() {
         return None;
@@ -392,11 +596,13 @@ pub fn get_or_spawn_writer(
     let (peer_shutdown_tx, peer_shutdown_rx) = watch::channel(false);
     let peer_shutdown = Arc::new(peer_shutdown_tx);
     let dropped = Arc::new(AtomicU64::new(0));
+    let connected = Arc::new(AtomicBool::new(false));
     let pending = WriterEntry {
         tx: tx.clone(),
         peer_shutdown: Arc::clone(&peer_shutdown),
         abort_handle: None,
         dropped: Arc::clone(&dropped),
+        connected: Arc::clone(&connected),
     };
 
     let claim = guard.compute(peer.clone(), |existing| match existing {
@@ -420,6 +626,8 @@ pub fn get_or_spawn_writer(
         Arc::clone(dropped_frames),
         dropped,
         tls,
+        Arc::clone(&connected),
+        lane.clone(),
     ));
     let abort_handle = join_handle.abort_handle();
     drop(join_handle); // detach — task exits via peer_shutdown or global shutdown signal
@@ -436,10 +644,16 @@ pub fn get_or_spawn_writer(
                 peer_shutdown: Arc::clone(&peer_shutdown),
                 abort_handle: Some(abort_handle.clone()),
                 dropped: Arc::clone(&e.dropped),
+                connected: Arc::clone(&e.connected),
             }),
         _ => papaya::Operation::Abort(()),
     });
-    publish_connected_gauge(writers);
+    // The gauge selector (M3): a lane is never counted as a peer.
+    if lane.is_some() {
+        crate::control_lane::publish_lane_gauge(writers);
+    } else {
+        publish_connected_gauge(writers);
+    }
 
     if matches!(upgraded, papaya::Compute::Inserted(..) | papaya::Compute::Updated { .. }) {
         Some(tx)
@@ -481,6 +695,16 @@ pub fn reap_finished_writers(
     writers:  &papaya::HashMap<NodeId, WriterEntry>,
     finished: impl IntoIterator<Item = NodeId>,
 ) {
+    reap_writers_only(writers, finished);
+    publish_connected_gauge(writers);
+}
+
+/// [`reap_finished_writers`] without publishing a gauge — for a map that is not the data writers' (the
+/// control lanes publish their own, [`crate::control_lane::ControlLane::reap`]).
+pub(crate) fn reap_writers_only(
+    writers:  &papaya::HashMap<NodeId, WriterEntry>,
+    finished: impl IntoIterator<Item = NodeId>,
+) {
     let guard = writers.pin();
     for peer in finished {
         guard.compute(peer, |existing| match existing {
@@ -488,7 +712,6 @@ pub fn reap_finished_writers(
             _                            => papaya::Operation::Abort(()),
         });
     }
-    publish_connected_gauge(writers);
 }
 
 /// Zero-gaps Z9 (D9): `gossip_peers_connected` is the number of **live writers** in `writers` —
@@ -572,7 +795,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let tx = crate::outbound::WriterTx::new(tx, Default::default());
         let (ps, ps_rx) = watch::channel(false);
-        (WriterEntry { tx, peer_shutdown: Arc::new(ps), abort_handle: None, dropped: Arc::new(AtomicU64::new(0)) }, ps_rx)
+        (WriterEntry { tx, peer_shutdown: Arc::new(ps), abort_handle: None, dropped: Arc::new(AtomicU64::new(0)), connected: Arc::default() }, ps_rx)
     }
 
     /// A NOT-live entry: the abort handle of a task that has already run to completion.
@@ -584,7 +807,7 @@ mod tests {
         let ah = jh.abort_handle();
         jh.await.unwrap();
         assert!(ah.is_finished(), "precondition: task finished ⇒ entry not live");
-        WriterEntry { tx, peer_shutdown: Arc::new(ps), abort_handle: Some(ah), dropped: Arc::new(AtomicU64::new(0)) }
+        WriterEntry { tx, peer_shutdown: Arc::new(ps), abort_handle: Some(ah), dropped: Arc::new(AtomicU64::new(0)), connected: Arc::default() }
     }
 
     /// The reconnect backoff drops frames while it is running, and stops dropping once it expires.
@@ -618,7 +841,7 @@ mod tests {
         // on which value the draw produced.
         let handle = tokio::spawn(run_peer_writer(
             id(port), rx, Duration::from_millis(200), WriterTiming::with_idle(Duration::ZERO),
-            sd_rx, psd_rx, Arc::clone(&dropped), Arc::clone(&peer_dropped), None,
+            sd_rx, psd_rx, Arc::clone(&dropped), Arc::clone(&peer_dropped), None, Arc::default(), None,
         ));
 
         /// Wait for a condition rather than for a duration — the two fixed waits below are the

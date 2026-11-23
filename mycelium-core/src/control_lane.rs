@@ -1,0 +1,341 @@
+//! **The control lane (B1)**: a second connection per peer, beside the data connection, for the few
+//! frame kinds whose delay is a promise ([`CONTROL_KINDS`]). Design: `docs/design/control-lane.md`.
+//!
+//! **Why a connection and not a priority.** On the data connection a frame waits behind every frame the
+//! writer's channel holds, every byte in its buffer and in both kernel buffers, and — at the receiver —
+//! behind every frame its connection reader handles first, one at a time (`connection::handle_connection`),
+//! some of which wait on the WAL. No priority inside the sender's writer reaches the receiver's reader. A
+//! connection of its own has its own writer task, its own socket and its own reader at the receiver, so a
+//! control frame waits only behind other control frames (at most [`CONTROL_LANE_DEPTH`] per peer).
+//!
+//! **What it promises, and to whom.** The lane is an *extra copy*: [`crate::ops::emit_signal_control`]
+//! sends the frame by the shared path exactly as `emit_signal` does, and offers the **same encoded bytes**
+//! (same nonce) to the lane. Whichever copy arrives second is dropped by the receiver's node-wide seen-set
+//! before delivery and before relay. So Individual-scope forwarding stays unconditional (the lane is not a
+//! carve-out): a lane that is down, full or refused costs only the speed-up.
+//!
+//! **Rules** (design §3.2, the review's M1):
+//! - a lane opens to a peer only while that peer's **data** writer is connected, or while the peer has no
+//!   data writer at all (a partial mesh: the call's own reachability decides, M7) — never while a data
+//!   writer exists without a connected socket, where the lane could take the per-source slot its
+//!   reconnect needs ([`ControlLane::may_open`]);
+//! - an open lane **yields** — closes, counted in `yielded` — within [`CONTROL_LANE_YIELD_TICK_MS`] of
+//!   the data writer losing its socket ([`ControlLane::should_yield`], checked by the lane's writer);
+//! - a lane whose connect fails is not tried again for [`CONTROL_LANE_REFUSED_BACKOFF_MS`];
+//! - **a relay never puts a frame it received on a lane** (D7): nothing on the receive path calls
+//!   [`ControlLane::send`]; relays forward through the shard only.
+//!
+//! **No new lock.** The writer map and the refusal map are `papaya` maps; the counters are atomics.
+
+use crate::node_id::NodeId;
+use crate::writer::WriterEntry;
+use bytes::Bytes;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+
+/// The request kinds the lane carries — **closed**: a PR that adds a kind names it and its rate bound.
+///
+/// - `sys.call-cancel.v1` — a gateway's cancel-forward to the provider it dispatched the call to
+///   (identity-and-lifecycle I4, bound 1). Its rate is bounded by the calls under cancellable rules,
+///   and #826's re-sends are at most one per attempt.
+///
+/// The reply to a request of one of these kinds (`rpc.result`, toward the request's sender) rides the
+/// lane too; see [`may_carry`].
+pub const CONTROL_KINDS: &[&str] = &["sys.call-cancel.v1"];
+
+/// A kind the lane admits **only in test builds**, so a test can drive the lane without a real control
+/// kind's handler answering its frames. Never in a shipped build.
+#[cfg(any(test, feature = "test-support"))]
+pub const TEST_CONTROL_KIND: &str = "test.control-lane.v1";
+
+/// Each lane's channel depth (D5). A full lane never blocks: the copy is counted `full`, and the shared
+/// copy has already been offered.
+pub const CONTROL_LANE_DEPTH: usize = 64;
+/// The progress bound on a lane's writes (D5): a lane writer whose batch moves no byte for this long
+/// closes, counted in `outbound_stalls`. The data connection keeps `peer_write_stall_timeout_ms`.
+pub const CONTROL_LANE_WRITE_BOUND_MS: u64 = 10_000;
+/// How long after a failed lane connect no lane is opened to that peer again (D5, M1).
+pub const CONTROL_LANE_REFUSED_BACKOFF_MS: u64 = 300_000;
+/// How often an idle lane checks whether the peer's data writer lost its socket (M1): the lane yields
+/// within this bound. A busy lane also checks before each batch.
+pub const CONTROL_LANE_YIELD_TICK_MS: u64 = 1_000;
+/// The largest frame the lane carries; a larger copy is refused (counted) and only the shared copy goes.
+pub const CONTROL_LANE_MAX_FRAME_BYTES: usize = 64 * 1024;
+
+/// The seam stream a lane's yield tick sleeps on.
+pub(crate) const YIELD_STREAM: &str = "writer/control-yield";
+
+/// Whether `kind` is one of [`CONTROL_KINDS`] (or, in test builds, [`TEST_CONTROL_KIND`]).
+pub fn is_control_kind(kind: &str) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    if kind == TEST_CONTROL_KIND {
+        return true;
+    }
+    CONTROL_KINDS.contains(&kind)
+}
+
+/// Whether a frame of `kind` sent for the control kind `control_kind` may ride the lane: `control_kind`
+/// is a control kind, and the frame is either a request of that kind or its `rpc.result` reply.
+pub fn may_carry(kind: &str, control_kind: &str) -> bool {
+    is_control_kind(control_kind)
+        && (kind == control_kind || kind == crate::signal::signal_kind::RPC_RESULT)
+}
+
+/// What became of a frame's lane copy ([`crate::ops::emit_signal_control`]). The shared copy is offered
+/// whatever this says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneVerdict {
+    /// The copy entered the lane's channel (`sent`).
+    Sent,
+    /// The lane's channel was full (`full`).
+    Full,
+    /// `control_lane = false`: no lane.
+    Off,
+    /// The kind may not ride the lane, or the frame is over [`CONTROL_LANE_MAX_FRAME_BYTES`] (`refused`).
+    Refused,
+    /// The peer's data writer exists and has no connected socket: no lane opens (M1).
+    DataUnconnected,
+    /// A lane connect to the peer failed within [`CONTROL_LANE_REFUSED_BACKOFF_MS`].
+    Backoff,
+    /// The node is shutting down, or the lane closed twice under the copy.
+    Unavailable,
+}
+
+/// What [`crate::ops::emit_signal_control`] did with one frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlSend {
+    /// The shared copy entered a gossip shard (as `emit_signal`'s `bool`).
+    pub shared: bool,
+    /// The lane copy.
+    pub lane: LaneVerdict,
+}
+
+/// The lane's counters (`SystemStats::control_lane_*`, `control_late_duplicates`; design D8).
+#[derive(Debug, Default)]
+pub struct ControlLaneStats {
+    /// Copies that entered a lane's channel.
+    pub sent:            AtomicU64,
+    /// Copies refused because the lane's channel was full.
+    pub full:            AtomicU64,
+    /// Lane connects (TCP + TLS handshake) that failed; each starts the refused backoff.
+    pub connect_failed:  AtomicU64,
+    /// Lanes closed because the peer's data writer lost its socket (M1).
+    pub yielded:         AtomicU64,
+    /// Copies a lane took and did not write: lost to a failed connect, a failed write or a yield. Not in
+    /// `dropped_frames`, which stays the data path's.
+    pub dropped:         Arc<AtomicU64>,
+    /// Copies refused before the lane: a kind that may not ride it, or a frame over the size cap.
+    pub refused:         AtomicU64,
+    /// Requests of a control kind that reached the replay window after the seen-set forgot their nonce —
+    /// the slow twin of a dual send (M2). Counted here **instead of** the caller-replay counter, so that
+    /// counter stays a replay signal. A genuine replay of a control request is counted here too: it is
+    /// harmless, a repeat being answered from what the provider holds.
+    pub late_duplicates: AtomicU64,
+    /// How long the most recent successful lane connect took, in milliseconds (also the
+    /// `gossip_control_lane_connect_ms` histogram under `metrics`).
+    pub last_connect_ms: AtomicU64,
+}
+
+/// A node's control lanes: one writer per peer in its own map beside the data writers, its refusal
+/// backoffs, and its counters. Held by [`crate::CoreCtx::control_lane`].
+pub struct ControlLane {
+    enabled: bool,
+    /// The lane writers, by peer. Never counted as peers: `gossip_peers_connected` and
+    /// `cached_connections` read the data map only.
+    writers: papaya::HashMap<NodeId, WriterEntry>,
+    /// The data writers (the agent's `peer_writers`), read for the M1 rules.
+    data:    Arc<papaya::HashMap<NodeId, WriterEntry>>,
+    /// Per peer, the monotonic instant (`sim_seam::mono_now_ns`) before which no lane opens to it.
+    refused_until: papaya::HashMap<NodeId, u64>,
+    /// The counters.
+    pub stats: ControlLaneStats,
+}
+
+impl ControlLane {
+    /// Lanes beside `data` (the agent's `peer_writers`), on or off (`GossipConfig::control_lane`).
+    pub fn new(enabled: bool, data: Arc<papaya::HashMap<NodeId, WriterEntry>>) -> Self {
+        Self {
+            enabled,
+            writers: papaya::HashMap::new(),
+            data,
+            refused_until: papaya::HashMap::new(),
+            stats: ControlLaneStats::default(),
+        }
+    }
+
+    /// Whether lanes are on (`GossipConfig::control_lane`).
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// The lane writers (read by the sites that close, reap and count them).
+    pub fn writers(&self) -> &papaya::HashMap<NodeId, WriterEntry> {
+        &self.writers
+    }
+
+    /// The data writers this lane set reads.
+    pub fn data_writers(&self) -> &Arc<papaya::HashMap<NodeId, WriterEntry>> {
+        &self.data
+    }
+
+    /// Whether `peer` has a data writer that is live and **not** connected — in its reconnect backoff,
+    /// or before its first connect. A finished data writer (idled out) counts as none.
+    fn data_unconnected(&self, peer: &NodeId) -> bool {
+        self.data.pin().get(peer).is_some_and(|e| e.is_live() && !e.connected.load(Ordering::Acquire))
+    }
+
+    /// Whether a lane may open to (or take a frame for) `peer` now (D4, M1).
+    pub fn may_open(&self, peer: &NodeId) -> Result<(), LaneVerdict> {
+        if !self.enabled {
+            return Err(LaneVerdict::Off);
+        }
+        if let Some(&until) = self.refused_until.pin().get(peer) {
+            if crate::sim_seam::mono_now_ns() < until {
+                return Err(LaneVerdict::Backoff);
+            }
+            self.refused_until.pin().compute(peer.clone(), |e| match e {
+                Some((_, &u)) if u == until => papaya::Operation::Remove,
+                _ => papaya::Operation::Abort(()),
+            });
+        }
+        if self.data_unconnected(peer) {
+            return Err(LaneVerdict::DataUnconnected);
+        }
+        Ok(())
+    }
+
+    /// Whether the lane to `peer` must close (M1): its data writer exists and has lost (or not yet
+    /// gained) its socket. Read by the lane's writer before each batch and on its yield tick.
+    pub fn should_yield(&self, peer: &NodeId) -> bool {
+        self.data_unconnected(peer)
+    }
+
+    /// A lane connect to `peer` failed: no lane opens to it for [`CONTROL_LANE_REFUSED_BACKOFF_MS`].
+    pub(crate) fn note_refused(&self, peer: &NodeId) {
+        let until = crate::sim_seam::mono_now_ns().saturating_add(CONTROL_LANE_REFUSED_BACKOFF_MS * 1_000_000);
+        self.refused_until.pin().insert(peer.clone(), until);
+        self.stats.connect_failed.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("gossip_control_lane_connect_failed_total").increment(1);
+    }
+
+    /// **Test-only:** end `peer`'s refused backoff now, as if [`CONTROL_LANE_REFUSED_BACKOFF_MS`] had
+    /// passed — the clock is the seam's, so a test cannot wait 300 s.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn end_refused_backoff_for_test(&self, peer: &NodeId) {
+        self.refused_until.pin().remove(peer);
+    }
+
+    /// Offer `frame`, already encoded, to the lane toward `target`, opening it if the rules allow. Called
+    /// only by [`crate::ops::emit_signal_control`], after the shared copy was offered.
+    pub(crate) fn send(self: &Arc<Self>, ctx: &crate::CoreCtx, target: &NodeId, frame: Bytes) -> LaneVerdict {
+        if let Err(v) = self.may_open(target) {
+            return v;
+        }
+        let timing = crate::writer::WriterTiming {
+            idle:    std::time::Duration::from_secs(ctx.config.writer_idle_timeout_secs),
+            connect: std::time::Duration::from_millis(ctx.config.handshake_timeout_ms),
+            stall:   crate::stall::StallBound {
+                stall:    std::time::Duration::from_millis(CONTROL_LANE_WRITE_BOUND_MS),
+                min_rate: 0,
+            },
+            stalls:  Some(Arc::clone(&ctx.transport_bounds.outbound_stalls)),
+        };
+        let backoff = std::time::Duration::from_secs(ctx.hot.reconnect_backoff_secs(ctx.config.reconnect_backoff_secs));
+        let tls = ctx.tls.get().cloned();
+        let spawn = || crate::writer::get_or_spawn_lane(
+            target, self, backoff, &timing, &ctx.shutdown_tx, tls.clone(), ctx.gossip_txs.unsent(),
+        );
+        let stream = format!("writer/control/{target}");
+        let Some(tx) = spawn() else { return LaneVerdict::Unavailable };
+        let mut verdict = tx.try_send_counted(&stream, frame.clone());
+        // A copy enqueued as an idle lane shuts down lands in a closed channel: respawn and retry once, as
+        // the shard's `send_to_peer!` does, so it is not counted as sent and lost.
+        if verdict == crate::sim_seam::ChanVerdict::Closed {
+            let Some(tx) = spawn() else { return LaneVerdict::Unavailable };
+            verdict = tx.try_send_counted(&stream, frame);
+        }
+        match verdict {
+            crate::sim_seam::ChanVerdict::Sent => {
+                self.stats.sent.fetch_add(1, Ordering::Relaxed);
+                #[cfg(feature = "metrics")]
+                metrics::counter!("gossip_control_lane_sent_total").increment(1);
+                LaneVerdict::Sent
+            }
+            crate::sim_seam::ChanVerdict::Full => {
+                let n = self.stats.full.fetch_add(1, Ordering::Relaxed);
+                #[cfg(feature = "metrics")]
+                metrics::counter!("gossip_control_lane_full_total").increment(1);
+                if n == 0 || (n + 1).is_multiple_of(64) {
+                    tracing::warn!(peer = %target, full = n + 1, "control lane full: the frame goes by the shared path only");
+                }
+                LaneVerdict::Full
+            }
+            crate::sim_seam::ChanVerdict::Closed => LaneVerdict::Unavailable,
+        }
+    }
+
+    /// Close the lane to `peer`, if one is open (the eviction sites of design §4.3).
+    pub fn evict(&self, peer: &NodeId) {
+        crate::writer::evict_peer_writer(&self.writers, peer);
+        publish_lane_gauge(&self.writers);
+    }
+
+    /// Remove every lane whose writer has finished (the GC sweep) and publish the lane gauge.
+    pub fn reap(&self) {
+        let finished: Vec<NodeId> = self.writers.pin().iter()
+            .filter(|(_, e)| !e.is_live())
+            .map(|(k, _)| k.clone())
+            .collect();
+        crate::writer::reap_writers_only(&self.writers, finished);
+        publish_lane_gauge(&self.writers);
+    }
+
+    /// Signal every lane to exit and empty the map (the agent's shutdown sweep).
+    pub fn close_all(&self) {
+        let guard = self.writers.pin();
+        let keys: Vec<NodeId> = guard.iter()
+            .map(|(k, v)| { let _ = v.peer_shutdown.send(true); k.clone() })
+            .collect();
+        for key in keys { guard.remove(&key); }
+        drop(guard);
+        publish_lane_gauge(&self.writers);
+    }
+
+    /// Lanes whose writer is live (`SystemStats::control_lanes_open`).
+    pub fn open_count(&self) -> usize {
+        self.writers.pin().iter().filter(|(_, e)| e.is_live()).count()
+    }
+}
+
+/// `gossip_control_lanes_connected`: the live lane writers — published where the lane map changes,
+/// apart from `gossip_peers_connected`, which counts data writers only (M3).
+pub fn publish_lane_gauge(writers: &papaya::HashMap<NodeId, WriterEntry>) {
+    #[cfg(feature = "metrics")]
+    {
+        let live = writers.pin().iter().filter(|(_, e)| e.is_live()).count();
+        metrics::gauge!("gossip_control_lanes_connected").set(live as f64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    let _ = writers;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The set is closed: exactly the kinds the design names, and a test kind only in test builds.
+    #[test]
+    fn the_control_kinds_are_the_closed_set() {
+        assert_eq!(CONTROL_KINDS, &["sys.call-cancel.v1"]);
+        assert!(is_control_kind("sys.call-cancel.v1"));
+        assert!(!is_control_kind("rpc.result"), "a reply rides the lane only for a control request");
+        assert!(!is_control_kind("sys.replica-sync.v1"));
+        assert!(may_carry("rpc.result", "sys.call-cancel.v1"));
+        assert!(may_carry("sys.call-cancel.v1", "sys.call-cancel.v1"));
+        assert!(!may_carry("rpc.result", "mcp.invoke"));
+        assert!(!may_carry("mcp.invoke", "sys.call-cancel.v1"));
+    }
+}

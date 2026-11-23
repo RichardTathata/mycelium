@@ -582,6 +582,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The control lane, the mechanism** (B1, PR 1 of 2; `docs/design/control-lane.md`; `deprecations.md` §126;
+  [feature page](docs/features/signal-mesh.md)). A second connection per peer, beside the data connection, with its own
+  writer, its own 64-frame channel and its own reader at the receiver, for the closed set
+  `mycelium_core::control_lane::CONTROL_KINDS` (`sys.call-cancel.v1` and its reply). `ops::emit_signal_control` encodes
+  a frame once and sends it by the shared path exactly as `emit_signal` does, and offers the same bytes to the lane; the
+  receiver's seen-set drops the second copy. A lane opens only while the peer's data writer is connected (or there is
+  none), yields within 1 s when the data writer loses its socket, and after a failed connect is not tried for 300 s; a
+  relay never puts a received frame on one. At the receiver, a control kind's quorum-evidence append leaves the
+  connection reader. `GossipConfig::control_lane` (default `true`, `GOSSIP_CONTROL_LANE`), nine `SystemStats` fields,
+  `gossip_control_lane_*` metrics and the gauge `gossip_control_lanes_connected` (never in `gossip_peers_connected`).
+  A control kind's request refused as a caller-envelope replay is counted in `control_late_duplicates`, not
+  `caller_envelopes_replayed`. **No kind rides the lane at this release**: B1's second PR moves the cancel-forward onto
+  it. A spike on #824 + #826 passed its gate first: the mints flood test kept I4's bound 1 in 20 of 20 debug and 10 of
+  10 release runs with a lane, against 4 of 10 debug without. *Check:* a `max_connections_per_source` cap allows 2 per
+  node behind one address, or those nodes set `control_lane = false`.
 - **CA succession: the old CA's commitment, a node's pin of it, and the kept-anchor journal's compaction**
   (identity-and-lifecycle I2, PR 2b-1 of 7; `deprecations.md` §120; [feature page](docs/features/node-identity.md)).
   `mycelium tls commit --ca-dir <dir> --successor <dir>` has the fleet CA mint its successor (the same fleet, the next

@@ -54,6 +54,8 @@ fn apply(ctx: &TaskCtx, auth: &MembershipAuthorities, writers: &Writers, signed:
     std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
     ctx.peers.pin().remove(node);
     writers.pin().remove(node);
+    // B1, M3: and its control lane, signalled to exit — a lane is an mTLS connection to the removed member.
+    ctx.control_lane.evict(node);
     tracing::warn!(%node, reason = %signed.removal.reason, "membership: member removed");
 
     if publish && let Ok(bytes) = serde_json::to_vec(signed) {

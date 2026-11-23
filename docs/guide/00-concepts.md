@@ -493,6 +493,7 @@ runtime facts it does not read ([`wire_check.rs`](../../src/wire_check.rs)).
 | <a id="demand"></a>Demand | native | requirements with no provider — the provisioning trigger | `provisioning` |
 | <a id="signal"></a>Signal | native | ephemeral scoped event (Layer II) | `mailbox_llm` |
 | <a id="boundary"></a>Boundary | native | a node's receptor set — decides if it *acts* on a signal | `03-signals.md` |
+| <a id="control-lane"></a>Control lane | native | a second connection per peer carrying a copy of each frame of a closed set of control kinds, so it never waits behind gossip (B1) | `docs/design/control-lane.md` |
 | <a id="mailbox"></a>Mailbox | native | durable, HLC-ordered event delivery on KV | `mailbox_llm` |
 | <a id="opacity"></a>Opacity / pheromone | native | self-written `sys/load/` state others route on | `stigmergy` |
 | <a id="group"></a>Group (emergent) | native | nodes self-join by capability filter | `02-capabilities.md` |

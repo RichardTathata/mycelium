@@ -248,6 +248,16 @@ frame of the mesh. It is not scope admission and not conditional forwarding — 
 still forwards unconditionally whatever its scope — and, like #162, **do not cite it as precedent**
 for dropping a frame on its scope or its contents.
 
+**The control lane is an extra copy, not a carve-out (B1, 2026-11-22).** A frame of the closed set
+`CONTROL_KINDS` (`mycelium-core/src/control_lane.rs`) is sent by `ops::emit_signal_control`: the shared copy takes
+exactly the path above (shard, direct route or flood), and the **same encoded bytes** — the same nonce — are also
+offered to a second connection to the frame's target. The receiver's node-wide seen-set drops whichever copy is
+second, before delivery and before relay. Nothing is dropped or routed differently on the shared path, so forwarding
+stays unconditional; a lane that is down, full or refused costs only the speed-up. **A relay never puts a received
+frame on a lane** (D7): the receive path forwards through the shard only. Do not cite the lane as precedent for
+taking a frame *off* the shared path — that would be a carve-out, and it is the one thing the design refused
+(`docs/design/control-lane.md` D3).
+
 **Flood-relay is correct but slow for RPC — pin RPC-heavy pairs.** The direct-send path only
 fires for a peer in the *forwarding-target set*, and that set **deliberately de-pins non-active
 peers** (seed-scalability, WS-B M4: avoid O(N) pinning on shared seeds — `src/agent/tasks.rs`,

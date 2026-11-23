@@ -123,6 +123,9 @@ pub struct SwimState {
     /// ([`SwimState::set_removed`]). A removed member is never probed, relayed for, or taken back
     /// into `peers` by SWIM (#801's review, F2); unset (an embed without removal) removes no one.
     removed: std::sync::OnceLock<Arc<crate::removal::RemovedSet>>,
+    /// The node's control lanes (B1), set once by the agent before the tasks start
+    /// ([`SwimState::set_control_lane`]): a member confirmed `Dead` loses its lane with its data writer.
+    control_lane: std::sync::OnceLock<Arc<crate::control_lane::ControlLane>>,
     /// SWIM datagrams and membership facts refused because they name a removed member
     /// ([`SwimState::removed_refused`]).
     removed_refused: AtomicU64,
@@ -158,6 +161,7 @@ impl SwimState {
             gossip_fanout,
             max_active_connections,
             removed: std::sync::OnceLock::new(),
+            control_lane: std::sync::OnceLock::new(),
             removed_refused: AtomicU64::new(0),
             #[cfg(test)]
             test_before_insert: std::sync::OnceLock::new(),
@@ -168,6 +172,12 @@ impl SwimState {
     /// and prober start; a second call is ignored.
     pub fn set_removed(&self, removed: Arc<crate::removal::RemovedSet>) {
         let _ = self.removed.set(removed);
+    }
+
+    /// Hand SWIM the node's control lanes (B1). Call once, before the listener and prober start; a
+    /// second call is ignored.
+    pub fn set_control_lane(&self, lane: Arc<crate::control_lane::ControlLane>) {
+        let _ = self.control_lane.set(lane);
     }
 
     /// How many SWIM datagrams from, and membership facts naming, a removed member were refused.
@@ -276,6 +286,9 @@ impl SwimState {
             ApplyEffect::BecameDead(node) => {
                 self.peers.pin().remove(&node);
                 evict_peer_writer(&self.peer_writers, &node);
+                if let Some(l) = self.control_lane.get() {
+                    l.evict(&node);
+                }
             }
             ApplyEffect::None | ApplyEffect::RefutedSelf(_) => {}
         }

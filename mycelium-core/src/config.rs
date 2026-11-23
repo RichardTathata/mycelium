@@ -1220,7 +1220,25 @@ pub struct GossipConfig {
     /// It keys the **exact** address, so an IPv6 host varying its low 64 bits counts as many sources.
     /// `0` (the default) = no cap: a NAT or a host running several nodes shares one address.
     /// Env: `GOSSIP_MAX_CONNECTIONS_PER_SOURCE`.
+    ///
+    /// **With the control lane** ([`control_lane`](Self::control_lane), on by default since 2.41) a peer
+    /// may hold **two** connections to this node while control traffic flows — its data connection and
+    /// its lane. A cap here must allow 2 per node behind one source address, or those peers set
+    /// `control_lane = false`: the cap is on the receiver and the switch on the sender. Under a cap that
+    /// is too low a peer's lane is refused (and not tried again for 300 s) and its control frames go by
+    /// the shared path only; a lane never keeps a data reconnect out (it opens only while the data writer
+    /// is connected, and yields within 1 s when it is not).
     pub max_connections_per_source: usize,
+    /// **The control lane** (B1, `docs/design/control-lane.md`): a second connection per peer, opened
+    /// lazily and idle-evicted like a data writer, that carries a copy of each frame of the closed set of
+    /// control kinds (`mycelium_core::control_lane::CONTROL_KINDS`: `sys.call-cancel.v1` and its reply),
+    /// so a control frame never waits behind gossip in this node's writer or the peer's connection reader.
+    /// The copy is additive — every frame also goes by the shared path — so `false` loses only the
+    /// speed-up. `true` (the default) costs one more inbound connection at a peer, against its
+    /// `max_connections` and `max_connections_per_source`, while control traffic flows. A switch on the
+    /// **sender**; a receiver serves a lane like any connection. Env: `GOSSIP_CONTROL_LANE`
+    /// (`true`/`false`/`1`/`0`).
+    pub control_lane: bool,
     /// Depth of each per-peer outbound MPSC channel (a ring buffer, not a semaphore).
     /// **When full, gossip frames are silently dropped** — the failure is indistinguishable
     /// from network packet loss unless `system_stats().dropped_frames` is monitored.
@@ -2350,6 +2368,7 @@ impl Default for GossipConfig {
             default_ttl: 5,
             max_connections: 1024,
             max_connections_per_source: 0,
+            control_lane: true,
             writer_channel_depth: 1024,
             max_forwarding_peers: i64::MAX as usize,
             reconnect_backoff_secs: 5,
@@ -2586,6 +2605,12 @@ impl GossipConfig {
     ///
     /// Called automatically by `GossipAgent::start` and [`load_from_file`](Self::load_from_file).
     /// Call manually after mutating fields directly to catch errors early.
+    ///
+    /// **Not checked here, across nodes:** `max_connections_per_source` must allow **2 per node** behind
+    /// one source address while those nodes run with `control_lane = true` (the default) — the cap is
+    /// read on the receiver, the switch on the sender, so no single node's configuration can refuse the
+    /// pair. A cap of 1 (or N for N nodes behind one NAT) refuses their lanes: their control frames go by
+    /// the shared path only, counted in `control_lane_connect_failed`.
     pub fn validate(&self) -> Result<(), GossipError> {
         // Identity-and-lifecycle I5: a node that verifies exchanged tokens names the client it accepts, and bounds their
         // lifetime within the ceiling.
@@ -3246,6 +3271,16 @@ impl GossipConfig {
         }
         if let Ok(v) = env::var("GOSSIP_FANOUT") {
             self.gossip_fanout = v.parse().map_err(GossipError::Parse)?;
+        }
+        if let Ok(v) = env::var("GOSSIP_CONTROL_LANE") {
+            self.control_lane = match v.as_str() {
+                "true" | "1" => true,
+                "false" | "0" => false,
+                _ => return Err(GossipError::InvalidField {
+                    field:  "GOSSIP_CONTROL_LANE",
+                    reason: "must be true/false/1/0".into(),
+                }),
+            };
         }
         if let Ok(v) = env::var("GOSSIP_SWIM_FAILURE_DETECTOR") {
             self.swim_failure_detector = match v.as_str() {

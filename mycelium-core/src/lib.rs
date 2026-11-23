@@ -18,6 +18,7 @@ pub mod config;
 pub mod serde_fixint;
 pub mod connection;
 pub mod context;
+pub mod control_lane;
 pub mod error;
 pub mod framing;
 pub mod hlc;

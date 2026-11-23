@@ -154,6 +154,17 @@ rather than a trace misread. Forwards and pings get *separate* stream families e
 a channel, because they run in two different tasks and the interleaving of two tasks on one channel
 is itself nondeterministic; one sequence each is what lets each replay independently.
 
+**The control lane's streams (B1, 2026-11-22, `docs/design/control-lane.md` §4.4).** A control lane is one more peer
+writer: its sends go through `chan_try_send` on `writer/control/{peer}`, so a recording holds each lane's verdicts
+apart from the data writer's (`forward/…`, `ping/…`), and its yield tick sleeps through the timer seam on
+`writer/control-yield`. Its `run_peer_writer` reuses the data writer's sites (the `jitter` draw, `mono_now_ns`), so the
+gate's baseline row for `writer.rs` does not move. The name is formatted per control frame — a cold path, at most 64
+in flight per peer — not cached as the gossip streams' are. Two sockets to one peer are real network timing, which is
+outside the kernel by this inventory, so replay needs nothing new. **Checked, not assumed:** the two reader tasks at
+the receiver deliver into one stream, `signal/handler`, which every connection already shares — so the order of two
+readers' deliveries is the same class of interleaving as two peers' today, and the recorder asserts no order per
+connection. No checked-in recording contains a control frame.
+
 **The seam's stream argument is eager, so a name is never formatted per event.** `chan_try_send`
 takes `&str`, and the argument is evaluated whether or not a kernel is installed — so a `format!` at
 a call site costs an allocation *in production builds*. Shard names come from a static table

@@ -1114,6 +1114,8 @@ impl GossipAgent {
         // Closure plan C5 on the UDP path: SWIM never probes, relays for or re-admits a removed
         // member (#801's review, F2).
         state.set_removed(Arc::clone(&self.task_ctx.removed));
+        // B1, M3: a member SWIM confirms dead loses its control lane with its data writer.
+        state.set_control_lane(Arc::clone(&self.task_ctx.control_lane));
         let probe_timeout = Duration::from_millis(self.config.swim_probe_timeout_ms);
 
         self.spawn_task(mycelium_core::swim::run_swim_listener(
@@ -1142,6 +1144,7 @@ impl GossipAgent {
             bootstrap_peers: Arc::clone(&self.bootstrap_peers),
             peers:           Arc::clone(&self.peers),
             peer_writers:    Arc::clone(&self.peer_writers),
+            control_lane:    Arc::clone(&self.task_ctx.control_lane),
             peer_list_tx:    self.peer_list_tx.clone(),
             hlc:             Arc::clone(&self.task_ctx.hlc),
             kv_state:        Arc::clone(&self.kv_state),
@@ -1174,6 +1177,7 @@ impl GossipAgent {
             live_entries:    Arc::clone(&self.live_entries),
             seen:            Arc::clone(&self.task_ctx.seen),
             peer_writers:    Arc::clone(&self.peer_writers),
+            control_lane:    Arc::clone(&self.task_ctx.control_lane),
             signal_boundary: Arc::clone(&self.task_ctx.signal_boundary),
             interval_secs:      self.config.health_check_interval_secs,
             default_ttl:        self.config.default_ttl,
@@ -1522,6 +1526,9 @@ impl GossipAgent {
                 .collect();
             for key in keys { guard.remove(&key); }
         }
+        // …and every control lane (B1, M3). Their frames are counted in the outbound count like the data
+        // writers', so the flush above already waited for them.
+        self.task_ctx.control_lane.close_all();
         // Drain the JoinSet. Swap it out first so the std::sync::Mutex is not held
         // across any await point (clippy::await_holding_lock). `owned` lives in the
         // *outer* scope (the drain future only borrows it): if the timeout cancels the
