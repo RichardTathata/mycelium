@@ -790,6 +790,41 @@ pub struct SystemStats {
     /// during the reconnect backoff. Rising for one peer means it is not reading.
     pub outbound_stalls: u64,
 
+    /// Control lanes (B1, `docs/design/control-lane.md`) whose writer is live now — a second connection
+    /// per peer for the closed set of control kinds. **Not** in
+    /// [`cached_connections`](Self::cached_connections) or `gossip_peers_connected`, which count data
+    /// writers; the lanes' gauge is `gossip_control_lanes_connected`.
+    pub control_lanes_open: usize,
+    /// Cumulative control-frame copies that entered a lane (B1). Each frame also went by the shared path.
+    pub control_lane_sent: u64,
+    /// Cumulative copies refused because the lane's channel (64 per peer) was full; the shared copy went.
+    pub control_lane_full: u64,
+    /// Cumulative lane connects that failed — under TLS, a peer's `max_connections_per_source` refusing
+    /// the second connection shows here, a handshake refused after the TCP connect, and starts a 300 s
+    /// backoff for that peer's lane; a TCP connect that fails (the peer down), or a handshake that times
+    /// out, waits only the reconnect backoff. **Plaintext:**
+    /// an accept-and-close refusal is not seen as a failed connect; the loss shows in
+    /// [`control_lane_dropped`](Self::control_lane_dropped).
+    pub control_lane_connect_failed: u64,
+    /// Cumulative lanes closed because the peer's data writer is not connected. Under a per-source cap of
+    /// 1 a lane can cost each new data writer one refused connect and one reconnect backoff (at
+    /// `reconnect_backoff_secs = 0`, retries within the 50 ms yield tick).
+    pub control_lane_yielded: u64,
+    /// Cumulative copies a lane took and did not write (a failed connect or write, a yield). Not in
+    /// [`dropped_frames`](Self::dropped_frames); the shared copy of each was sent.
+    pub control_lane_dropped: u64,
+    /// Cumulative copies refused before a lane: a kind outside the closed set, or over 64 KiB.
+    pub control_lane_refused: u64,
+    /// Cumulative requests of a control kind refused as replays by the envelope's replay window — the
+    /// late twin of a lane's dual send, arriving after the seen-set forgot its nonce. Counted here
+    /// **instead of** `GET /stats` `caller_envelopes_replayed`, so that counter
+    /// stays a replay signal; a genuine replay of a control request lands here too (harmless: a repeat
+    /// is answered from what the provider holds).
+    pub control_late_duplicates: u64,
+    /// How long the most recent successful lane connect (TCP + TLS handshake) took, in milliseconds; `0`
+    /// before the first. The distribution is the `gossip_control_lane_connect_ms` histogram.
+    pub control_lane_last_connect_ms: u64,
+
     /// Cumulative `StateRequest`s this node did not answer because its anti-entropy reply to the
     /// same peer was still in flight — queued for, or being written to, that peer (row B). At most
     /// one reply per peer is in flight. **When the requester asks again depends on its failure
@@ -1635,6 +1670,8 @@ impl GossipAgent {
         let gossip_txs = mycelium_core::outbound::GossipTxs::new(gossip_txs_vec, mycelium_core::outbound::Unsent::default());
         // Last time each peer was heard from, in monotonic nanoseconds from the clock seam.
         let peers_arc: Arc<papaya::HashMap<NodeId, std::time::Instant>> = Arc::new(papaya::HashMap::new());
+        // The data writers, shared with the control lanes (B1), which read them for their rules.
+        let peer_writers_arc: Arc<papaya::HashMap<NodeId, WriterEntry>> = Arc::new(papaya::HashMap::new());
         let config_arc = Arc::new(config.clone());
         // RPC/bulk reply correlation map. Created here so the core-level reply
         // interceptor can capture it; the same Arc is shared into `TaskCtx`
@@ -1665,6 +1702,9 @@ impl GossipAgent {
             key_standing: Arc::new(mycelium_core::removal::KeyStanding::default()),
             identity_anchor_conflicts: Arc::new(AtomicU64::new(0)),
             peers: Arc::clone(&peers_arc),
+            control_lane: Arc::new(mycelium_core::control_lane::ControlLane::new(
+                config.control_lane, Arc::clone(&peer_writers_arc),
+            )),
             rate_throttle: Arc::new(papaya::HashMap::new()),
             reorder_buf: if config.signal_ordered_delivery {
                 Some(Arc::new(std::sync::Mutex::new(
@@ -1911,7 +1951,7 @@ impl GossipAgent {
             bootstrap_peers,
             peer_list_tx,
             gossip_rxs: std::sync::Mutex::new(Some(gossip_rxs_inner)),
-            peer_writers: Arc::new(papaya::HashMap::new()),
+            peer_writers: peer_writers_arc,
             pinned_peers: Arc::new(papaya::HashMap::new()),
             live_entries: Arc::new(AtomicUsize::new(0)),
             state: AtomicU8::new(AgentState::Idle as u8),

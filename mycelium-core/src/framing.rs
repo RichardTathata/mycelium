@@ -268,8 +268,22 @@ pub fn dispatch_gossip_try_send(
     hint:        ForwardHint,
     dropped:     &AtomicU64,
 ) -> bool {
-    let shard = shard_for_key(wire_msg_key(&msg), gossip_txs.len());
     let buf = crate::codec::wire_to_bytes(&msg);
+    dispatch_encoded_try_send(gossip_txs, wire_msg_key(&msg), buf, sender_hash, hint, dropped)
+}
+
+/// [`dispatch_gossip_try_send`] for a frame already encoded, routed by its shard key (a signal's kind, a
+/// write's key) — so a caller that needs the encoded bytes too (the control lane's dual send,
+/// `ops::emit_signal_control`) encodes once and hands the same bytes to both paths.
+pub fn dispatch_encoded_try_send(
+    gossip_txs:  &crate::outbound::GossipTxs,
+    shard_key:   &str,
+    buf:         Bytes,
+    sender_hash: u64,
+    hint:        ForwardHint,
+    dropped:     &AtomicU64,
+) -> bool {
+    let shard = shard_for_key(shard_key, gossip_txs.len());
     // Channel-readiness seam (item 6 PR 3): whether this shard was full is a kernel decision, so a
     // recorded run replays the drop rather than hoping to provoke it again by timing. Counted
     // (`outbound`), so a graceful shutdown can wait for it to reach the wire.

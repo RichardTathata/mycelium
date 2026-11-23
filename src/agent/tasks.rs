@@ -542,6 +542,17 @@ fn reconcile_active_targets(
     (added, removed)
 }
 
+/// Evict `peer`'s data writer **and its control lane** (B1, M3): every site that stops writing to a
+/// peer closes both connections.
+fn evict_links(
+    peer_writers: &papaya::HashMap<NodeId, WriterEntry>,
+    control_lane: &mycelium_core::control_lane::ControlLane,
+    peer:         &NodeId,
+) {
+    evict_peer_writer(peer_writers, peer);
+    control_lane.evict(peer);
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Context for the health monitor (spawned once) — same idiom as `GossipShardContext`.
 pub(super) struct HealthMonitorContext {
@@ -550,6 +561,8 @@ pub(super) struct HealthMonitorContext {
     pub(super) bootstrap_peers: Arc<[NodeId]>,
     pub(super) peers:           Arc<papaya::HashMap<NodeId, std::time::Instant>>,
     pub(super) peer_writers:    Arc<papaya::HashMap<NodeId, WriterEntry>>,
+    /// The control lanes (B1): every data writer this monitor evicts loses its lane too (M3).
+    pub(super) control_lane:    Arc<mycelium_core::control_lane::ControlLane>,
     pub(super) peer_list_tx:    watch::Sender<Arc<[NodeId]>>,
     // shared substrate state
     pub(super) hlc:             Arc<crate::hlc::Hlc>,
@@ -579,7 +592,7 @@ pub(super) struct HealthMonitorContext {
 
 pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
     let HealthMonitorContext {
-        node_id, bootstrap_peers, peers, peer_writers, peer_list_tx, hlc, kv_state, hash_acc,
+        node_id, bootstrap_peers, peers, peer_writers, control_lane, peer_list_tx, hlc, kv_state, hash_acc,
         dropped_frames, unsent, signal_handlers, interval_secs, backoff, idle_timeout,
         peer_eviction_intervals, ping_peer_sample_size, max_active_connections, gossip_fanout,
         swim_enabled, health_check_max_jitter, signal_window_secs, shutdown_tx, hot,
@@ -769,7 +782,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                         if cached_ping_targets.remove(b) {
                             ping_sender_cache.remove(b);
                             last_anti_entropy.remove(b);
-                            evict_peer_writer(&peer_writers, b);
+                            evict_links(&peer_writers, &control_lane, b);
                         }
                     }
                 }
@@ -789,7 +802,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                     cached_ping_targets.remove(&v);
                     ping_sender_cache.remove(&v);
                     last_anti_entropy.remove(&v);
-                    evict_peer_writer(&peer_writers, &v);
+                    evict_links(&peer_writers, &control_lane, &v);
                 }
                 // Reconcile toward `k`. Once de-pinning, exclude the bootstrap from the candidate
                 // POOL too — not just the active set — otherwise reconcile re-adds it at `k/known`,
@@ -854,7 +867,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                 }
                 for peer in &removed {
                     ping_sender_cache.remove(peer);
-                    evict_peer_writer(&peer_writers, peer);
+                    evict_links(&peer_writers, &control_lane, peer);
                 }
                 // TCP heartbeat ping. With SWIM (M5 cutover) liveness + discovery ride UDP
                 // probing/gossip, so the TCP ping is gone: forwarding writers stay warm via
@@ -936,7 +949,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                         );
                         if removed {
                             warn!("Peer {} timed out, removing", id);
-                            evict_peer_writer(&peer_writers, id);
+                            evict_links(&peer_writers, &control_lane, id);
                         }
                     }
                 }
@@ -985,6 +998,8 @@ pub(super) struct GcContext {
     pub(super) live_entries:       Arc<AtomicUsize>,
     pub(super) seen:               Arc<ShardedSeen>,
     pub(super) peer_writers:       Arc<papaya::HashMap<NodeId, WriterEntry>>,
+    /// The control lanes (B1): reaped at the same sweep, their own gauge published (M3).
+    pub(super) control_lane:       Arc<mycelium_core::control_lane::ControlLane>,
     pub(super) signal_boundary:    Arc<parking_lot::RwLock<crate::signal::Boundary>>,
     // policy knobs
     pub(super) interval_secs:      u64,
@@ -999,7 +1014,7 @@ pub(super) struct GcContext {
 
 pub(super) async fn run_gc_task(ctx: GcContext) {
     let GcContext {
-        node_id, kv_state, live_entries, seen, peer_writers, signal_boundary, interval_secs,
+        node_id, kv_state, live_entries, seen, peer_writers, control_lane, signal_boundary, interval_secs,
         default_ttl, propagation_window, max_seen_entries, intern_max_keys, shutdown_tx,
         gc_alive,
     } = ctx;
@@ -1152,6 +1167,8 @@ pub(super) async fn run_gc_task(ctx: GcContext) {
                     // writer between the collect above and here is not blind-removed (audit
                     // 2026-07-15 pass 2). peer_writers was the one blind `remove` in this GC pass.
                     reap_finished_writers(&peer_writers, finished);
+                    // B1, M3: the lanes' finished writers too; their gauge is not the peers'.
+                    control_lane.reap();
                 }
 
                 // Boundary reconcile — catch-all for updates missed by the push-based path.

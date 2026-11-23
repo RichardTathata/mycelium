@@ -109,6 +109,16 @@ impl Held {
         self.n += 1;
     }
 
+    /// How many frames are held.
+    pub fn len(&self) -> usize {
+        self.n
+    }
+
+    /// Whether no frame is held.
+    pub fn is_empty(&self) -> bool {
+        self.n == 0
+    }
+
     /// Release every frame held now.
     pub fn release(&mut self) {
         self.unsent.sub(std::mem::take(&mut self.n));

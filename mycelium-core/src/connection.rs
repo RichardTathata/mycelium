@@ -1011,7 +1011,18 @@ pub async fn handle_connection(
                             let upd = make_gossip_update(&node_id, max_ttl, q_key, q_val, false, &hlc);
                             apply_and_notify(&kv_state, &upd); // apply, then persist
                             if let Some(ref wal) = wal {
-                                let _ = wal.append(sync_entry_from(&upd)).await;
+                                if crate::control_lane::is_control_kind(&sig.kind) {
+                                    // B1, M4: a control kind's evidence append is handed to the WAL off this
+                                    // reader — the apply above stays first — so the next control frame on
+                                    // this connection does not wait, under `flush`, FIFO behind every record
+                                    // any reader queued on the shared WAL channel. Bounded by the evidence
+                                    // rate limit (one per kind and sender per second). Not `append_try`: a
+                                    // full queue would drop the record and count a dropped append.
+                                    let (wal, entry) = (Arc::clone(wal), sync_entry_from(&upd));
+                                    tokio::spawn(async move { let _ = wal.append(entry).await; });
+                                } else {
+                                    let _ = wal.append(sync_entry_from(&upd)).await;
+                                }
                             }
                             // Signed under `[tls]` like every local write (#611's review, finding 2).
                             dispatch_gossip_try_send(

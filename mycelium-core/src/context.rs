@@ -218,6 +218,11 @@ pub struct CoreCtx {
     /// bought nothing.
     pub peers: Arc<papaya::HashMap<NodeId, std::time::Instant>>,
 
+    /// **The control lanes** (B1, [`crate::control_lane`]): a second connection per peer for the closed
+    /// set of control kinds, its writer map beside the agent's `peer_writers` (which it reads for its
+    /// rules), and its counters. Off (`GossipConfig::control_lane = false`) it carries nothing.
+    pub control_lane: Arc<crate::control_lane::ControlLane>,
+
     /// **M7 distributed rate-limiting** (WS-C): per-sender locally-decided throttle budget (fps).
     /// Empty unless `rate_observation_enabled`. The rate-decider task sets a fair-share budget for a
     /// sender whose *aggregate* observed rate (summed across all observers via `sys/rate/`) crosses

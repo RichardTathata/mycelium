@@ -78,6 +78,7 @@ the notice.
 | 55 | a fleet-scoped limit (`HistoryScope::FleetConsensus` / `FleetTally`) over more than 1 024 seats, or over a window of zero or more than 24 hours | 2.37.0 (row K2's bounds) | a per-point limit, or a fleet limit within `MAX_FLEET_SEATS` / `MAX_FLEET_WINDOW_MS`; check a policy at load with `check_fleet_bounds` or `FleetCounter::try_new` | **No** — it builds, and every request its rule covers decides `Indeterminate`; **yes** for a `ContractCase` or `Report` literal (a new field) ([§55](#55-a-fleet-limit-is-bounded-at-most-1-024-seats-a-window-of-at-most-24-hours-2370-post-360-plan-row-k2s-bounds)) |
 | 56 | a `FleetTally` rule reading a member's entries this node holds without its heartbeat as zero, or counting a forged (future) time as a permit | 2.37.0 (row K2, #656) | nothing to migrate: such a member is unknown coverage while its entry is inside the window plus the staleness and drift bounds | **No** — a tally rule can decide `Indeterminate` where it admitted before, for at most that window ([§56](#56-a-members-tally-entries-without-its-heartbeat-are-unknown-coverage-not-zero-2370-post-360-plan-row-k2)) |
 | 109 | a struct literal of `GossipConfig`, `TlsConfig`, `GatewayTlsConfig` or `OidcConfig` outside `mycelium-core`, with or without `..Default::default()` | 2.41.0 (critique plan CR12) | `let mut c = X::default();` and assign the fields | **Yes** — `E0639`; a field added later then breaks nothing ([§109](#109-gossipconfig-tlsconfig-gatewaytlsconfig-and-oidcconfig-are-non_exhaustive-build-one-with-default-and-assignment-2410-critique-plan-row-cr12)) |
+| 126 | a `SystemStats`, `CoreCtx` or `WriterEntry` literal; a direct `run_peer_writer` call; `max_connections_per_source` at 1 per address for nodes running the control lane | unreleased (B1, PR 1) | add the new fields and arguments; a per-source cap of at least 2 per node, or `control_lane = false` | **Yes** for the literals and the call; **no** for the cap — a refused lane falls back to the shared path, counted ([§126](#126-a-control-lane-a-second-connection-per-peer-for-the-closed-set-of-control-kinds-behind-control_lane-on-by-default-max_connections_per_source-must-allow-two-per-node-behind-one-address-unreleased-b1-pr-1)) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -5688,3 +5689,87 @@ call; the doors' `NotDurable(String)` is unchanged. A caller that read `NotDurab
 *the call keeps running* reads either now as *the call may have been stopped, and the stop is not on disk*: call the cancel again — the
 revoke is idempotent, writes the same checkpoint once the disk takes it, and forwards it again. A caller that got no
 answer retries the same way.
+
+## 126. A control lane: a second connection per peer for the closed set of control kinds, behind `control_lane` (on by default); `max_connections_per_source` must allow two per node behind one address (unreleased, B1, PR 1)
+
+*Numbered 126: §125 is #824's (WAL group commit), built in parallel.*
+
+**The mechanism only: no frame kind rides the lane at this release.** B1's second PR moves the cancel-forward
+(`sys.call-cancel.v1`) and its reply onto it; until then a node opens no lane, and every frame travels exactly as
+before. This entry is written now because the configuration, the counters and the API shapes land now
+(`docs/design/control-lane.md`).
+
+**What it is.** A peer's **control lane** is a second outbound connection to it (TCP, and mTLS under `[tls]`), beside the
+data connection, with its own writer task, its own channel (64 frames) and — at the receiver — its own connection
+reader. It carries a **copy** of each frame of the closed set `mycelium_core::control_lane::CONTROL_KINDS` (one kind,
+`sys.call-cancel.v1`, and its `rpc.result` reply); the same encoded frame also goes by the shared path, and the
+receiver's seen-set drops whichever copy is second. So a control frame no longer waits behind gossip in the sender's
+writer or in the receiver's reader, and a lane that is down, full or refused loses only the speed-up. Forwarding is
+unchanged: a relay never puts a frame it received on a lane.
+
+**Connection counts, once a kind uses the lane (B1's second PR).** While control traffic flows to a peer, this node
+holds **two** connections to it; the lane is opened on the first control frame and idle-evicted after
+`writer_idle_timeout_secs` (30 s) like a data writer. At the receiver the lane counts against `max_connections`
+(1 024, one semaphore) and `max_connections_per_source`, and it appears in conntrack and firewall counts. In the worst
+case — a mass revocation from many gateways at once — the lanes double a provider's inbound connections for up to 30 s,
+and a lane can take a permit a new peer's data connection needed. Size `max_connections` for it.
+
+**`max_connections_per_source` (off by default) must allow 2 per node behind one source address**, or those nodes set
+`control_lane = false`. The cap is read on the receiver and the switch on the sender, so no one node's configuration can
+check the pair (`validate()` says so and checks nothing). Under a cap that is too low the lane is refused in its
+handshake: it is not tried again for 300 s, and the node's control frames go by the shared path only, counted in
+`control_lane_connect_failed` (under TLS; over plaintext an accept-and-close refusal is not seen as a failed connect,
+and the loss shows in `control_lane_dropped`). A lane whose TCP connect fails — the peer down or restarting — or whose
+handshake times out waits only the node's reconnect backoff. **The bound a lane puts on a data reconnect:** a lane opens only while the peer's
+data writer is connected (or the node has no data writer to that peer, or only an exited one), and it closes when
+the data writer is not connected (`control_lane_yielded`): at once if a control frame finds it so, otherwise within
+its yield tick — a quarter of `reconnect_backoff_secs`, between 50 ms and 1 s. A refused data writer retries no
+sooner than half its backoff, so under a cap of 1 **each data writer is refused at most once** past a lane opened
+while there was no data writer, and waits one reconnect backoff (jittered — 2.5–7.5 s at the default), dropping its
+frames as any writer in its backoff does. *Once per data writer*, not once ever: a writer that idles out and is
+reaped lets a lane open again, and its successor can be refused once in turn. At `reconnect_backoff_secs = 0` the
+retry is immediate and the bound is the 50 ms tick, not "once". A cap of 2 per node avoids all of it.
+
+**No lane to a removed member.** A control frame toward a member removed under closure plan C5 goes by the shared
+path only (`Removed`): the lane would be a connection of this node's own to it.
+
+**Mixed fleets.** Wire v12 is unchanged: no variant, field or version. An older receiver serves a lane like any
+connection; it keeps waiting, under `flush`, on the quorum-evidence append in the reader, which this release moves off
+the reader for the control kinds. An older sender has no lane.
+
+**Other behaviour that changes at this release, without the lane:**
+- At the receiver, a `sys.call-cancel.v1` request's quorum-evidence append (`sys/quorum/…`) is handed to the WAL from a
+  task of its own, after the apply, instead of being awaited in the connection reader. Other kinds are unchanged.
+- At a provider, a `sys.call-cancel.v1` request refused as a replay of its caller envelope is counted in the new
+  `control_late_duplicates`, **not** in `GET /stats` `caller_envelopes_replayed`, which keeps counting every other
+  kind. That is where the lane's slow twin lands once the cancel rides the lane; a genuine replay of a cancel-forward
+  lands there too, which is harmless — a repeat is answered from what the provider holds.
+
+**New:**
+- `GossipConfig::control_lane: bool`, default `true` (env `GOSSIP_CONTROL_LANE`, `true`/`false`/`1`/`0`).
+- `SystemStats` fields: `control_lanes_open`, `control_lane_sent`, `control_lane_full`, `control_lane_connect_failed`,
+  `control_lane_yielded`, `control_lane_dropped`, `control_lane_refused`, `control_late_duplicates`,
+  `control_lane_last_connect_ms`. `cached_connections`, `connected_peers()` and `peer_drop_counts()` keep counting data
+  writers only.
+- Metrics (feature `metrics`): `gossip_control_lane_{sent,full,connect_failed,yielded,dropped}_total`,
+  `gossip_control_late_duplicates_total`, the histogram `gossip_control_lane_connect_ms` and the gauge
+  `gossip_control_lanes_connected`. `gossip_peers_connected` never counts a lane.
+- `mycelium_core::control_lane` (the closed set, the constants, `ControlLane`, `LaneVerdict`, `ControlSend`) and
+  `mycelium_core::ops::emit_signal_control`, the one function that offers a frame to a lane.
+
+**Will the compiler tell me?** **Yes**, for code that builds these by struct expression or calls them positionally:
+- a `SystemStats` literal (it is not `#[non_exhaustive]`) — add the nine fields;
+- a `mycelium_core::CoreCtx` literal — add `control_lane: Arc::new(ControlLane::new(enabled, peer_writers))`;
+- a `mycelium_core::writer::WriterEntry` literal — add `connected: Arc::default()`;
+- a direct call of `mycelium_core::writer::run_peer_writer` — it takes `connected: Arc<AtomicBool>` and
+  `lane: Option<Arc<ControlLane>>` last (pass `Arc::default(), None` for a data writer); `get_or_spawn_writer` is
+  unchanged.
+
+`GossipConfig` is `#[non_exhaustive]` (§109), so its new field breaks nothing. Code that only uses `GossipAgent` is
+unaffected.
+
+- ***Check:*** `GET /stats` has `control_lanes_open` (and `control_lane_connect_failed` = 0); with a per-source cap, the
+  cap is at least 2 for every source address that runs nodes with `control_lane = true`.
+- **Code:** `mycelium-core/src/control_lane.rs`, `mycelium-core/src/writer.rs` (`run_peer_writer`'s lane role,
+  `claim_or_spawn`), `mycelium-core/src/ops.rs` (`emit_signal_control`), `mycelium-core/src/connection.rs` (the
+  evidence append). Tests: `src/control_lane_tests.rs`.

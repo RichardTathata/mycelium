@@ -229,6 +229,15 @@ impl GossipAgent {
                 self.task_ctx.transport_bounds.per_source_refused.load(Ordering::Relaxed),
             outbound_stalls:
                 self.task_ctx.transport_bounds.outbound_stalls.load(Ordering::Relaxed),
+            control_lanes_open:           self.task_ctx.control_lane.open_count(),
+            control_lane_sent:            self.task_ctx.control_lane.stats.sent.load(Ordering::Relaxed),
+            control_lane_full:            self.task_ctx.control_lane.stats.full.load(Ordering::Relaxed),
+            control_lane_connect_failed:  self.task_ctx.control_lane.stats.connect_failed.load(Ordering::Relaxed),
+            control_lane_yielded:         self.task_ctx.control_lane.stats.yielded.load(Ordering::Relaxed),
+            control_lane_dropped:         self.task_ctx.control_lane.stats.dropped.load(Ordering::Relaxed),
+            control_lane_refused:         self.task_ctx.control_lane.stats.refused.load(Ordering::Relaxed),
+            control_late_duplicates:      self.task_ctx.control_lane.stats.late_duplicates.load(Ordering::Relaxed),
+            control_lane_last_connect_ms: self.task_ctx.control_lane.stats.last_connect_ms.load(Ordering::Relaxed),
             anti_entropy_replies_skipped:
                 self.task_ctx.transport_bounds.anti_entropy_replies_skipped.load(Ordering::Relaxed),
             signal_handler_drops:     self.task_ctx.signal_handlers.handler_drops(),

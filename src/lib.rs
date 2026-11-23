@@ -856,4 +856,7 @@ mod lib_tests;
 mod resource_bounds_tests;
 
 #[cfg(test)]
+mod control_lane_tests;
+
+#[cfg(test)]
 mod swim_oracle_tests;

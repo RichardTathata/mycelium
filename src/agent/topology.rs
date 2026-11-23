@@ -22,7 +22,8 @@ impl GossipAgent {
     /// as opposed to [`peers`](Self::peers), which is what membership *believes*. The two agree
     /// at steady state; the reason both exist is the federation release gate (item 2 PR 9),
     /// which has to prove non-merger from *traces* as well as tables: a foreign node here is one
-    /// bytes actually flowed to, whatever the membership table says.
+    /// bytes actually flowed to, whatever the membership table says. Data writers only: a control lane
+    /// (B1) is not a peer connection here.
     pub fn connected_peers(&self) -> Vec<crate::node_id::NodeId> {
         self.peer_writers.pin().iter().map(|(k, _)| k.clone()).collect()
     }
@@ -73,6 +74,8 @@ impl GossipAgent {
     /// reverts to normal forwarding-target eligibility (flood-relay when not active).
     pub fn disconnect_peer(&self, peer: &crate::node_id::NodeId) {
         self.pinned_peers.pin().remove(peer);
+        // B1, M3: a control lane to the peer closes too (it reopens on the next control frame).
+        self.task_ctx.control_lane.evict(peer);
     }
 
     /// Returns the groups this node has currently joined.
@@ -88,6 +91,9 @@ impl GossipAgent {
     /// Each entry is the total number of gossip frames dropped to that peer due to
     /// reconnect backoff since the peer writer was last spawned. Useful for identifying
     /// slow or unreachable peers that inflate the global `dropped_frames` counter.
+    ///
+    /// Data writers only: a control lane's lost copies are counted apart, in
+    /// `SystemStats::control_lane_dropped` (B1).
     pub fn peer_drop_counts(&self) -> Vec<(crate::node_id::NodeId, u64)> {
         use std::sync::atomic::Ordering;
         self.peer_writers.pin()

@@ -30,6 +30,8 @@ This feature is turned on in code: every node has it, from [`mesh`](../../src/ag
   drop a kind's signals at delivery for a duration — counted, never delivered later — while the sender log and the
   last-signal time still record them, so quorum counting sees them.
 - [`default_ttl`](../reference/configuration.md#default_ttl): how many hops a signal is forwarded.
+- [`control_lane`](../reference/configuration.md#control_lane) (on by default): the [control
+  lane](../guide/00-concepts.md#control-lane), a second connection per peer for a closed set of control kinds (below).
 - `test_signal_two_node_propagation`, in [`src/lib_tests.rs`](../../src/lib_tests.rs).
 
 ## See it work
@@ -65,6 +67,24 @@ does not depend on membership).
   speaks (`boundary.*`, `agent.state`, `artifact.*`, `reason.blob.fetch`) are observable under `mesh:read` and
   sendable under `mesh:write`, each open by a recorded decision, and a kind outside every list is open
   ([rbac.md](../operations/rbac.md)).
+- **The control lane** ([concept](../guide/00-concepts.md#control-lane), `docs/design/control-lane.md`, B1). A frame of
+  the closed set [`CONTROL_KINDS`](../../mycelium-core/src/control_lane.rs) — `sys.call-cancel.v1` and its reply — is
+  sent by [`emit_signal_control`](../../mycelium-core/src/ops.rs): the shared copy takes the path every signal takes,
+  and the same encoded frame (the same nonce) is offered to a second connection to its target, with its own writer,
+  its own 64-frame channel and, at the receiver, its own reader. The receiver's seen-set drops the copy that arrives
+  second. So a control frame does not wait behind gossip in this node's writer or the peer's reader, and a lane that
+  is down, full or refused costs only the speed-up — forwarding stays unconditional, and **a relay never puts a frame
+  it received on a lane**. A lane opens only while the peer's data writer is connected (or none exists), yields
+  within a quarter of the reconnect backoff when the data writer is not connected (so under a per-source cap of 1 it
+  can cost each new data writer one refused connect and one reconnect backoff), is never opened to a removed member
+  or, for a reply, to a peer this node does not know, and after a refused
+  handshake is not tried for 300 s (after a failed TCP connect, only the reconnect backoff); it costs one
+  more inbound connection at the peer, so a [`max_connections_per_source`](../reference/configuration.md#max_connections_per_source)
+  cap must allow 2 per node behind one address ([deprecations §126](../guide/deprecations.md)). Counted in
+  `SystemStats::control_lane_*` and `control_late_duplicates`; never in `cached_connections` or
+  `gossip_peers_connected`. Tests: [`src/control_lane_tests.rs`](../../src/control_lane_tests.rs). **Not built at this
+  release:** any kind on the lane — the mechanism is in place and nothing calls it; the cancel-forward moves onto it in
+  B1's second PR.
 - **Evidence:** the ledger rows
   [one stalled subscriber does not veto its kind, and the signal log is bounded](../operations/what-is-proven.md#silent-slow-stalled-peers-closed-stalled)
   and the [hot-path costs](../operations/what-is-proven.md#hot-path-cost), which give the signal fan-out.

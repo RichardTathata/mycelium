@@ -114,6 +114,66 @@ pub fn emit_signal(
     )
 }
 
+/// [`emit_signal`] for an Individual frame of a **control kind** (B1, [`crate::control_lane`]): the frame
+/// is encoded **once**; that copy goes by the shared path exactly as `emit_signal` sends it, and the
+/// **same bytes** — the same nonce, so the receiver's seen-set drops whichever copy is second — are
+/// offered to the control lane toward `target`.
+///
+/// `frame` says what the frame is: a request (its kind must be a control kind), or the `rpc.result` reply
+/// to a request this node received (that request's kind must be one, and the reply goes to its sender). A
+/// frame that may not ride the lane ([`crate::control_lane::may_carry`]), or is over
+/// [`CONTROL_LANE_MAX_FRAME_BYTES`](crate::control_lane::CONTROL_LANE_MAX_FRAME_BYTES), goes by the
+/// shared path only, counted `refused`. Nothing on the receive path calls this: a relay never puts a
+/// frame it received on a lane (D7).
+pub fn emit_signal_control(
+    ctx:          &CoreCtx,
+    kind:         Arc<str>,
+    target:       crate::node_id::NodeId,
+    payload:      Bytes,
+    frame_of:     crate::control_lane::ControlFrame<'_>,
+) -> crate::control_lane::ControlSend {
+    use crate::control_lane::{LaneVerdict, CONTROL_LANE_MAX_FRAME_BYTES};
+    let nonce = crate::sim_seam::rng_u64_from(NONCE_STREAM, 1);
+    let ts = crate::hlc::physical_ms(ctx.hlc.current()); // C11: dedup TTL, fails closed
+    ctx.seen.mark_and_check(nonce, ts);
+    let scope = SignalScope::Individual(target.clone());
+    let sig = Signal {
+        kind: Arc::clone(&kind), scope: scope.clone(),
+        payload, sender: ctx.node_id.clone(), nonce,
+    };
+    let nonce_claimed = match ctx.reply_interceptor.as_ref() {
+        Some(claim) => claim(&sig),
+        None => false,
+    };
+    if !nonce_claimed {
+        let handler_fill = ctx.signal_handlers.fill_ratio(&kind);
+        let combined = handler_fill.max(crate::framing::gossip_shard_fill(&ctx.gossip_txs));
+        deliver_locally(&ctx.signal_boundary, &ctx.signal_handlers, &sig, combined, ctx.decision_sink());
+    }
+    #[cfg(feature = "metrics")]
+    metrics::counter!("gossip_signals_emitted_total", "scope" => scope_label(&scope)).increment(1);
+    let frame = crate::codec::wire_to_bytes(&WireMessage::Signal {
+        ttl: ctx.default_ttl, nonce, sender: ctx.node_id.clone(), scope: scope.clone(),
+        kind: Arc::clone(&sig.kind), payload: sig.payload, hlc_seq: None,
+    });
+    let shared = crate::framing::dispatch_encoded_try_send(
+        &ctx.gossip_txs, &kind, frame.clone(), ctx.node_id.id_hash(), forward_hint(&scope), &ctx.kv_state.dropped_frames,
+    );
+    let lane = if target == ctx.node_id {
+        // Addressed to this node: delivered above, nothing to carry.
+        LaneVerdict::Unavailable
+    } else if !crate::control_lane::may_carry(&kind, frame_of, &target) || frame.len() > CONTROL_LANE_MAX_FRAME_BYTES {
+        let n = ctx.control_lane.stats.refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n == 0 || (n + 1).is_multiple_of(64) {
+            tracing::warn!(%kind, bytes = frame.len(), refused = n + 1, "a frame the control lane does not carry: sent by the shared path only");
+        }
+        LaneVerdict::Refused
+    } else {
+        ctx.control_lane.send(ctx, &target, frame, matches!(frame_of, crate::control_lane::ControlFrame::ReplyTo(_)))
+    };
+    crate::control_lane::ControlSend { shared, lane }
+}
+
 /// Like [`emit_signal`] but stamps an HLC sequence number for ordered delivery.
 pub fn emit_signal_ordered(
     ctx:     &CoreCtx,

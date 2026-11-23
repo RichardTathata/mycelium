@@ -730,6 +730,8 @@ const CLASSIFIED: &[(&str, Class)] = &[
     ("artifact.size", Class::Open("as artifact.fetch (CR27)")),
     ("artifact.fetch_range", Class::Open("as artifact.fetch (CR27)")),
     ("reason.blob.fetch", Class::Open("a tap shows the blob ids asked for, never a reply; a call fetches a blob by an id the caller knows (CR27)")),
+    // B1: the control lane's test-only kind, admitted to the lane under `cfg(test / test-support)` only.
+    ("test.control-lane.v1", Class::Open("a test-only kind (`TEST_CONTROL_KIND`); a shipped build has no such kind, and on the lane admits only `CONTROL_KINDS`")),
     // Not a signal kind: `opacity.rs`'s name for the persistence load mark.
     ("persistence", Class::Open("not a signal kind: the opacity governor's label for its persistence mark")),
 ];

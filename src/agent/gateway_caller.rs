@@ -1691,13 +1691,22 @@ pub(crate) fn verify_received(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<
     // M1 — the exchanged token's `exp` was read against the system clock and its window pruned against the HLC, which a
     // peer can push ahead of it, so a token in its last moments was forgotten as it was admitted).
     let now_ms = ctx.hlc.decision_now_ms();
-    let verified = verify_at(ctx, req, now_ms).inspect_err(|e| {
-        if e.unanswered() {
+    // B1, M2: a control kind's request is sent twice (the control lane and the shared path, one encoded
+    // frame), and the shared twin can arrive after the seen-set trimmed its nonce. Its `Replayed` is
+    // counted as a late duplicate, so `caller_envelopes_replayed` stays a replay signal.
+    let control = mycelium_core::control_lane::is_control_kind(req.kind());
+    let count = |e: &CallerError| {
+        if control && matches!(e, CallerError::Replayed { .. }) {
+            ctx.control_lane.stats.late_duplicates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            #[cfg(feature = "metrics")]
+            metrics::counter!("gossip_control_late_duplicates_total").increment(1);
+        } else if e.unanswered() {
             ctx.caller_replay.count_replay();
         }
-    })?;
+    };
+    let verified = verify_at(ctx, req, now_ms).inspect_err(count)?;
     if let Some(c) = &verified {
-        ctx.caller_replay.admit(c, now_ms, ctx.config.max_clock_drift_ms)?;
+        ctx.caller_replay.admit_uncounted(c, now_ms, ctx.config.max_clock_drift_ms).inspect_err(count)?;
         // Identity-and-lifecycle I1: the client's `cn`, once per (principal, key, instance).
         #[cfg(feature = "tls")]
         if let Some(signed) = &c.client_signed {
@@ -1777,7 +1786,16 @@ impl ReplayWindows {
     /// Admit `caller`'s envelope once. Unsigned envelopes pass untouched (see the type's doc); a signed
     /// one without an id passes and is counted (`verify` has already refused one from a gateway that
     /// issues ids).
+    #[cfg(test)]
     pub(crate) fn admit(&self, caller: &GatewayCaller, now_ms: u64, drift_ms: u64) -> Result<(), CallerError> {
+        self.admit_uncounted(caller, now_ms, drift_ms).inspect_err(|_| self.count_replay())
+    }
+
+    /// Admit `caller`'s envelope once, as `admit` does (test builds), without counting a refused replay
+    /// in `replayed`: the receive boundary
+    /// counts it itself, in `replayed` or — for a control kind's late twin (B1, M2) — in
+    /// `control_late_duplicates`.
+    pub(crate) fn admit_uncounted(&self, caller: &GatewayCaller, now_ms: u64, drift_ms: u64) -> Result<(), CallerError> {
         use std::sync::atomic::Ordering;
         if !matches!(caller.attestation, CallerAttestation::Signed { .. }) {
             return Ok(());
@@ -1807,9 +1825,6 @@ impl ReplayWindows {
             }
             break Ok(());
         };
-        if outcome.is_err() {
-            self.replayed.fetch_add(1, Ordering::Relaxed);
-        }
         if self.since_sweep.fetch_add(1, Ordering::Relaxed) + 1 >= REPLAY_SWEEP_EVERY {
             self.since_sweep.store(0, Ordering::Relaxed);
             self.sweep(horizon);

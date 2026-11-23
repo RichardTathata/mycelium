@@ -362,7 +362,8 @@ ids = ["rule:kv.propagation", "rule:kv.expiry"]
 name = "Signal mesh: admission, forwarding, suppression"
 page = "signal-mesh.md"
 example = "mailbox_llm"
-ids = ["rule:signal.admission", "rule:signal.forwarding", "rule:signal.suppression", "concept:signal", "concept:boundary"]
+ids = ["rule:signal.admission", "rule:signal.forwarding", "rule:signal.suppression", "concept:signal", "concept:boundary",
+       "concept:control-lane"]
 
 [[feature]]
 name = "Capability discovery"

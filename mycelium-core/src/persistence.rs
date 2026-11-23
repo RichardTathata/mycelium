@@ -164,6 +164,29 @@ pub struct WalHandle {
     /// [`WalHandle::pause_answer_between_counts`]). Test builds only; set once.
     #[cfg(any(test, feature = "test-support"))]
     answer_pause: std::sync::OnceLock<Arc<InboundPause>>,
+    /// A test's hold on every [`append`](WalHandle::append) of a key under a prefix (see
+    /// [`WalHandle::hold_appends_under`]). Test builds only; set once.
+    #[cfg(any(test, feature = "test-support"))]
+    append_hold: std::sync::OnceLock<Arc<AppendHold>>,
+}
+
+/// A hold on every [`WalHandle::append`] of a key under a prefix, until [`AppendHold::release`] — the
+/// held WAL acknowledgement of B1's M4 test: the appends are not refused or reordered, they wait. Test
+/// builds only.
+#[cfg(any(test, feature = "test-support"))]
+pub struct AppendHold {
+    prefix:   String,
+    released: tokio::sync::watch::Sender<bool>,
+    /// How many appends have reached the hold.
+    pub reached: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl AppendHold {
+    /// Let every held append, and every later one, go on.
+    pub fn release(&self) {
+        let _ = self.released.send(true);
+    }
 }
 
 /// One inbound record between its apply and the moment it is on the WAL's channel — see
@@ -289,6 +312,20 @@ impl WalHandle {
         p
     }
 
+    /// Every later [`append`](Self::append) of a key under `prefix` waits until [`AppendHold::release`]
+    /// (B1's M4 test: a held WAL acknowledgement for quorum evidence). Once per handle; a second call
+    /// panics. Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn hold_appends_under(&self, prefix: &str) -> Arc<AppendHold> {
+        let h = Arc::new(AppendHold {
+            prefix:   prefix.to_string(),
+            released: tokio::sync::watch::channel(false).0,
+            reached:  std::sync::atomic::AtomicU64::new(0),
+        });
+        assert!(self.append_hold.set(Arc::clone(&h)).is_ok(), "one append hold per WAL handle");
+        h
+    }
+
     /// A replica-sync answer will wait once, between its two count loads, until
     /// [`InboundPause::release`] — the interleaving the order of those loads exists for. Once per
     /// handle; a second call panics. Test builds only.
@@ -369,6 +406,14 @@ impl WalHandle {
     /// `Flush`: `Err` if the writer is gone or the append/fsync failed.
     /// `Async`/`Os`: fire-and-forget (`try_send`); always `Ok`.
     pub async fn append(&self, entry: SyncEntry) -> io::Result<()> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(h) = self.append_hold.get()
+            && entry.key.starts_with(h.prefix.as_str())
+        {
+            h.reached.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut rx = h.released.subscribe();
+            let _ = rx.wait_for(|v| *v).await;
+        }
         match self.sync_mode {
             SyncMode::Flush => self.send_and_await(entry, false).await,
             SyncMode::Async | SyncMode::Os => {
@@ -480,6 +525,7 @@ impl WalHandle {
             inbound_in_flight: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             inbound_pause: std::sync::OnceLock::new(),
             answer_pause: std::sync::OnceLock::new(),
+            append_hold: std::sync::OnceLock::new(),
         }
     }
 
@@ -916,6 +962,8 @@ fn spawn_wal_writer_inner(
         inbound_pause: std::sync::OnceLock::new(),
         #[cfg(any(test, feature = "test-support"))]
         answer_pause: std::sync::OnceLock::new(),
+        #[cfg(any(test, feature = "test-support"))]
+        append_hold: std::sync::OnceLock::new(),
     };
 
     tokio::spawn(wal_writer_task(
