@@ -11,6 +11,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A gateway sends an unanswered cancel-forward again** (unreleased code: I4's cancel-forward; identity-and-lifecycle
+  §9 O13, the maintainer's decision of 2026-11-22; found on #824, where behind about 12 000 concurrent mints the
+  provider's stop came about 25 s after the cancel in 4 runs of 9). The forward is a best-effort signal on the
+  gateway's outbound queues, which drop frames when they are full (here at the shard's hand-off to the peer writer),
+  and nothing told the gateway its forward was dropped: the provider heard of the cancel only when anti-entropy
+  repaired the revocation's record. The gateway now re-sends the same signed checkpoint every 500 ms until the
+  provider answers (`CANCEL_FORWARD_RETRY_MS`; four attempts inside *F* = 2 s), each attempt waiting 5 s for its own
+  answer, then on a back-off from 1 s to 30 s, at most 24 attempts (`MAX_CANCEL_FORWARD_ATTEMPTS`). No attempt after
+  the first is sent once the call's window has ended (the first always goes, as before, and is answered from what the
+  provider holds), and none once the node is shutting down. **One forward per term:** a cancel of a term whose
+  forward still waits for its receipt joins it; one after the receipt replaces a forward still re-sending. **The
+  provider joins a repeat to the answer already in progress for the same term**, so a re-send takes no confirm-wait
+  permit and is answered what the first attempt is. **What a caller is answered:** when, unchanged — the first answer
+  within 5 s, else `DeliveryUnknown`, never a negative; an answer after that is counted and does not change the
+  receipt. Which class can now differ in two ways: a re-send's answer stands where the first attempt or its answer was
+  lost (`Stopped` where it was `DeliveryUnknown`); and if the provider no longer keeps the stop record when a re-send
+  reaches it (it keeps the newest 1 024), the re-send is answered `NotRunning` — read at `/a2a` as a call that
+  completed on its own. A re-send that reaches a restarted provider while unanswered plants its hold there, so a call
+  re-presented later is refused `revoked`; a gateway crash between the forward and the sync is bounded as before.
+  **Not fixed by it:** a forward delivered late, in order behind the gateway's own gossip — behind the same flood the
+  provider's stop was inside *F* in 5 runs of 10 and the test passed 4 of 10 (#826's review), never by anti-entropy. New: `GET /stats`
+  `call_cancel_forwards` and the counters `mycelium_gateway_call_cancel_forward_attempts_total{attempt}` and
+  `mycelium_gateway_call_cancel_forwards_total{outcome}` (`docs/operations/metrics.md`), the evidence on which a lane
+  of its own for control signals is to be decided. A shutdown no longer waits for a pending forward's 5 s timeout.
+  No `deprecations.md` section: the code is unreleased, and no caller's answer comes later than before.
 - **A change of roots no longer livelocks against a fold already running** (unreleased code: I2's `change_roots`, and the
   kept-anchor tests built on it; found as a CI hang, the Test job cancelled at six hours twice on
   `an_often_rotated_peer_does_not_exhaust_the_kept_anchor_budget`). A caller that needed a fold of its own retried

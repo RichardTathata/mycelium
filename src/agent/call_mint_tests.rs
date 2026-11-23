@@ -169,7 +169,14 @@ pub(super) async fn node(opts: Opts) -> N {
                             f.fetch_add(1, Ordering::SeqCst);
                             a3.service().rpc_respond(&req, b"dispatched".to_vec());
                         }
-                        _ = req.authority_lapsed() => a3.service().rpc_respond(&req, b"stopped: authority lapsed".to_vec()),
+                        _ = req.authority_lapsed() => {
+                            // `linger` takes 800 ms to stop once asked (#826's review, F1: a provider still waiting for
+                            // the work to end when a re-sent forward arrives).
+                            if req.payload().as_ref() == b"linger" {
+                                tokio::time::sleep(Duration::from_millis(800)).await;
+                            }
+                            a3.service().rpc_respond(&req, b"stopped: authority lapsed".to_vec())
+                        }
                     }
                 });
             }

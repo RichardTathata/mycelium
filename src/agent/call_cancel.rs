@@ -80,8 +80,24 @@ pub(crate) const CANCEL_RPC_KIND: &str = "sys.call-cancel.v1";
 pub const CANCEL_CONFIRM_WAIT_MS: u64 = super::provider_enforcement::LAPSE_ANSWER_GRACE_MS;
 
 /// How long the gateway waits for the provider's answer to a cancel-forward before the receipt says
-/// [`CancelClass::DeliveryUnknown`]: the provider's wait and room for the round trip.
+/// [`CancelClass::DeliveryUnknown`]: the provider's wait and room for the round trip. Each attempt waits as long for its
+/// own answer.
 pub const CANCEL_FORWARD_TIMEOUT_MS: u64 = 5_000;
+
+/// **How soon an unanswered cancel-forward is sent again** while its receipt waits (§9 O13, the maintainer's decision
+/// of 2026-11-22): every 500 ms, so four attempts leave inside *F* = 2 s (bound 1) and ten inside
+/// [`CANCEL_FORWARD_TIMEOUT_MS`]. Short enough that a send lost on a full outbound queue is replaced well inside bound
+/// 1; long enough that a provider answering in the ordinary tens of milliseconds is never sent a second.
+pub const CANCEL_FORWARD_RETRY_MS: u64 = 500;
+
+/// The longest gap between two attempts. Once the receipt has said [`CancelClass::DeliveryUnknown`] the gap doubles
+/// from one second to this, the order of the KV's anti-entropy interval, which carries the same revocation.
+pub const CANCEL_FORWARD_RETRY_CAP_MS: u64 = 30_000;
+
+/// **The most attempts one cancel-forward makes**, the first among them: ten while the receipt waits, and fourteen
+/// more on the back-off, which reach about 305 s — past the default 300 s call window. A forward stops sooner on an
+/// answer, at the call's window, or at shutdown.
+pub const MAX_CANCEL_FORWARD_ATTEMPTS: u32 = 24;
 
 /// How many cancel-forwards a provider waits on at once. Past it, an answer is given at once, from what the sweep
 /// left running ([`CancelClass::StopRequested`] where something still runs).
@@ -241,7 +257,8 @@ impl From<super::call_issuer::RevokeRefusal> for CancelRefusal {
 /// **Cancel the call of `term`**: revoke it, forward the revoking checkpoint to the provider the call went to **and**
 /// record it on disk, the two together (§9 O10: the forward does not wait for the disk), and return what the provider
 /// answered once both are done — `NotDurable` if the disk refused, the forward sent all the same (the module doc's
-/// table). Called again, the revoke is idempotent and the checkpoint is forwarded again.
+/// table). Called again, the revoke is idempotent and the checkpoint is forwarded again — joining the term's forward
+/// if it still waits for its receipt (§9 O13, [`forward_once`]).
 ///
 /// **The forward runs on a task of its own** (#821's review, F3), as the doors' does: a caller that drops this future
 /// stops neither the forward nor its receipt's count. **Dropping it drops the durable write's wait**: a record the WAL's
@@ -252,17 +269,20 @@ impl From<super::call_issuer::RevokeRefusal> for CancelRefusal {
 pub(crate) async fn cancel(ctx: &Arc<TaskCtx>, term: &str) -> Result<CancelReceipt, CancelRefusal> {
     let pending = super::call_issuer::begin_revoke(ctx, term)?;
     let (tx, answered) = tokio::sync::oneshot::channel();
-    let (ctx2, checkpoint, target) = (Arc::clone(ctx), pending.checkpoint.clone(), pending.target.clone());
+    let (ctx2, checkpoint, target, window_end_ms, term2) = (Arc::clone(ctx), pending.checkpoint.clone(), pending.target.clone(), pending.window_end_ms, term.to_string());
     ctx.spawn_task(async move {
-        let class = match target {
-            Some(target) => forward(&ctx2, target, &checkpoint).await,
-            None => CancelClass::NotForwarded,
+        let settle = |class: CancelClass| {
+            note_receipt(&ctx2, &class);
+            let _ = tx.send(class);
         };
-        note_receipt(&ctx2, &class);
-        let _ = tx.send(class);
+        match target {
+            Some(target) => forward_once(&ctx2, &term2, target, &checkpoint, window_end_ms, settle).await,
+            None => settle(CancelClass::NotForwarded),
+        }
     });
     let durable = super::call_issuer::finish_revoke(ctx, &pending).await;
-    // The forward times itself out (`CANCEL_FORWARD_TIMEOUT_MS`); a task gone at shutdown answered nothing.
+    // The forward settles its receipt by `CANCEL_FORWARD_TIMEOUT_MS` (its retries may run on past it); a task gone at
+    // shutdown answered nothing.
     let class = answered.await.unwrap_or(CancelClass::DeliveryUnknown);
     match durable {
         Ok(_) => Ok(CancelReceipt { term: term.to_string(), class }),
@@ -279,27 +299,307 @@ fn note_receipt(ctx: &TaskCtx, class: &CancelClass) {
     metrics::counter!("mycelium_gateway_call_cancel_receipts_total", "class" => label).increment(1);
 }
 
-/// Send the revoking checkpoint to `target` and read its answer. A self envelope carries it (`rpc_call_ctx`), which
-/// is what lets the provider know it came from the issuing gateway.
-async fn forward(ctx: &TaskCtx, target: NodeId, checkpoint: &SignedRevocationCheckpoint) -> CancelClass {
-    let Ok(payload) = serde_json::to_vec(&json!({ "v": 1, "checkpoint": checkpoint })) else { return CancelClass::DeliveryUnknown };
-    // A test stands in for a lost forward: the same `Timeout` a dropped frame gives, read by the same match.
+/// How long to wait before the attempt after the `sent`-th (`sent` ≥ 1): [`CANCEL_FORWARD_RETRY_MS`] while the receipt
+/// waits, then doubling from one second to [`CANCEL_FORWARD_RETRY_CAP_MS`].
+pub(crate) fn retry_delay_ms(sent: u32) -> u64 {
+    let while_the_receipt_waits = (CANCEL_FORWARD_TIMEOUT_MS / CANCEL_FORWARD_RETRY_MS) as u32;
+    if sent < while_the_receipt_waits {
+        return CANCEL_FORWARD_RETRY_MS;
+    }
+    1_000u64.saturating_mul(2u64.saturating_pow(sent - while_the_receipt_waits)).min(CANCEL_FORWARD_RETRY_CAP_MS)
+}
+
+/// §9 O13: what this gateway's cancel-forwards did — `GET /stats` `call_cancel_forwards`, and
+/// `mycelium_gateway_call_cancel_forward_attempts_total{attempt}` and `mycelium_gateway_call_cancel_forwards_total{outcome}`.
+/// The evidence the maintainer's deferred option B (a lane of its own for control signals) is to be decided on.
+#[derive(Default)]
+pub(crate) struct ForwardStats {
+    /// Every cancel-forward request sent, the first of each forward and its re-sends.
+    pub(crate) attempts: AtomicU64,
+    /// The re-sends among them.
+    pub(crate) retries: AtomicU64,
+    /// Forwards whose answer came on their first attempt.
+    pub(crate) answered_first: AtomicU64,
+    /// Forwards whose first answer came on a re-send, before the receipt was settled: the first attempt, or its answer,
+    /// was lost or slower than the re-send's.
+    pub(crate) answered_on_retry: AtomicU64,
+    /// Forwards answered only after their receipt had said `delivery_unknown`: the provider holds the revocation, and
+    /// the receipt given stands (a receipt is never revised).
+    pub(crate) answered_after_receipt: AtomicU64,
+    /// Forwards that ended with no answer at all: at their attempt bound, at the call's window, or at shutdown.
+    pub(crate) unanswered: AtomicU64,
+    /// Forwards, already settled and still re-sending unanswered, that a newer cancel of the same term replaced
+    /// (#826's review, F2): at most one forward per term runs.
+    pub(crate) superseded: AtomicU64,
+    /// Cancels of a term whose forward was still waiting for its receipt: they joined it and sent nothing of their own
+    /// (#826's review, F2).
+    pub(crate) joined: AtomicU64,
+    /// As a provider: repeats of a forward that joined the answer already in progress for the same term instead of
+    /// waiting on their own (#826's review, F1).
+    pub(crate) provider_joined: AtomicU64,
+    /// The forward running for each term, by term.
+    in_flight: papaya::HashMap<String, Arc<InFlight>>,
+}
+
+/// One term's running forward: its receipt's class once settled, and the signal that a newer cancel replaced it.
+#[derive(Default)]
+struct InFlight {
+    class: OnceLock<CancelClass>,
+    note: tokio::sync::Notify,
+    /// `notify_one`: the permit is kept for the forward's loop if it is not waiting at that moment.
+    superseded: tokio::sync::Notify,
+}
+
+impl InFlight {
+    fn settled(&self, class: &CancelClass) {
+        let _ = self.class.set(class.clone());
+        self.note.notify_waiters();
+    }
+
+    /// Its forward ended without settling (a panic): whoever joined it is answered no answer, never a negative.
+    fn abandon(&self) {
+        if self.class.get().is_none() {
+            self.settled(&CancelClass::DeliveryUnknown);
+        }
+    }
+
+    /// The running forward's receipt class, waiting up to `within_ms` for it.
+    async fn receipt(&self, within_ms: u64) -> Option<CancelClass> {
+        let deadline = mycelium_core::sim_seam::mono_instant() + Duration::from_millis(within_ms);
+        loop {
+            let noted = self.note.notified();
+            tokio::pin!(noted);
+            noted.as_mut().enable();
+            if let Some(class) = self.class.get() {
+                return Some(class.clone());
+            }
+            let left = deadline.saturating_duration_since(mycelium_core::sim_seam::mono_instant());
+            if left.is_zero() {
+                return None;
+            }
+            tokio::select! {
+                _ = noted => {}
+                _ = mycelium_core::sim_seam::sleep_ms("authority/cancel-forward-joined", left.as_millis() as u64) => {}
+            }
+        }
+    }
+}
+
+impl ForwardStats {
+    fn note_attempt(&self, retry: bool) {
+        self.attempts.fetch_add(1, Ordering::Relaxed);
+        if retry {
+            self.retries.fetch_add(1, Ordering::Relaxed);
+        }
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_gateway_call_cancel_forward_attempts_total", "attempt" => if retry { "retry" } else { "first" }).increment(1);
+    }
+
+    fn note_outcome(&self, outcome: &'static str) {
+        let n = match outcome {
+            "answered_first" => &self.answered_first,
+            "answered_on_retry" => &self.answered_on_retry,
+            "answered_after_receipt" => &self.answered_after_receipt,
+            "superseded" => &self.superseded,
+            _ => &self.unanswered,
+        };
+        n.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_gateway_call_cancel_forwards_total", "outcome" => outcome).increment(1);
+    }
+
+    /// The `/stats` object.
+    pub(crate) fn to_json(&self) -> Value {
+        let n = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        json!({
+            "attempts": n(&self.attempts),
+            "retries": n(&self.retries),
+            "answered_first": n(&self.answered_first),
+            "answered_on_retry": n(&self.answered_on_retry),
+            "answered_after_receipt": n(&self.answered_after_receipt),
+            "unanswered": n(&self.unanswered),
+            "superseded": n(&self.superseded),
+            "joined": n(&self.joined),
+            "provider_joined": n(&self.provider_joined),
+        })
+    }
+}
+
+/// **One forward per term** (#826's review, F2): a cancel of a term whose forward is still waiting for its receipt
+/// joins it — its answer is that receipt, and it sends nothing of its own; a cancel of a term whose forward has settled
+/// and is still re-sending unanswered replaces it (the old one stops, `superseded`) and starts afresh, so a cancel asked
+/// again is forwarded again, as before. So repeated door cancels and `cancel_call`s never run more than one forward, and
+/// its at most ten live attempts, per term.
+async fn forward_once(ctx: &Arc<TaskCtx>, term: &str, target: NodeId, checkpoint: &SignedRevocationCheckpoint, window_end_ms: u64, settle: impl FnOnce(CancelClass)) {
+    let stats = &ctx.call_issuer.cancel_forwards;
+    let mine = Arc::new(InFlight::default());
+    // Bounded: each pass either takes the term, joins, or replaces a settled forward; a lost race goes round again.
+    for _ in 0..8 {
+        let current = match stats.in_flight.pin().try_insert(term.to_string(), Arc::clone(&mine)) {
+            Ok(_) => None,
+            Err(occupied) => Some(Arc::clone(occupied.current)),
+        };
+        let Some(current) = current else { break };
+        if current.class.get().is_none() {
+            stats.joined.fetch_add(1, Ordering::Relaxed);
+            let class = current.receipt(CANCEL_FORWARD_TIMEOUT_MS + 1_000).await.unwrap_or(CancelClass::DeliveryUnknown);
+            return settle(class);
+        }
+        // Settled, still re-sending: replace it, if it is still the one there (retry-safe: the closure decides on its
+        // arguments alone).
+        let replaced = matches!(
+            stats.in_flight.pin().compute(term.to_string(), |entry| match entry {
+                Some((_, cur)) if Arc::ptr_eq(cur, &current) => papaya::Operation::Insert(Arc::clone(&mine)),
+                _ => papaya::Operation::Abort(()),
+            }),
+            papaya::Compute::Updated { .. }
+        );
+        if replaced {
+            current.superseded.notify_one();
+            break;
+        }
+    }
+    // Removed however the forward ends — a panic in it included (#826's confirm round): an entry left unsettled would
+    // have every later cancel of the term join it, wait 6 s and send nothing.
+    let _entry = Entry { map: &stats.in_flight, key: term.to_string(), mine: Arc::clone(&mine), on_drop: InFlight::abandon };
+    let wrapped = |class: CancelClass| {
+        mine.settled(&class);
+        settle(class);
+    };
+    forward(ctx, target, checkpoint, window_end_ms, &mine, wrapped).await;
+}
+
+/// **Send the revoking checkpoint to `target` until it answers** (§9 O13, the maintainer's decision of 2026-11-22: the
+/// gateway keeps its promise that the provider hears of the cancel by its own effort). A self envelope carries each
+/// attempt (`rpc_call_ctx`), which is what lets the provider know it came from the issuing gateway.
+///
+/// The cancel-forward is a best-effort Individual signal on the gateway's outbound queues, which drop a frame when they
+/// are full; nothing tells the gateway a send was dropped. So an attempt is sent at once and again every
+/// [`CANCEL_FORWARD_RETRY_MS`] while no answer has come, each waiting [`CANCEL_FORWARD_TIMEOUT_MS`] for its own
+/// answer — the attempts overlap, so a provider still waiting for the work to end ([`CANCEL_CONFIRM_WAIT_MS`]) is not
+/// cut off — and the first answer of any attempt ends the forward. A re-send is the same signed checkpoint, which the
+/// provider holds idempotently and answers from what it holds.
+///
+/// `settle` is called **once**, with the receipt's class: the first answer, if one comes within
+/// [`CANCEL_FORWARD_TIMEOUT_MS`] of the first attempt, else [`CancelClass::DeliveryUnknown`] — when the caller is
+/// answered is as before this retry. Unanswered then, the forward goes on, on the back-off
+/// ([`retry_delay_ms`]), so the provider still hears of the cancel before the KV's repair; an answer then is counted
+/// (`answered_after_receipt`) and the receipt stands. No attempt is sent past [`MAX_CANCEL_FORWARD_ATTEMPTS`], once
+/// `window_end_ms` has passed (the first excepted — the provider answers it from what it holds), or once the node is
+/// shutting down; on shutdown the forward stops at once and its unanswered attempts are dropped.
+async fn forward(ctx: &Arc<TaskCtx>, target: NodeId, checkpoint: &SignedRevocationCheckpoint, window_end_ms: u64, in_flight: &InFlight, settle: impl FnOnce(CancelClass)) {
+    let Ok(payload) = serde_json::to_vec(&json!({ "v": 1, "checkpoint": checkpoint })) else { return settle(CancelClass::DeliveryUnknown) };
+    let payload = Bytes::from(payload);
+    // A test stands in for a forward never sent: the receipt says `DeliveryUnknown` at once, and only the KV carries it.
     #[cfg(test)]
     test_hooks::forward_gate(&ctx.node_id).await;
     #[cfg(test)]
-    let reply = if test_hooks::forward_suppressed(&ctx.node_id) {
-        Err(super::rpc::RpcError::Timeout)
-    } else {
-        let reply = super::rpc::rpc_call_ctx(ctx, target, Arc::from(CANCEL_RPC_KIND), Bytes::from(payload), Duration::from_millis(CANCEL_FORWARD_TIMEOUT_MS)).await;
-        // A test stands in for a forward delivered whose answer is lost (#821's confirm round): the provider acted on it.
-        if test_hooks::answer_lost(&ctx.node_id) { Err(super::rpc::RpcError::Timeout) } else { reply }
-    };
-    #[cfg(not(test))]
-    let reply = super::rpc::rpc_call_ctx(ctx, target, Arc::from(CANCEL_RPC_KIND), Bytes::from(payload), Duration::from_millis(CANCEL_FORWARD_TIMEOUT_MS)).await;
-    match reply {
-        Ok(bytes) => read_answer(&bytes),
-        Err(_) => CancelClass::DeliveryUnknown,
+    if test_hooks::forward_suppressed(&ctx.node_id) {
+        return settle(CancelClass::DeliveryUnknown);
     }
+    #[cfg(test)]
+    if test_hooks::take_panic(&test_hooks::PANIC_IN_FORWARD, &ctx.node_id) {
+        panic!("a test's planted panic in the cancel-forward");
+    }
+    let stats = &ctx.call_issuer.cancel_forwards;
+    let mut shutdown = ctx.shutdown_tx.subscribe();
+    let begun = mycelium_core::sim_seam::mono_instant();
+    let receipt_at = begun + Duration::from_millis(CANCEL_FORWARD_TIMEOUT_MS);
+    let mut settle = Some(settle);
+    let mut attempts: tokio::task::JoinSet<(u32, Result<Bytes, super::rpc::RpcError>)> = tokio::task::JoinSet::new();
+    let mut sent: u32 = 0;
+    let mut next_at = Some(begun);
+    let mut answered = false;
+    let mut superseded = false;
+    loop {
+        if *shutdown.borrow() {
+            break;
+        }
+        let now = mycelium_core::sim_seam::mono_instant();
+        if let Some(at) = next_at
+            && at <= now
+        {
+            if sent < MAX_CANCEL_FORWARD_ATTEMPTS && (sent == 0 || ctx.hlc.decision_now_ms() < window_end_ms) {
+                let (ctx2, payload, target, i) = (Arc::clone(ctx), payload.clone(), target.clone(), sent);
+                attempts.spawn(async move { (i, attempt(&ctx2, target, payload).await) });
+                sent += 1;
+                stats.note_attempt(sent > 1);
+                next_at = (sent < MAX_CANCEL_FORWARD_ATTEMPTS).then(|| now + Duration::from_millis(retry_delay_ms(sent)));
+            } else {
+                next_at = None;
+            }
+        }
+        if next_at.is_none() && attempts.is_empty() {
+            break;
+        }
+        let wake = match (next_at, settle.is_some()) {
+            (Some(at), true) => Some(at.min(receipt_at)),
+            (Some(at), false) => Some(at),
+            (None, true) => Some(receipt_at),
+            (None, false) => None,
+        };
+        let sleep_ms = wake.map(|w| w.saturating_duration_since(now).as_millis() as u64);
+        tokio::select! {
+            biased;
+            _ = shutdown.wait_for(|v| *v) => break,
+            _ = in_flight.superseded.notified() => {
+                superseded = true;
+                break;
+            }
+            Some(done) = attempts.join_next(), if !attempts.is_empty() => {
+                if let Ok((i, Ok(bytes))) = done {
+                    let class = read_answer(&bytes);
+                    match settle.take() {
+                        Some(settle) => {
+                            stats.note_outcome(if i == 0 { "answered_first" } else { "answered_on_retry" });
+                            settle(class);
+                        }
+                        None => stats.note_outcome("answered_after_receipt"),
+                    }
+                    answered = true;
+                    break;
+                }
+            }
+            _ = mycelium_core::sim_seam::sleep_ms("authority/cancel-forward-retry", sleep_ms.unwrap_or(0)), if sleep_ms.is_some() => {}
+        }
+        if mycelium_core::sim_seam::mono_instant() >= receipt_at
+            && let Some(settle) = settle.take()
+        {
+            settle(CancelClass::DeliveryUnknown);
+        }
+    }
+    // Dropped with the set: no unanswered attempt outlives the forward.
+    attempts.abort_all();
+    if superseded {
+        stats.note_outcome("superseded");
+    } else if !answered {
+        stats.note_outcome("unanswered");
+    }
+    if let Some(settle) = settle.take() {
+        settle(CancelClass::DeliveryUnknown);
+    }
+}
+
+/// One attempt of a cancel-forward: the request, and the provider's answer within [`CANCEL_FORWARD_TIMEOUT_MS`].
+async fn attempt(ctx: &TaskCtx, target: NodeId, payload: Bytes) -> Result<Bytes, super::rpc::RpcError> {
+    #[cfg(test)]
+    {
+        test_hooks::note_attempt(&ctx.node_id, ctx.hlc.decision_now_ms());
+        // A test stands in for a send the gateway's outbound queue dropped: nothing reaches the provider, and the
+        // attempt's answer never comes.
+        if test_hooks::send_dropped(&ctx.node_id) {
+            mycelium_core::sim_seam::sleep_ms("authority/cancel-forward-dropped", CANCEL_FORWARD_TIMEOUT_MS).await;
+            return Err(super::rpc::RpcError::Timeout);
+        }
+    }
+    let reply = super::rpc::rpc_call_ctx(ctx, target, Arc::from(CANCEL_RPC_KIND), payload, Duration::from_millis(CANCEL_FORWARD_TIMEOUT_MS)).await;
+    // A test stands in for a forward delivered whose answer is lost (#821's confirm round): the provider acted on it.
+    #[cfg(test)]
+    if reply.is_ok() && test_hooks::answer_lost(&ctx.node_id) {
+        mycelium_core::sim_seam::sleep_ms("authority/cancel-forward-dropped", CANCEL_FORWARD_TIMEOUT_MS).await;
+        return Err(super::rpc::RpcError::Timeout);
+    }
+    reply
 }
 
 /// A provider's answer as a class: its `class`, or — a refusal at its receive boundary, which names a `reason` —
@@ -428,15 +728,17 @@ pub(crate) async fn cancel_at_door(ctx: &Arc<TaskCtx>, sink: &Arc<CallSink>) -> 
     std::sync::atomic::fence(Ordering::SeqCst);
     let Some(term) = sink.term().map(str::to_string) else { return Ok(DoorCancel::BeforeMint) };
     let pending = super::call_issuer::begin_revoke(ctx, &term)?;
-    let (ctx2, checkpoint, target, sink2) = (Arc::clone(ctx), pending.checkpoint.clone(), pending.target.clone(), Arc::clone(sink));
+    let (ctx2, checkpoint, target, sink2, window_end_ms, term2) = (Arc::clone(ctx), pending.checkpoint.clone(), pending.target.clone(), Arc::clone(sink), pending.window_end_ms, term.clone());
     ctx.spawn_task(async move {
-        let class = match target {
-            Some(target) => forward(&ctx2, target, &checkpoint).await,
-            None => CancelClass::NotForwarded,
+        let settle = |class: CancelClass| {
+            tracing::debug!(term = %term, class = class.label(), "a door's cancel was forwarded");
+            note_receipt(&ctx2, &class);
+            sink2.note_forwarded(&class);
         };
-        tracing::debug!(term = %term, class = class.label(), "a door's cancel was forwarded");
-        note_receipt(&ctx2, &class);
-        sink2.note_forwarded(&class);
+        match target {
+            Some(target) => forward_once(&ctx2, &term2, target, &checkpoint, window_end_ms, settle).await,
+            None => settle(CancelClass::NotForwarded),
+        }
     });
     super::call_issuer::finish_revoke(ctx, &pending).await?;
     Ok(DoorCancel::Revoked)
@@ -609,6 +911,10 @@ fn admit(ctx: &TaskCtx, req: &super::rpc::RpcRequest) -> Result<(PrincipalId, Si
 /// Hold the revocation, ask the work to stop, and say what happened — waiting up to [`CANCEL_CONFIRM_WAIT_MS`] for
 /// work whose agent promised to stop to end, if `wait`.
 async fn answer(ctx: &TaskCtx, by: &PrincipalId, signed: &SignedRevocationCheckpoint, wait: bool) -> Vec<u8> {
+    #[cfg(test)]
+    if test_hooks::take_panic(&test_hooks::PANIC_IN_ANSWER, &ctx.node_id) {
+        panic!("a test's planted panic in the provider's answer");
+    }
     let Some(authority) = ctx.execution_authority.get() else { return refused(ctx, "no_authority", "no execution authority") };
     // A provider that does not enforce registers no work and checks no admission (#799's review, M1): it cannot see
     // whether the call runs here, and a hold would refuse nothing. It says so, and holds nothing.
@@ -675,6 +981,11 @@ pub(crate) fn serve(agent: &crate::GossipAgent) {
     let mut rx = agent.service().rpc_rx(CANCEL_RPC_KIND);
     let ctx = Arc::clone(&agent.service().ctx);
     let waits = Arc::new(tokio::sync::Semaphore::new(MAX_CONFIRM_WAITS));
+    // §9 O13 (#826's review, F1): one answer in progress per `(issuer, scope)`. A gateway re-sends a forward it has not
+    // heard back from, so a repeat can arrive while the first is still waiting for the work to end; it joins that wait
+    // and takes no permit of its own. Otherwise a re-send finding no permit was answered `stop_requested` at once, and
+    // that answer settled the gateway's receipt ahead of the first attempt's waited `stopped`.
+    let answering: Arc<papaya::HashMap<(String, String), Arc<Answering>>> = Arc::new(papaya::HashMap::new());
     // Detached, as `replica_sync::serve` is: the loop ends when `rpc_rx` yields `None` at shutdown.
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
@@ -682,16 +993,108 @@ pub(crate) fn serve(agent: &crate::GossipAgent) {
                 Err(reply) => super::rpc::rpc_respond_ctx(&ctx, &req, reply),
                 Ok((by, signed)) => {
                     let ctx = Arc::clone(&ctx);
-                    let permit = Arc::clone(&waits).try_acquire_owned().ok();
-                    tokio::spawn(async move {
-                        let reply = answer(&ctx, &by, &signed, permit.is_some()).await;
-                        drop(permit);
-                        super::rpc::rpc_respond_ctx(&ctx, &req, reply);
-                    });
+                    let key = (by.as_str().to_string(), signed.checkpoint.scope.clone());
+                    let mine = Arc::new(Answering::default());
+                    let joined = match answering.pin().try_insert(key.clone(), Arc::clone(&mine)) {
+                        Ok(_) => None,
+                        Err(occupied) => Some(Arc::clone(occupied.current)),
+                    };
+                    match joined {
+                        Some(lead) => {
+                            ctx.call_issuer.cancel_forwards.provider_joined.fetch_add(1, Ordering::Relaxed);
+                            tokio::spawn(async move {
+                                // Bounded: the answer it joined waits at most `CANCEL_CONFIRM_WAIT_MS`. Past that (its
+                                // task gone), this request is answered on its own, without a wait.
+                                let reply = match lead.wait(CANCEL_CONFIRM_WAIT_MS + 1_000).await {
+                                    Some(reply) => reply,
+                                    None => answer(&ctx, &by, &signed, false).await,
+                                };
+                                super::rpc::rpc_respond_ctx(&ctx, &req, reply);
+                            });
+                        }
+                        None => {
+                            let permit = Arc::clone(&waits).try_acquire_owned().ok();
+                            #[cfg(test)]
+                            let permit = permit.filter(|_| !test_hooks::over_confirm_cap(&ctx.node_id, MAX_CONFIRM_WAITS - waits.available_permits()));
+                            let answering = Arc::clone(&answering);
+                            tokio::spawn(async move {
+                                // Removed however this task ends — a panic in `answer` included (#826's confirm round):
+                                // an entry left behind would hold every later repeat of the term to its 2 s wait.
+                                let _entry = Entry { map: &answering, key: key.clone(), mine: Arc::clone(&mine), on_drop: Answering::abandon };
+                                let reply = answer(&ctx, &by, &signed, permit.is_some()).await;
+                                drop(permit);
+                                mine.done(&reply);
+                                super::rpc::rpc_respond_ctx(&ctx, &req, reply);
+                            });
+                        }
+                    }
                 }
             }
         }
     });
+}
+
+/// **An in-progress entry's guard** (#826's confirm round): removes `mine` from `map` when dropped — at the end of its
+/// task, or as a panic unwinds it — and only if it is still `mine` there; `on_drop` first tells anyone who joined it.
+struct Entry<'a, K: std::hash::Hash + Eq, V> {
+    map: &'a papaya::HashMap<K, Arc<V>>,
+    key: K,
+    mine: Arc<V>,
+    on_drop: fn(&V),
+}
+
+impl<K: std::hash::Hash + Eq, V> Drop for Entry<'_, K, V> {
+    fn drop(&mut self) {
+        (self.on_drop)(&self.mine);
+        let _ = self.map.pin().remove_if(&self.key, |_, v| Arc::ptr_eq(v, &self.mine));
+    }
+}
+
+/// One provider answer in progress, which repeats of the same forward join (§9 O13).
+#[derive(Default)]
+struct Answering {
+    reply: OnceLock<Vec<u8>>,
+    note: tokio::sync::Notify,
+    /// Its task ended without an answer (a panic): a joiner answers on its own at once.
+    abandoned: AtomicBool,
+}
+
+impl Answering {
+    fn done(&self, reply: &[u8]) {
+        let _ = self.reply.set(reply.to_vec());
+        self.note.notify_waiters();
+    }
+
+    fn abandon(&self) {
+        if self.reply.get().is_none() {
+            self.abandoned.store(true, Ordering::SeqCst);
+            self.note.notify_waiters();
+        }
+    }
+
+    /// The answer, once given, waiting up to `within_ms` for it.
+    async fn wait(&self, within_ms: u64) -> Option<Vec<u8>> {
+        let deadline = mycelium_core::sim_seam::mono_instant() + Duration::from_millis(within_ms);
+        loop {
+            let noted = self.note.notified();
+            tokio::pin!(noted);
+            noted.as_mut().enable();
+            if let Some(reply) = self.reply.get() {
+                return Some(reply.clone());
+            }
+            if self.abandoned.load(Ordering::SeqCst) {
+                return None;
+            }
+            let left = deadline.saturating_duration_since(mycelium_core::sim_seam::mono_instant());
+            if left.is_zero() {
+                return None;
+            }
+            tokio::select! {
+                _ = noted => {}
+                _ = mycelium_core::sim_seam::sleep_ms("authority/cancel-answer-joined", left.as_millis() as u64) => {}
+            }
+        }
+    }
 }
 
 impl crate::GossipAgent {
@@ -705,7 +1108,8 @@ impl crate::GossipAgent {
     /// nothing; its revocation is then in no KV after its restart (the module doc's table).
     ///
     /// Only a gateway with `gateway_mint_call_mandates` on holds terms to cancel. Called again for the same term, the
-    /// revoke is idempotent and the forward is sent again. Counted by class in `GET /stats` `call_cancel_receipts`.
+    /// revoke is idempotent and the forward is sent again (joining the term's forward while it still waits for its
+    /// receipt, §9 O13). Counted by class in `GET /stats` `call_cancel_receipts`.
     pub async fn cancel_call(&self, term: &str) -> Result<CancelReceipt, CancelRefusal> {
         cancel(&self.task_ctx, term).await
     }
@@ -738,8 +1142,54 @@ pub(crate) mod test_hooks {
     /// Per gateway node: forwards are sent, and their answers are lost (the receipt answers `DeliveryUnknown`).
     pub(crate) static LOSE_FORWARD_ANSWER: std::sync::LazyLock<papaya::HashMap<String, ()>> = std::sync::LazyLock::new(papaya::HashMap::new);
 
+    /// Per gateway node (§9 O13): the answers of this many attempts are lost, the first ones — the provider acted on
+    /// each, and the gateway heard nothing back.
+    pub(crate) static LOSE_FIRST_ANSWERS: std::sync::LazyLock<papaya::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU32>>> =
+        std::sync::LazyLock::new(papaya::HashMap::new);
+
     pub(super) fn answer_lost(node: &crate::node_id::NodeId) -> bool {
-        LOSE_FORWARD_ANSWER.pin().contains_key(&node.to_string())
+        LOSE_FORWARD_ANSWER.pin().contains_key(&node.to_string()) || take_one(&LOSE_FIRST_ANSWERS, node)
+    }
+
+    /// Per gateway node (§9 O13): this many attempts are dropped before they leave, the first ones — a send the
+    /// outbound queue dropped (#824's probe: the gateway's own queues, full behind a burst of mints).
+    pub(crate) static DROP_FIRST_SENDS: std::sync::LazyLock<papaya::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU32>>> =
+        std::sync::LazyLock::new(papaya::HashMap::new);
+
+    pub(super) fn send_dropped(node: &crate::node_id::NodeId) -> bool {
+        take_one(&DROP_FIRST_SENDS, node)
+    }
+
+    fn take_one(map: &papaya::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU32>>, node: &crate::node_id::NodeId) -> bool {
+        let Some(left) = map.pin().get(&node.to_string()).cloned() else { return false };
+        left.fetch_update(std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire, |n| n.checked_sub(1)).is_ok()
+    }
+
+    /// Per gateway node (§9 O13): when its newest attempt was sent (`hlc.decision_now_ms()`), once the node is in the
+    /// map.
+    pub(crate) static LAST_ATTEMPT_AT: std::sync::LazyLock<papaya::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU64>>> =
+        std::sync::LazyLock::new(papaya::HashMap::new);
+
+    pub(super) fn note_attempt(node: &crate::node_id::NodeId, at_ms: u64) {
+        if let Some(last) = LAST_ATTEMPT_AT.pin().get(&node.to_string()).cloned() {
+            last.fetch_max(at_ms, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+
+    /// Per provider node (#826's review, F1): how many cancel-forward answers may wait for the work to end at once, in
+    /// place of `MAX_CONFIRM_WAITS` (64), so a test reaches the cap with one waiting answer.
+    pub(crate) static CONFIRM_WAITS_CAP: std::sync::LazyLock<papaya::HashMap<String, usize>> = std::sync::LazyLock::new(papaya::HashMap::new);
+
+    pub(super) fn over_confirm_cap(node: &crate::node_id::NodeId, waiting: usize) -> bool {
+        CONFIRM_WAITS_CAP.pin().get(&node.to_string()).is_some_and(|cap| waiting > *cap)
+    }
+
+    /// Per node, once each (#826's confirm round): a panic in the gateway's next forward, or the provider's next answer.
+    pub(crate) static PANIC_IN_FORWARD: std::sync::LazyLock<papaya::HashMap<String, ()>> = std::sync::LazyLock::new(papaya::HashMap::new);
+    pub(crate) static PANIC_IN_ANSWER: std::sync::LazyLock<papaya::HashMap<String, ()>> = std::sync::LazyLock::new(papaya::HashMap::new);
+
+    pub(super) fn take_panic(map: &papaya::HashMap<String, ()>, node: &crate::node_id::NodeId) -> bool {
+        map.pin().remove(&node.to_string()).is_some()
     }
 
     /// Per gateway node: run once between the `/mcp` table's eviction scan and its removals.
@@ -787,5 +1237,22 @@ mod tests {
         for other in [&b"not json"[..], br#"{"v":1}"#, br#"{"v":1,"class":"exploded"}"#, b"[]"] {
             assert_eq!(read_answer(other), CancelClass::DeliveryUnknown, "{:?}", String::from_utf8_lossy(other));
         }
+    }
+
+    /// **§9 O13: the re-send schedule.** Four attempts leave inside *F* = 2 s and ten while the receipt waits
+    /// ([`CANCEL_FORWARD_TIMEOUT_MS`]); then the gap doubles from 1 s to [`CANCEL_FORWARD_RETRY_CAP_MS`], and the
+    /// [`MAX_CANCEL_FORWARD_ATTEMPTS`] reach past the default 300 s window, no further than one more cap.
+    #[test]
+    fn the_resend_schedule_fits_bound_1_and_ends_past_the_default_window() {
+        // When attempt k (0-based) leaves, from the first.
+        let at = |k: u32| (1..=k).map(retry_delay_ms).sum::<u64>();
+        assert_eq!((at(1), at(3)), (500, 1_500), "four attempts inside F = 2 s");
+        assert!(at(4) >= 2_000);
+        assert_eq!(at(9), 4_500, "ten while the receipt waits");
+        assert!(at(10) > CANCEL_FORWARD_TIMEOUT_MS);
+        assert_eq!((retry_delay_ms(10), retry_delay_ms(11), retry_delay_ms(14), retry_delay_ms(15)), (1_000, 2_000, 16_000, 30_000));
+        assert_eq!(retry_delay_ms(u32::MAX), CANCEL_FORWARD_RETRY_CAP_MS, "the gap is capped, never an overflow");
+        let last = at(MAX_CANCEL_FORWARD_ATTEMPTS - 1);
+        assert!((300_000..300_000 + CANCEL_FORWARD_RETRY_CAP_MS).contains(&last), "the last attempt at {last} ms");
     }
 }

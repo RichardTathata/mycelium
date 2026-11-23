@@ -327,6 +327,9 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         // cancels that found no call of their caller's, and calls not registered (the table full, or the key in flight).
         body["call_cancel_receipts"] = json!(c.cancel_receipts.pin().iter().map(|(k, v)| (k.to_string(), *v)).collect::<std::collections::BTreeMap<_, _>>());
         body["call_cancel_forwards_refused"] = json!(c.cancel_forwards_refused.pin().iter().map(|(k, v)| (k.to_string(), *v)).collect::<std::collections::BTreeMap<_, _>>());
+        // §9 O13: this gateway's cancel-forward attempts (first sends and re-sends) and how each forward ended — the
+        // evidence on which a lane of its own for control signals (the maintainer's deferred option B) is decided.
+        body["call_cancel_forwards"] = c.cancel_forwards.to_json();
         let m = &c.mcp_cancels;
         body["mcp_cancels"] = json!({
             "cancelled": n(&m.cancelled),
