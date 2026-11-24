@@ -421,6 +421,7 @@ pub(crate) fn rpc_respond_ctx(ctx: &TaskCtx, request: &RpcRequest, result: impl 
 /// that passed its receive boundary** — its envelope verified and its `via` its sender (#832's round-3 review): the
 /// request's `sender` is not authenticated by the signal layer, and a reply to a forged one must not make this node
 /// dial an address of the forger's choosing. A refusal is answered with [`rpc_respond_ctx`], by the shared path only.
+#[cfg(all(feature = "gateway", feature = "tls"))] // its one caller, `call_cancel`, is
 pub(crate) fn rpc_respond_control(ctx: &TaskCtx, request: &RpcRequest, result: impl Into<Bytes>) {
     respond(ctx, request, result.into(), true);
 }
@@ -489,6 +490,7 @@ pub(crate) async fn rpc_call_ctx(
 /// [`rpc_call_ctx`] for a request of a **control kind** (B1, `mycelium_core::control_lane::CONTROL_KINDS`): the
 /// request goes by the shared path as always, and the same encoded frame rides the control lane to `target`, so it
 /// waits behind no gossip in this node's writer or the target's reader.
+#[cfg(all(feature = "gateway", feature = "tls"))] // its one caller, `call_cancel`, is
 pub(crate) async fn rpc_call_ctx_control(
     ctx:     &TaskCtx,
     target:  NodeId,

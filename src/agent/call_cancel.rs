@@ -1142,6 +1142,7 @@ pub(crate) mod test_hooks {
     }
 
     /// How many cancel-forwards `node` has served.
+    #[cfg_attr(not(feature = "compliance"), allow(dead_code))] // read by `call_cancel_lane_tests`
     pub(crate) fn served(node: &crate::node_id::NodeId) -> u64 {
         SERVED.pin().get(&node.to_string()).map_or(0, |c| c.load(std::sync::atomic::Ordering::SeqCst))
     }
