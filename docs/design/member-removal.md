@@ -128,7 +128,10 @@ key is in its own certificate directory), reported `Present` or `Absent`. `Prese
   §2.2 asks.
 - **Membership is covered on both transports.** On TCP, the connection loop drops a removed node's pings, signals
   and gossip writes (by node, and for writes by origin and signer), and the node leaves the peer table and the
-  outbound writers. A ping's piggybacked `known_peers` never re-introduce it: a peer that has not yet applied the
+  outbound writers: its data writer is evicted, the task signalled to exit, as its control lane is (before
+  `c5-evict-data-writer`, a blind `remove` left the task running on its established mTLS session, fed by the shards'
+  cached sender; gate: `lib_tests::member_removal::a_removed_members_data_writer_is_shut_down_and_nothing_more_reaches_it`).
+  A ping's piggybacked `known_peers` never re-introduce it: a peer that has not yet applied the
   removal still lists it, and the Ping arm skips it (from #801; before, only the sender was checked, so peer
   exchange brought a removed member back — every tick with SWIM off). Gate:
   `lib_tests::test_piggybacked_removed_member_not_added`. Every insert into the peer table — the Ping arm's sender

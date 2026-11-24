@@ -15676,6 +15676,68 @@ mod member_removal {
         }
         let _ = std::fs::remove_dir_all(&cert_dir);
     }
+
+    /// **A removed member's data writer is shut down, and nothing more reaches it** (closure plan C5; #834's review,
+    /// §2.7). The removal used to take B's entry out of A's writer map with a blind `remove`: the writer task was never
+    /// signalled, so it kept its established mTLS session to B — no verifier re-judges a session — and the shards'
+    /// cached sender kept feeding it until the forwarding set was next reconciled. Now the removal evicts it, as it
+    /// does B's control lane: the task exits, the cached sender goes `Closed`, and a respawned writer's handshake is
+    /// refused (B's key is removed). The health interval is long, so no reconcile takes B out of A's forwarding set
+    /// while the test runs: what stops the frames is the eviction. Seen failing first with the blind `remove` restored:
+    /// the old writer stayed live and A's write after the removal reached B.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_removed_members_data_writer_is_shut_down_and_nothing_more_reaches_it() {
+        let ports = [alloc_port(), alloc_port()];
+        let id = |p: u16| NodeId::new("127.0.0.1", p).unwrap();
+        let (node_a, node_b) = (id(ports[0]), id(ports[1]));
+        let cert_dir = std::env::temp_dir().join(format!("myc-c5w-{}-{}", ports[0], ports[1]));
+        let _ = std::fs::remove_dir_all(&cert_dir);
+        let mk = |port: u16, boots: Vec<NodeId>| {
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = port;
+            cfg.bootstrap_peers = boots;
+            cfg.reconnect_backoff_secs = 1;
+            cfg.health_check_interval_secs = 60;
+            cfg.tls = Some({
+                let mut tls = TlsConfig::default();
+                tls.auto_cert_dir = cert_dir.clone();
+                tls
+            });
+            Arc::new(GossipAgent::new(id(port), cfg))
+        };
+        let a = mk(ports[0], vec![]);
+        a.start().await.unwrap();
+        let b = mk(ports[1], vec![node_a.clone()]);
+        b.start().await.unwrap();
+        assert!(poll(|| a.peers().contains(&node_b) && b.peers().contains(&node_a)).await, "the pair failed to peer");
+        // B's identity key, from B itself: what A has gossiped of it is not what this test is about.
+        let key_b = b.identity_public_key().expect("B has an identity key");
+        // The channel works before the removal, so the silence after it is the removal's.
+        let _ = a.kv().set("c5w/before", b"a".to_vec());
+        assert!(poll(|| b.kv().get("c5w/before").is_some()).await, "A's write never reached B before the removal");
+        let task = a.peer_writers.pin().get(&node_b).and_then(|e| e.abort_handle.clone()).expect("A holds a running writer to B");
+        assert!(!task.is_finished());
+
+        let operator = SigningKey::from_bytes(&[53u8; 32]);
+        let mut external = TrustedExternalIssuers::new();
+        external.trust(IssuerId::new("operator:membership").unwrap(), operator.verifying_key().to_bytes()).unwrap();
+        a.with_membership_authorities([IssuerId::new("operator:membership").unwrap()], external);
+        assert_eq!(a.offer_member_removal(&removal(&operator, "operator:membership", &node_b, vec![key_b])), Some(RemovalOffer::Accepted));
+
+        assert!(poll(|| task.is_finished()).await, "ORPHAN: the removed member's data writer was never shut down");
+        let _ = a.kv().set("c5w/after", b"a".to_vec());
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert!(b.kv().get("c5w/after").is_none(), "ORPHAN: A's write after the removal reached the removed member");
+        assert!(
+            a.peer_writers.pin().get(&node_b).is_none_or(|e| !e.connected.load(std::sync::atomic::Ordering::Acquire)),
+            "no connected data writer to the removed member"
+        );
+
+        for n in [&a, &b] {
+            n.shutdown_with_timeout(Duration::from_secs(5)).await;
+        }
+        let _ = std::fs::remove_dir_all(&cert_dir);
+    }
 }
 
 /// A token table the build cannot enforce must refuse to start, never run an open gateway
