@@ -1,11 +1,12 @@
 # A control lane on each peer connection (B1): design note
 
-**Status:** PR 1, the mechanism, built (2026-11-22; #832, with its review's F1–F7 answered on 2026-11-23: no lane to
+**Status:** PR 2, the cancel-forward and its reply on the lane, built (2026-11-23; tests
+`src/agent/call_cancel_lane_tests.rs`). PR 1, the mechanism, built (2026-11-22; #832, with its review's F1–F7 answered on 2026-11-23: no lane to
 a removed member; the 300 s backoff only after a refused handshake; the real bound on a data reconnect stated, one
 refused connect and one reconnect backoff; a reply rides only for a received control request, to its sender; the
 yield tick a ticker, not a per-iteration sleep): the lane connection and its writer map, the M1 rules, the M3 sites,
 M4's evidence append, `CONTROL_KINDS`, `control_lane`, the counters and D7 (`mycelium-core/src/control_lane.rs`; tests
-`src/control_lane_tests.rs`). **No frame kind uses the lane yet**: PR 2 moves `sys.call-cancel.v1` and its reply onto
+`src/control_lane_tests.rs`). In PR 1 no frame kind used the lane; PR 2 moves `sys.call-cancel.v1` and its reply onto
 it (§6). B1 was decided 2026-11-22. An independent review (2026-11-22) found the note *sound with changes*, and this
 revision folds those changes in. **Line numbers** are from `origin/main` at `9644e9f8`.
 
@@ -225,10 +226,11 @@ keyed one-connection-per-peer:
 off the reader into a spawned task. The apply stays inline first, so "apply, then hand to the WAL" holds. The spawned
 appends are bounded by the evidence rate limit of one per (kind, sender) per second. `append_try` was considered and
 not chosen: a dropped append would be counted in `dropped_appends`, which the O10 tests assert is zero. The inline
-await for other kinds is left as is; that is a data-path question outside B1. **M4 covers request kinds only** (`is_control_kind(&sig.kind)` in `connection.rs`): a lane frame of kind
-`rpc.result` — PR 2's reply — still appends inline. That is safe today only because `rpc.result` has no local worker
-and so writes no evidence (`quorum_evidence_payload`, `has_worker`). PR 2 must keep the reply evidence-free, or
-widen the condition. **Old receivers keep the coupling:** a
+await for other kinds is left as is; that is a data-path question outside B1. **M4 covered request kinds only in PR 1** (`is_control_kind(&sig.kind)` in `connection.rs`): a lane frame of kind
+`rpc.result` would still have appended inline, safe only because `rpc.result` has no local worker and so writes no
+evidence (`quorum_evidence_payload`, `has_worker`). **PR 2 widens the condition** to `rpc.result` too, so the reply
+never waits for the WAL in a reader even if something were to register a worker for it; for every other kind the
+inline await is unchanged. **Old receivers keep the coupling:** a
 new gateway with an old provider gets the first lane frame through, and a later lane frame can wait behind the
 provider's WAL backlog under `flush`.
 
@@ -298,6 +300,20 @@ Gossip's drop odds are unchanged.
 **Lane down, data up:** the shared copy delivers. **Data down, lane up:** the lane delivers. The reply goes on the
 provider's lane back if one opens; otherwise it goes by the shared path, which may flood. That still meets bound 1, but
 the receipt is late.
+
+**A flapping data writer** (PR 2, from #832's round-3 review). While the provider's data writer is reconnecting, no
+lane opens to it and an open one yields, so a cancel in that window goes by the shared path alone: it is covered by
+#826's re-sends (an unanswered forward is sent again until the provider answers or the window ends) and by the
+revocation the KV carries, which reaches the provider once the data connection is back and stops the call there. **A
+lane in the middle of its TCP connect or TLS handshake checks nothing until that step ends** (bounded by
+`handshake_timeout_ms`): the yield check runs before each batch and on the tick, so a data writer that loses its socket
+during the lane's handshake is seen only once the handshake completes or fails.
+
+**A reply rides the lane only for a request that passed its receive boundary as its own sender** (PR 2, #832's
+round-3 review): the provider's `serve` answers through `rpc_respond_control` only when the request's envelope verified
+signed as its sender and its `via` is the frame's `sender`. A refusal, and an admitted request whose `via` is another
+node, is answered by the shared path only; and the lane opens no M7 lane for a reply to a node this one does not know.
+A forged `sender` therefore cannot make a provider dial an address of the forger's choosing.
 
 **Per-source caps (M1).**
 

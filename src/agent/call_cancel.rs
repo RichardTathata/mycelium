@@ -592,7 +592,9 @@ async fn attempt(ctx: &TaskCtx, target: NodeId, payload: Bytes) -> Result<Bytes,
             return Err(super::rpc::RpcError::Timeout);
         }
     }
-    let reply = super::rpc::rpc_call_ctx(ctx, target, Arc::from(CANCEL_RPC_KIND), payload, Duration::from_millis(CANCEL_FORWARD_TIMEOUT_MS)).await;
+    // B1: the forward rides the control lane too, so it waits behind none of this node's gossip to the provider, nor
+    // behind the provider's reader of that gossip (`docs/design/control-lane.md`).
+    let reply = super::rpc::rpc_call_ctx_control(ctx, target, Arc::from(CANCEL_RPC_KIND), payload, Duration::from_millis(CANCEL_FORWARD_TIMEOUT_MS)).await;
     // A test stands in for a forward delivered whose answer is lost (#821's confirm round): the provider acted on it.
     #[cfg(test)]
     if reply.is_ok() && test_hooks::answer_lost(&ctx.node_id) {
@@ -885,16 +887,20 @@ fn refused(ctx: &TaskCtx, reason: &'static str, detail: &str) -> Vec<u8> {
 /// **Who sent this cancel-forward, if it is the term's issuing gateway** — the request in an envelope its sender
 /// signed as itself (`principal` = `node:{via}`, `via` its verified sender), and the checkpoint that gateway's. `Err`:
 /// the refusal to answer with.
-fn admit(ctx: &TaskCtx, req: &super::rpc::RpcRequest) -> Result<(PrincipalId, SignedRevocationCheckpoint), Vec<u8>> {
+/// What `admit` hands on: the issuer, its checkpoint, and whether the reply may ride the control lane — the request
+/// passed its receive boundary signed as its own sender (`via` is the frame's `sender`).
+type Admitted = (PrincipalId, SignedRevocationCheckpoint, bool);
+
+fn admit(ctx: &TaskCtx, req: &super::rpc::RpcRequest) -> Result<Admitted, Vec<u8>> {
     let Ok(v) = serde_json::from_slice::<Value>(&req.payload()) else {
         return Err(refused(ctx, "malformed", "the cancel-forward is not JSON"));
     };
     let Some(signed) = v.get("checkpoint").cloned().and_then(|c| serde_json::from_value::<SignedRevocationCheckpoint>(c).ok()) else {
         return Err(refused(ctx, "malformed", "the cancel-forward carries no revocation checkpoint"));
     };
-    let sender = match super::gateway_caller::verify(ctx, req) {
+    let (sender, via_is_sender) = match super::gateway_caller::verify(ctx, req) {
         Ok(Some(c)) if matches!(c.attestation, super::gateway_caller::CallerAttestation::Signed { .. }) && c.principal == node_principal(&c.via) => {
-            node_principal(&c.via)
+            (node_principal(&c.via), &c.via == req.sender())
         }
         _ => return Err(refused(ctx, "cancel_not_from_issuer", "a cancel-forward is accepted only in an envelope its sender signed as itself")),
     };
@@ -905,7 +911,7 @@ fn admit(ctx: &TaskCtx, req: &super::rpc::RpcRequest) -> Result<(PrincipalId, Si
     if ctx.execution_authority.get().is_none() {
         return Err(refused(ctx, "no_authority", "this node has no execution authority, so it holds no call to cancel"));
     }
-    Ok((by, signed))
+    Ok((by, signed, via_is_sender))
 }
 
 /// Hold the revocation, ask the work to stop, and say what happened — waiting up to [`CANCEL_CONFIRM_WAIT_MS`] for
@@ -989,9 +995,16 @@ pub(crate) fn serve(agent: &crate::GossipAgent) {
     // Detached, as `replica_sync::serve` is: the loop ends when `rpc_rx` yields `None` at shutdown.
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
+            #[cfg(test)]
+            test_hooks::note_served(&ctx.node_id);
             match admit(&ctx, &req) {
+                // A refusal goes by the shared path only (#832's round-3 review): its request's `sender` is unproven.
                 Err(reply) => super::rpc::rpc_respond_ctx(&ctx, &req, reply),
-                Ok((by, signed)) => {
+                Ok((by, signed, lane)) => {
+                    // B1: the answer rides the control lane back only for a request signed as its own sender.
+                    let respond = move |ctx: &TaskCtx, req: &super::rpc::RpcRequest, reply: Vec<u8>| {
+                        if lane { super::rpc::rpc_respond_control(ctx, req, reply) } else { super::rpc::rpc_respond_ctx(ctx, req, reply) }
+                    };
                     let ctx = Arc::clone(&ctx);
                     let key = (by.as_str().to_string(), signed.checkpoint.scope.clone());
                     let mine = Arc::new(Answering::default());
@@ -1009,7 +1022,7 @@ pub(crate) fn serve(agent: &crate::GossipAgent) {
                                     Some(reply) => reply,
                                     None => answer(&ctx, &by, &signed, false).await,
                                 };
-                                super::rpc::rpc_respond_ctx(&ctx, &req, reply);
+                                respond(&ctx, &req, reply);
                             });
                         }
                         None => {
@@ -1024,7 +1037,7 @@ pub(crate) fn serve(agent: &crate::GossipAgent) {
                                 let reply = answer(&ctx, &by, &signed, permit.is_some()).await;
                                 drop(permit);
                                 mine.done(&reply);
-                                super::rpc::rpc_respond_ctx(&ctx, &req, reply);
+                                respond(&ctx, &req, reply);
                             });
                         }
                     }
@@ -1118,6 +1131,22 @@ impl crate::GossipAgent {
 /// Test hooks.
 #[cfg(test)]
 pub(crate) mod test_hooks {
+    /// Per provider node: how many cancel-forward requests its `serve` loop has taken from `rpc_rx` (B1's T5: a
+    /// request sent on the lane and by the shared path is served once).
+    pub(crate) static SERVED: std::sync::LazyLock<papaya::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU64>>> =
+        std::sync::LazyLock::new(papaya::HashMap::new);
+
+    pub(super) fn note_served(node: &crate::node_id::NodeId) {
+        let c = std::sync::Arc::clone(SERVED.pin().get_or_insert_with(node.to_string(), Default::default));
+        c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// How many cancel-forwards `node` has served.
+    #[cfg_attr(not(feature = "compliance"), allow(dead_code))] // read by `call_cancel_lane_tests`
+    pub(crate) fn served(node: &crate::node_id::NodeId) -> u64 {
+        SERVED.pin().get(&node.to_string()).map_or(0, |c| c.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
     /// Per gateway node: forwards are not sent (the receipt answers `DeliveryUnknown`), so a test sees what the KV
     /// path alone does.
     pub(crate) static SUPPRESS_FORWARD: std::sync::LazyLock<papaya::HashMap<String, ()>> = std::sync::LazyLock::new(papaya::HashMap::new);

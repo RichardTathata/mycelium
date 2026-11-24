@@ -582,6 +582,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The cancel-forward and its reply ride the control lane** (B1, PR 2 of 2; `docs/design/control-lane.md`;
+  `deprecations.md` §127; [feature page](docs/features/mandates.md)). Each attempt of a gateway's cancel-forward
+  (`sys.call-cancel.v1`) goes by the shared path and, as the same encoded frame, on the gateway's lane to the provider
+  (`rpc_call_ctx_control`); the provider answers on its lane back (`rpc_respond_control`) only for a request that passed
+  the receive boundary signed as its own sender — a refusal goes by the shared path only. A cancel can now overtake its
+  call: the provider holds the revocation, answers `NotRegistered`, and refuses the call `revoked`. The lane's yield tick
+  follows the smaller of the live and the start reconnect backoff; the reader's evidence append covers `rpc.result`.
+  The mints test (`under_the_default_mode_…_behind_concurrent_mints`, on main without #824: 460 to 726 mints) passed 28
+  of 30 debug runs and 10 of 10 release runs, the stop 10.8 to 35 ms after the cancel; the two failures were in its
+  setup, before any cancel. *Check:* a fleet that cancels calls opens a second connection per provider; allow 2 per node behind one
+  address in `max_connections_per_source`.
 - **The control lane, the mechanism** (B1, PR 1 of 2; `docs/design/control-lane.md`; `deprecations.md` §126;
   [feature page](docs/features/signal-mesh.md)). A second connection per peer, beside the data connection, with its own
   writer, its own 64-frame channel and its own reader at the receiver, for the closed set

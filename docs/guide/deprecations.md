@@ -79,6 +79,7 @@ the notice.
 | 56 | a `FleetTally` rule reading a member's entries this node holds without its heartbeat as zero, or counting a forged (future) time as a permit | 2.37.0 (row K2, #656) | nothing to migrate: such a member is unknown coverage while its entry is inside the window plus the staleness and drift bounds | **No** — a tally rule can decide `Indeterminate` where it admitted before, for at most that window ([§56](#56-a-members-tally-entries-without-its-heartbeat-are-unknown-coverage-not-zero-2370-post-360-plan-row-k2)) |
 | 109 | a struct literal of `GossipConfig`, `TlsConfig`, `GatewayTlsConfig` or `OidcConfig` outside `mycelium-core`, with or without `..Default::default()` | 2.41.0 (critique plan CR12) | `let mut c = X::default();` and assign the fields | **Yes** — `E0639`; a field added later then breaks nothing ([§109](#109-gossipconfig-tlsconfig-gatewaytlsconfig-and-oidcconfig-are-non_exhaustive-build-one-with-default-and-assignment-2410-critique-plan-row-cr12)) |
 | 126 | a `SystemStats`, `CoreCtx` or `WriterEntry` literal; a direct `run_peer_writer` call; `max_connections_per_source` at 1 per address for nodes running the control lane | unreleased (B1, PR 1) | add the new fields and arguments; a per-source cap of at least 2 per node, or `control_lane = false` | **Yes** for the literals and the call; **no** for the cap — a refused lane falls back to the shared path, counted ([§126](#126-a-control-lane-a-second-connection-per-peer-for-the-closed-set-of-control-kinds-behind-control_lane-on-by-default-max_connections_per_source-must-allow-two-per-node-behind-one-address-unreleased-b1-pr-1)) |
+| 127 | a fleet that cancels calls: each gateway opens a second connection to a provider it cancels a call at, and a provider one back | unreleased (B1, PR 2) | a `max_connections_per_source` of at least 2 per node, or `control_lane = false` | **No** — behaviour; a cancel can now overtake its call and is answered `NotRegistered` there ([§127](#127-the-cancel-forward-and-its-reply-ride-the-control-lane-a-gateways-cancel-opens-a-second-connection-to-the-provider-unreleased-b1-pr-2)) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -5773,3 +5774,38 @@ unaffected.
 - **Code:** `mycelium-core/src/control_lane.rs`, `mycelium-core/src/writer.rs` (`run_peer_writer`'s lane role,
   `claim_or_spawn`), `mycelium-core/src/ops.rs` (`emit_signal_control`), `mycelium-core/src/connection.rs` (the
   evidence append). Tests: `src/control_lane_tests.rs`.
+
+## 127. The cancel-forward and its reply ride the control lane: a gateway's cancel opens a second connection to the provider (unreleased, B1, PR 2)
+
+**What changes.** §126 built the control lane and put no frame on it. From this release the cancel-forward
+(`sys.call-cancel.v1`, identity-and-lifecycle I4) rides it: `call_cancel`'s forward is sent by the shared path as
+before **and** as the same encoded frame on the gateway's lane to the provider (`rpc_call_ctx_control`). The provider's
+answer rides its lane back (`rpc_respond_control`) — **only** for a request that passed the receive boundary signed as
+its own sender (its envelope's `via` is the frame's `sender`); a refusal, and any other answer, goes by the shared path
+only. So a cancel no longer waits behind the gateway's own gossip in its writer, nor behind the provider's reader of
+that gossip — which under a flood of the gateway's own mints is what kept I4's bound 1 (the stop within *F* = 2 s) from
+holding (§9 O13).
+
+**What you see.**
+- **A second connection.** The first cancel to a provider opens the gateway's lane to it (TCP, and mTLS under
+  `[tls]`); the provider's first answer opens its lane back. Each is idle-evicted after `writer_idle_timeout_secs`.
+  §126's notes on `max_connections`, `max_connections_per_source` (2 per node behind one address) and conntrack now
+  apply to every fleet that cancels calls.
+- **`control_lane_sent`** rises with each cancel; **`control_late_duplicates`** at a provider counts a forward's slow
+  twin that arrived after the seen-set forgot its nonce.
+- **A cancel can overtake its call** (M6): sent while the call's request still waits behind gossip, the cancel reaches
+  the provider first. The provider holds the revocation, answers `NotRegistered` (where it would have answered
+  `Stopped`), and refuses the call `revoked` when it arrives — it never runs. If the provider's revocation windows are
+  at their cap (`NotHeld`), the late call is judged by the revocation the KV carries instead.
+- **The reader's evidence append** (§126's M4) now covers `rpc.result` too.
+
+**Mixed fleets.** A provider at an older release, or with `control_lane = false`, serves the gateway's lane like any
+connection and answers by the shared path; the receipt is the same. A gateway at an older release sends no lane copy.
+
+**Will the compiler tell me?** No — behaviour only. `GossipConfig::control_lane = false` on the gateways turns it off.
+
+- ***Check:*** after a cancel, `GET /stats` at the gateway has `control_lane_sent` ≥ 1 and `control_lanes_open` ≥ 1;
+  `control_lane_connect_failed` rising under TLS means a provider's per-source cap refuses the lane.
+- **Code:** `src/agent/call_cancel.rs` (`attempt`, `admit`, `serve`), `src/agent/rpc.rs` (`rpc_call_ctx_control`,
+  `rpc_respond_control`). Tests: `src/agent/call_cancel_lane_tests.rs`.
+

@@ -629,6 +629,10 @@ async fn the_stop_beats_the_acknowledgement_behind(mode: crate::config::SyncMode
         });
         // The gateway's record read in the same poll that sees the stop.
         let seq_at_stop = std::sync::atomic::AtomicU64::new(0);
+        // B1's T1b: how far the burst had got to the provider when the stop was seen — its `call/` records there against
+        // the gateway's. Reported: with the cancel on the control lane the stop does not wait for them.
+        let call_records = |n: &super::call_mint_tests::N| crate::store::scan_kv_prefix(&n.ctx().kv_state, "call/").len();
+        let records_at_stop = std::sync::atomic::AtomicUsize::new(0);
         let stopped = until(
             || {
                 // The stop first, then the record: a first checkpoint read *after* the stop was seen proves the write
@@ -636,6 +640,7 @@ async fn the_stop_beats_the_acknowledgement_behind(mode: crate::config::SyncMode
                 let done = p.authority.running_count() == 0;
                 if done {
                     seq_at_stop.store(seq_of(&term).unwrap_or(0), Ordering::SeqCst);
+                    records_at_stop.store(call_records(&p), Ordering::SeqCst);
                 }
                 done
             },
@@ -652,6 +657,12 @@ async fn the_stop_beats_the_acknowledgement_behind(mode: crate::config::SyncMode
         eprintln!(
             "§9 O10, {mode:?} round {round} behind {n} {burst:?} (one drains in {per:?} here): the provider's stop seen {stop_took:?} after the cancel, the gateway's record then at sequence {seq_at_stop}; the cancel acknowledged {ack_took:?} after it; receipt {receipt:?}; forwards {}",
             g.ctx().call_issuer.cancel_forwards.to_json()
+        );
+        let gs = g.a.system_stats();
+        eprintln!(
+            "B1 T1b: at the stop the provider held {} `call/` records, the gateway {}; the gateway's lane: sent {}, full {}, connect {} ms, connect_failed {}, dropped {}",
+            records_at_stop.load(Ordering::SeqCst), call_records(&g), gs.control_lane_sent, gs.control_lane_full,
+            gs.control_lane_last_connect_ms, gs.control_lane_connect_failed, gs.control_lane_dropped,
         );
         assert!(stopped, "the call stopped at the provider");
         assert!(
@@ -679,7 +690,9 @@ async fn the_stop_beats_the_acknowledgement_behind(mode: crate::config::SyncMode
             let _ = std::fs::remove_dir_all(&cert_dir);
             return;
         }
-        n = n.saturating_mul(2);
+        // Clamped (#826's review): a calibration that keeps overshooting must not double the burst past what one test
+        // should queue.
+        n = (n * 2).min(100_000);
     }
     panic!("in three rounds, up to {} {burst:?}, the burst never held the revocation's durable write until the stop: the calibration ({per:?} a unit) overshot the disk, so the test showed nothing", n / 2);
 }
