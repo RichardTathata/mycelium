@@ -3644,6 +3644,9 @@ Items found while building a row that the row does not own. Each names its home,
     2026-11-09, five first calls after the restart timed out after them (idle and loaded alike). The driver therefore
     holds a second grant issued before the restart, presented when the first call times out, and counts each such
     timeout (`o2_timeouts`).
+  - **Stopgap:** #834 (2026-11-23) makes `a_gateway_crash_between_the_forward_and_the_sync_…` prove a write each way
+    and ask for the sync again after the provider's restart, instead of betting on the first anti-entropy reply. It
+    is a workaround, not a fix: the transport fix (after B1) reverts it.
 - **O3 · Refusing an unsigned call from a certificate holder** *(open; I1's "then refused")*. A `token:` principal with
   a client certificate on record calling without `cs` is counted (`gateway_actions_unsigned`, `provider_actions_unsigned`)
   and not refused (`deprecations.md` §87). The refusal waits a release in which the counters are visible, so an

@@ -4,7 +4,7 @@
 
 use super::call_cancel::{self, CallSink, DoorCancel, CANCEL_RPC_KIND, MAX_MCP_CANCEL_ENTRIES};
 use super::call_issuer;
-use super::call_mint_tests::{node, pair, until, Opts, F_MS, MCP};
+use super::call_mint_tests::{node, pair, until, Opts, F_MS, MCP, N};
 use super::gateway_authority::call_checkpoint_key;
 use crate::mandate::authority::SignedRevocationCheckpoint;
 use crate::{CancelClass, NodeId};
@@ -926,11 +926,22 @@ async fn a_gateway_crash_between_the_forward_and_the_sync_leaves_no_record_and_a
     drop(p);
     tokio::time::sleep(Duration::from_millis(300)).await;
     let p = node(popts).await;
-    // Structural, not a wait (#821's CI): the gateway still holds the old instance's key, so keys prove nothing. The
-    // restarted provider holds the call's checkpoint only once the gateway has synced its KV to it, and the gateway
-    // counts it connected only once a session to the new instance is up — both facts of the new instance.
-    let reachable = || p.kv(&cp).is_some() && g.a.connected_peers().contains(&pid) && knows(&p.a, &gid);
-    assert!(until(reachable, Duration::from_secs(30)).await, "the restarted provider is reachable from the gateway and holds its records");
+    // STOPGAP for #746 (plan §9 O2, which stays open; the transport fix reverts this): the gateway may still hold a
+    // writer whose connection goes to the provider's previous process, so its first anti-entropy reply to the restarted
+    // provider can go down the dead connection and be lost, and the provider asks again only after its
+    // `resync_cooldown` (30 s here) — the wait below used to bet on that first reply. The gateway still holds the old
+    // instance's key, so keys prove nothing (#821's CI). Instead, as `run_client_grant.mjs`'s `meshed()` does: a write
+    // each way, re-written until it arrives (the gateway's re-writes are what replace the stale *connection*: a failed
+    // write drops it and the next frame re-dials the live process; the writer task itself survives), and then the sync
+    // asked for again over the path just shown to deliver both ways, until the call's checkpoint is held. Each step is
+    // bounded. **What this no longer shows:** that the restarted provider gets the gateway's records unprompted, through
+    // its own anti-entropy. That was never this test's claim, and its failing is the O2 defect itself.
+    assert!(write_reaches(&g, &p, "o2/forward", Duration::from_secs(20)).await, "a write at the gateway reaches the restarted provider");
+    assert!(write_reaches(&p, &g, "o2/back", Duration::from_secs(20)).await, "a write at the restarted provider reaches the gateway");
+    assert!(synced_from(&p, &gid, || p.kv(&cp).is_some(), Duration::from_secs(30)).await, "the restarted provider holds the gateway's records");
+    // The provider's key for the gateway arrives on its own schedule, unordered with the checkpoint: waited for, bounded.
+    // (`connected_peers` is the writer map's keys, stale entries included, so it proves nothing and is not asserted.)
+    assert!(until(|| knows(&p.a, &gid), Duration::from_secs(5)).await, "the restarted provider holds the gateway's key");
     let g = Arc::new(g);
     let (g2, pid2) = (Arc::clone(&g), pid.clone());
     let again = tokio::spawn(async move { g2.send(&pid2, framed).await });
@@ -949,6 +960,51 @@ async fn a_gateway_crash_between_the_forward_and_the_sync_leaves_no_record_and_a
     for d in [&cert_dir, &gdir, &pdir] {
         let _ = std::fs::remove_dir_all(d);
     }
+}
+
+/// STOPGAP for #746 (plan §9 O2, open): whether a write at `from` reaches `to` within `within`, the write made again
+/// each half second until it does — so a frame lost into a connection to a restarted peer's previous process is not the
+/// last word: the sender's failed write drops that connection, and its next frame re-dials the live process. `run_client_grant.mjs`'s `meshed()`, in Rust.
+async fn write_reaches(from: &N, to: &N, key: &str, within: Duration) -> bool {
+    let deadline = std::time::Instant::now() + within;
+    let mut round = 0u64;
+    while std::time::Instant::now() < deadline {
+        round += 1;
+        let _ = from.a.kv().set(key, Bytes::from(round.to_string()));
+        if until(|| to.a.kv().get(key).is_some(), Duration::from_millis(500)).await {
+            return true;
+        }
+    }
+    false
+}
+
+/// STOPGAP for #746 (plan §9 O2, open): `n` asks `peer` for anti-entropy now — the `StateRequest` its health tick
+/// sends, built the same way — every two seconds until `held` or `within`, instead of waiting its `resync_cooldown` for
+/// the tick to ask again after a lost reply. A request inside the peer's per-connection cooldown is ignored there, so
+/// the bound must exceed `health_check_interval_secs` − 1 (9 s by default).
+async fn synced_from(n: &N, peer: &NodeId, held: impl Fn() -> bool, within: Duration) -> bool {
+    let deadline = std::time::Instant::now() + within;
+    while std::time::Instant::now() < deadline {
+        let a = &n.a;
+        mycelium_core::writer::request_state(
+            peer,
+            &a.peer_writers,
+            a.task_ctx.hot.writer_depth(),
+            Duration::from_secs(a.task_ctx.hot.reconnect_backoff_secs(a.config.reconnect_backoff_secs)),
+            &mycelium_core::writer::WriterTiming::from_config(&a.config),
+            &a.shutdown_tx,
+            a.node_id(),
+            &a.kv_state.hash_acc,
+            &a.kv_state.dropped_frames,
+            crate::store::store_bucket_hashes(&a.kv_state),
+            a.task_ctx.tls.get().cloned(),
+            a.task_ctx.gossip_txs.unsent(),
+        );
+        if until(&held, Duration::from_secs(2)).await {
+            return true;
+        }
+    }
+    held()
 }
 
 /// **#821's review, F1: a call that completes on its own while its cancel is being recorded is answered as completed,
