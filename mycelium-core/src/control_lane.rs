@@ -75,6 +75,14 @@ pub const CONTROL_LANE_DEPTH: usize = 64;
 pub const CONTROL_LANE_WRITE_BOUND_MS: u64 = 10_000;
 /// How long after a failed lane connect no lane is opened to that peer again (D5, M1).
 pub const CONTROL_LANE_REFUSED_BACKOFF_MS: u64 = 300_000;
+/// The backoff a lane's yield tick is derived from: the smaller of the node's live reconnect backoff (`hot`) and the
+/// one it started with (`start`). A data writer keeps the backoff it was spawned with, so a writer spawned before an
+/// operator raised the backoff still retries at the start value; deriving the tick from the raised value alone would
+/// let that writer's retry beat the lane's yield, and be refused twice (#832's round-3 review).
+pub fn lane_backoff(hot_secs: u64, start_secs: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(hot_secs.min(start_secs))
+}
+
 /// The longest a lane's yield tick runs (M1): an idle lane checks at least this often whether the peer's
 /// data writer lost its socket. A busy lane also checks before each batch. See [`yield_tick_ms`].
 pub const CONTROL_LANE_YIELD_TICK_MS: u64 = 1_000;
@@ -331,7 +339,7 @@ impl ControlLane {
             },
             stalls:  Some(Arc::clone(&ctx.transport_bounds.outbound_stalls)),
         };
-        let backoff = std::time::Duration::from_secs(ctx.hot.reconnect_backoff_secs(ctx.config.reconnect_backoff_secs));
+        let backoff = lane_backoff(ctx.hot.reconnect_backoff_secs(ctx.config.reconnect_backoff_secs), ctx.config.reconnect_backoff_secs);
         let tls = ctx.tls.get().cloned();
         let spawn = || crate::writer::get_or_spawn_lane(
             target, self, backoff, &timing, &ctx.shutdown_tx, tls.clone(), ctx.gossip_txs.unsent(),
@@ -435,6 +443,17 @@ mod tests {
         }
         assert_eq!(yield_tick_ms(Duration::from_secs(5)), CONTROL_LANE_YIELD_TICK_MS);
         assert_eq!(yield_tick_ms(Duration::ZERO), CONTROL_LANE_YIELD_TICK_MIN_MS);
+    }
+
+    /// **The lane's tick follows the smaller of the live and the start backoff** (#832's round-3 review): raising the
+    /// backoff at runtime cannot lengthen the tick past what a writer spawned before the raise retries at. Seen
+    /// failing first with the live value alone.
+    #[test]
+    fn the_lane_backoff_is_the_smaller_of_the_live_and_the_start_value() {
+        use std::time::Duration;
+        assert_eq!(lane_backoff(30, 1), Duration::from_secs(1), "RAISED: the tick followed a backoff raised after start");
+        assert_eq!(lane_backoff(1, 5), Duration::from_secs(1), "a lowered backoff is followed");
+        assert_eq!(lane_backoff(5, 5), Duration::from_secs(5));
     }
 
     /// The set is closed: exactly the kinds the design names, and a test kind only in test builds.

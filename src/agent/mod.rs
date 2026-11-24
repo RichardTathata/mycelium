@@ -243,6 +243,9 @@ mod call_mint_tests;
 /// Identity-and-lifecycle I4, PR 3: the cancel doors — the cancel-forward, the receipt, MCP and A2A.
 #[cfg(all(test, feature = "compliance"))]
 mod call_cancel_tests;
+/// B1, PR 2: the cancel-forward and its reply on the control lane.
+#[cfg(all(test, feature = "compliance"))]
+mod call_cancel_lane_tests;
 /// Identity-and-lifecycle I4, PR 4: the soak (exit 14) and the measurements (exit 18).
 #[cfg(all(test, feature = "compliance", feature = "a2a"))]
 mod call_soak_tests;

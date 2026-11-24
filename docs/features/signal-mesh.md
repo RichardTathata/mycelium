@@ -82,9 +82,9 @@ does not depend on membership).
   more inbound connection at the peer, so a [`max_connections_per_source`](../reference/configuration.md#max_connections_per_source)
   cap must allow 2 per node behind one address ([deprecations §126](../guide/deprecations.md)). Counted in
   `SystemStats::control_lane_*` and `control_late_duplicates`; never in `cached_connections` or
-  `gossip_peers_connected`. Tests: [`src/control_lane_tests.rs`](../../src/control_lane_tests.rs). **Not built at this
-  release:** any kind on the lane — the mechanism is in place and nothing calls it; the cancel-forward moves onto it in
-  B1's second PR.
+  `gossip_peers_connected`. Tests: [`src/control_lane_tests.rs`](../../src/control_lane_tests.rs). **What rides it:** the
+  cancel-forward and its answer ([mandates](mandates.md), [deprecations §127](../guide/deprecations.md)); the
+  answer only for a request that passed the receive boundary signed as its own sender.
 - **Evidence:** the ledger rows
   [one stalled subscriber does not veto its kind, and the signal log is bounded](../operations/what-is-proven.md#silent-slow-stalled-peers-closed-stalled)
   and the [hot-path costs](../operations/what-is-proven.md#hot-path-cost), which give the signal fan-out.

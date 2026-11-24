@@ -1011,7 +1011,9 @@ pub async fn handle_connection(
                             let upd = make_gossip_update(&node_id, max_ttl, q_key, q_val, false, &hlc);
                             apply_and_notify(&kv_state, &upd); // apply, then persist
                             if let Some(ref wal) = wal {
-                                if crate::control_lane::is_control_kind(&sig.kind) {
+                                // …and for `rpc.result`, the kind the lane's replies ride (B1, PR 2): a reply never
+                                // waits for the WAL in a reader either, should one ever write evidence.
+                                if crate::control_lane::is_control_kind(&sig.kind) || &*sig.kind == crate::signal::signal_kind::RPC_RESULT {
                                     // B1, M4: a control kind's evidence append is handed to the WAL off this
                                     // reader — the apply above stays first — so the next control frame on
                                     // this connection does not wait, under `flush`, FIFO behind every record

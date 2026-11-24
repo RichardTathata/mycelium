@@ -412,6 +412,20 @@ impl std::error::Error for RpcError {}
 /// Used by callers that hold an `Arc<TaskCtx>` rather than a full `GossipAgent`
 /// (e.g. MCP task functions). [`ServiceHandle::rpc_respond`] delegates here.
 pub(crate) fn rpc_respond_ctx(ctx: &TaskCtx, request: &RpcRequest, result: impl Into<Bytes>) {
+    respond(ctx, request, result.into(), false);
+}
+
+/// [`rpc_respond_ctx`] for the reply to a request of a **control kind** (B1): the reply goes by the shared path as
+/// always, and a copy rides the control lane back to the request's sender
+/// ([`emit_signal_control`](mycelium_core::ops::emit_signal_control) with `ReplyTo`). **Call it only for a request
+/// that passed its receive boundary** — its envelope verified and its `via` its sender (#832's round-3 review): the
+/// request's `sender` is not authenticated by the signal layer, and a reply to a forged one must not make this node
+/// dial an address of the forger's choosing. A refusal is answered with [`rpc_respond_ctx`], by the shared path only.
+pub(crate) fn rpc_respond_control(ctx: &TaskCtx, request: &RpcRequest, result: impl Into<Bytes>) {
+    respond(ctx, request, result.into(), true);
+}
+
+fn respond(ctx: &TaskCtx, request: &RpcRequest, result_bytes: Bytes, lane: bool) {
     // `Bytes::slice` **asserts** `end <= len`, so an under-length payload panicked here — and the
     // panic was remotely reachable through item 7's own refusal path: a 0–7 byte signal on a kind a
     // provider serves fails `verify` with `Missing`, and the refusal branch in `RpcRequestRx::recv`
@@ -429,10 +443,19 @@ pub(crate) fn rpc_respond_ctx(ctx: &TaskCtx, request: &RpcRequest, result: impl 
     #[cfg(all(feature = "gateway", feature = "tls"))]
     super::provider_enforcement::assess_answer(ctx, request);
     let nonce_bytes = request.0.payload.slice(..8);
-    let result_bytes: Bytes = result.into();
     let mut buf = BytesMut::with_capacity(8 + result_bytes.len());
     buf.put_slice(&nonce_bytes);
     buf.put(result_bytes);
+    if lane {
+        let _ = mycelium_core::ops::emit_signal_control(
+            ctx,
+            Arc::from(signal_kind::RPC_RESULT),
+            request.0.sender.clone(),
+            buf.freeze(),
+            mycelium_core::control_lane::ControlFrame::ReplyTo(&request.0),
+        );
+        return;
+    }
     emit_signal(
         ctx,
         Arc::from(signal_kind::RPC_RESULT),
@@ -463,6 +486,24 @@ pub(crate) async fn rpc_call_ctx(
     rpc_call_framed(ctx, target, kind, payload, timeout).await
 }
 
+/// [`rpc_call_ctx`] for a request of a **control kind** (B1, `mycelium_core::control_lane::CONTROL_KINDS`): the
+/// request goes by the shared path as always, and the same encoded frame rides the control lane to `target`, so it
+/// waits behind no gossip in this node's writer or the target's reader.
+pub(crate) async fn rpc_call_ctx_control(
+    ctx:     &TaskCtx,
+    target:  NodeId,
+    kind:    Arc<str>,
+    payload: Bytes,
+    timeout: Duration,
+) -> Result<Bytes, RpcError> {
+    let payload = if super::gateway_caller::promises_envelopes(&ctx.config) {
+        super::gateway_caller::frame_self(ctx, &target, payload)
+    } else {
+        payload
+    };
+    call_framed(ctx, target, kind, payload, timeout, true).await
+}
+
 /// `rpc_call` over an already-framed payload (a client envelope from the gateway, or a self
 /// envelope from [`rpc_call_ctx`]); prepends only the correlation nonce.
 pub(crate) async fn rpc_call_framed(
@@ -472,6 +513,17 @@ pub(crate) async fn rpc_call_framed(
     payload: Bytes,
     timeout: Duration,
 ) -> Result<Bytes, RpcError> {
+    call_framed(ctx, target, kind, payload, timeout, false).await
+}
+
+async fn call_framed(
+    ctx:     &TaskCtx,
+    target:  NodeId,
+    kind:    Arc<str>,
+    payload: Bytes,
+    timeout: Duration,
+    lane:    bool,
+) -> Result<Bytes, RpcError> {
     // Registered before the request leaves: a provider on this node can answer before `emit_signal` returns.
     let reply = PendingReply::register(ctx, &target, || fastrand::u64(1..));
 
@@ -479,7 +531,11 @@ pub(crate) async fn rpc_call_framed(
     buf.put_u64_le(reply.nonce());
     buf.put(payload);
 
-    emit_signal(ctx, kind, SignalScope::Individual(target.clone()), buf.freeze());
+    if lane {
+        let _ = mycelium_core::ops::emit_signal_control(ctx, kind, target.clone(), buf.freeze(), mycelium_core::control_lane::ControlFrame::Request);
+    } else {
+        emit_signal(ctx, kind, SignalScope::Individual(target.clone()), buf.freeze());
+    }
     #[cfg(test)]
     after_emit::run(&ctx.node_id);
 

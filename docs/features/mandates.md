@@ -92,13 +92,24 @@ work.
   re-send's answer stands where the first attempt or its answer was lost. Two edges: a re-send reaching a provider
   that no longer keeps the stop record (the newest 1 024) is answered `NotRunning` — at `/a2a`, *completed*; and a
   re-send reaching a **restarted** provider while unanswered plants its hold there, so a call re-presented later is
-  refused `revoked` — better than the crash bound below, which is unchanged for a gateway crash. **Not changed:** a
-  forward delayed in order behind the gateway's own gossip is not made faster (behind a flood of mints the stop was
-  inside *F* in 5 runs of 10, the test passing 4 of 10). `GET /stats` `call_cancel_forwards` (`attempts`, `retries`, `answered_first`,
+  refused `revoked` — better than the crash bound below, which is unchanged for a gateway crash. Before B1's second PR a
+  forward delayed in order behind the gateway's own gossip was not made faster (behind a flood of mints the stop was
+  inside *F* in 5 runs of 10, the test passing 4 of 10); the forward now also rides the control lane (below). `GET /stats` `call_cancel_forwards` (`attempts`, `retries`, `answered_first`,
   `answered_on_retry`, `answered_after_receipt`, `unanswered`, `superseded`, `joined`, `provider_joined`) and two
   counters ([metrics](../operations/metrics.md#contracts-axis--receipts-control-envelope-authorisation)) are the
   evidence on which a lane of its own for control signals is to be decided
   ([ledger](../operations/what-is-proven.md#call-cancel-forward-resent)).
+- **The cancel-forward rides the [control lane](../guide/00-concepts.md#control-lane)** (B1, `docs/design/control-lane.md`,
+  [deprecations §127](../guide/deprecations.md)): each attempt is sent by the shared path and, as the same encoded frame,
+  on the gateway's second connection to the provider, so it waits behind none of the gateway's gossip in its writer nor
+  behind the provider's reader of it. The provider's answer rides its lane back **only** for a request that passed the
+  receive boundary signed as its own sender (`via` is the frame's `sender`); a refusal goes by the shared path only, so a
+  forged sender cannot make a provider dial an address of its choosing. **A cancel can now overtake its call** (M6):
+  the provider holds the revocation of a term it has not registered, answers `NotRegistered`, and refuses the call
+  `revoked` when it arrives. Behind the gateway's own concurrent mints (on main, without #824's group commit: bursts of 460 to 726 mints) the stop came inside *F* in every run that reached the cancel — 10.8 to 35 ms after it, 28 of 30 debug runs and 10 of 10 release runs passing, the two failures in the test's setup before any cancel; behind #824's 12 000-mint flood it is still to be run
+  ([ledger](../operations/what-is-proven.md#call-cancel-forward-resent)). It costs one more connection per provider a
+  gateway cancels at, idle-evicted, against the provider's `max_connections_per_source` (allow 2 per node). Tests:
+  [`src/agent/call_cancel_lane_tests.rs`](../../src/agent/call_cancel_lane_tests.rs).
 - **Not built, for the `call:` mandate:** a receipt on the A2A or MCP wire (by decision, Q2: the doors answer what
   the gateway did); after a gateway restart, the gateway re-asserts nothing and forwards nothing for the calls it
   minted before (`NotForwarded`: the KV carries the cancel). The authority's half and the provider's admission are

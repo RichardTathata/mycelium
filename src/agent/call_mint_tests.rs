@@ -56,6 +56,11 @@ pub(super) struct Opts {
     /// I4, PR 3a (#799's review, M1): the provider in `pair` has an execution authority and **no** provider
     /// enforcement.
     pub(super) no_enforce: bool,
+    /// B1: `control_lane = false` on this node.
+    pub(super) no_lane: bool,
+    /// B1, in `pair`: the provider runs with `[persistence]` (`Flush`) and with `control_lane = false`.
+    pub(super) provider_persist: bool,
+    pub(super) provider_no_lane: bool,
 }
 
 pub(super) struct N {
@@ -94,6 +99,7 @@ pub(super) async fn node(opts: Opts) -> N {
         cfg.persistence = Some(PersistenceConfig { base_path: dir.join("persist"), sync_mode, snapshot_wal_threshold, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
     }
     cfg.gateway_mint_call_mandates = opts.mint;
+    cfg.control_lane = !opts.no_lane;
     cfg.collect_expired_records = opts.collect;
     if let Some(r) = opts.retention_secs {
         cfg.grant_retention_secs = r;
@@ -105,6 +111,8 @@ pub(super) async fn node(opts: Opts) -> N {
     cfg.gateway_named_tokens = vec![
         crate::config::GatewayNamedToken { name: "alice".into(), token: "alice-secret".into(), scopes: vec!["mcp:invoke".into()] },
         crate::config::GatewayNamedToken { name: "bob".into(), token: "bob-secret".into(), scopes: vec!["mcp:invoke".into()] },
+        // B1's T4b: a client that may emit signals.
+        crate::config::GatewayNamedToken { name: "mesher".into(), token: "mesher-secret".into(), scopes: vec!["mesh:write".into()] },
     ];
     let a = GossipAgent::new(id.clone(), cfg);
     #[cfg(feature = "a2a")]
@@ -258,10 +266,11 @@ pub(super) async fn until(cond: impl Fn() -> bool, within: Duration) -> bool {
 /// other's key and `g` sees both of `p`'s tools.
 pub(super) async fn pair(gopts: Opts) -> (N, N, std::path::PathBuf) {
     let (plain, more_doors, no_enforce) = (gopts.plain, gopts.more_doors, gopts.no_enforce);
+    let (persist, no_lane) = (gopts.provider_persist, gopts.provider_no_lane);
     let cert_dir = std::env::temp_dir().join(format!("i4-mint-ca-{}", crate::test_util::alloc_port()));
     let _ = std::fs::remove_dir_all(&cert_dir);
     let g = node(Opts { cert_dir: Some(cert_dir.clone()), ..gopts }).await;
-    let p = node(Opts { cert_dir: Some(cert_dir.clone()), bootstrap: vec![g.a.node_id().clone()], tools: true, plain, more_doors, no_enforce, ..Opts::default() }).await;
+    let p = node(Opts { cert_dir: Some(cert_dir.clone()), bootstrap: vec![g.a.node_id().clone()], tools: true, plain, more_doors, no_enforce, persist, no_lane, ..Opts::default() }).await;
     let knows = |x: &GossipAgent, n: &NodeId| x.task_ctx.peer_keys.pin().get(n).is_some_and(|k| !k.is_empty());
     assert!(until(|| knows(&g.a, p.a.node_id()) && knows(&p.a, g.a.node_id()), Duration::from_secs(20)).await, "the nodes learned each other's keys");
     // Both tools: a test that calls `quick` straight after this was answered `tool not found: quick` under load when

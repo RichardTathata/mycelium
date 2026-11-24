@@ -217,6 +217,7 @@ page = "mandates.md"
 example = "curator_handover"
 ids = ["concept:mandate", "concept:continuation", "guarantee:authz.execution_authority",
        "guarantee:authz.durable_epochs", "concept:strict-eligibility"]
+links = ["concept:control-lane"]
 
 [[feature]]
 name = "Audit trail and audit export"
