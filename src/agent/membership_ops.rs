@@ -53,7 +53,9 @@ fn apply(ctx: &TaskCtx, auth: &MembershipAuthorities, writers: &Writers, signed:
     // that missed the removal, or the insert's re-check sees the removal; without them both can miss.
     std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
     ctx.peers.pin().remove(node);
-    writers.pin().remove(node);
+    // Evicted, not removed blind (#834's review): the task is signalled to exit, so it does not keep its established
+    // mTLS session to the removed member, and the shards' cached sender goes `Closed` instead of feeding it.
+    mycelium_core::writer::evict_peer_writer(writers, node);
     // B1, M3: and its control lane, signalled to exit — a lane is an mTLS connection to the removed member.
     ctx.control_lane.evict(node);
     tracing::warn!(%node, reason = %signed.removal.reason, "membership: member removed");
