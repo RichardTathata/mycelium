@@ -240,8 +240,19 @@ pub trait Installed: Send {
     /// push slow health checks into a background task that flips a flag this reads).
     fn probe(&self) -> bool;
 
-    /// Cooperative teardown: stop serving and clean up (abort tasks, delete placed bytes).
+    /// Cooperative teardown — a withdraw, a shed, a probe failure: stop serving and clean up, placed
+    /// bytes included.
     fn uninstall(self: Box<Self>);
+
+    /// Stop serving and **keep** placed state — what a provisioner's shutdown or drop does (ER5), so the
+    /// next start on this node reuses a placed blob rather than pulling it again. The default drops the
+    /// install.
+    ///
+    /// **A dropped `Installed` must stop serving**: the provisioner relies on it (this default, and any
+    /// path where an install is dropped rather than torn down). The crate's WASM install does so by
+    /// construction — its serve loop ends when the install's retire channel closes — and a call it is
+    /// running is still answered.
+    fn retire(self: Box<Self>) {}
 }
 
 /// How one [`ArtifactKind`] is installed and torn down on this node.
@@ -298,9 +309,9 @@ struct Served {
     signer:   Vec<u8>,
     ns:       Arc<str>,
     again:    Reinstantiate,
-    /// Set by `uninstall` (review finding 2): a call in flight when the install goes keeps running
-    /// on its blocking thread, and must not replace its instance afterwards — no fresh store, no
-    /// start-up code, for an install that is gone.
+    /// Set when the install goes — `uninstall`, `retire` or a drop (review finding 2; ER5): a call in
+    /// flight then keeps running on its blocking thread, and must not replace its instance afterwards —
+    /// no fresh store, no start-up code, for an install that is gone.
     gone:     Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -480,7 +491,13 @@ async fn serve_one(agent: &Arc<GossipAgent>, served: &Arc<Served>, slot: &mut Op
 /// a trapped instance, which runs the guest's start-up code) goes to `spawn_blocking`, the instance
 /// moving there and back. One call at a time per install, as before (a store is single-threaded);
 /// the serve task itself only awaits. A call is bounded by the host's deadline, so a blocking
-/// thread is held for at most that long — including after an uninstall aborts this task mid-call.
+/// thread is held for at most that long.
+///
+/// **It stops by `retire`, never by an abort** (ER5): before each request the loop checks the install's retire
+/// channel, `biased` ahead of the receiver, and returns once it resolves — the install's sender sent or dropped, by
+/// `uninstall`, `retire` or a plain drop. A call already running is awaited inside [`serve_one`], so it finishes and
+/// is answered; requests queued behind it are dropped with the receiver, unanswered (their callers time out). Returning
+/// drops the receiver, so the kind has no receiver here any more.
 ///
 /// **Two ways in, and only one of them is a door.** A request off the mesh arrives through `rpc_rx`, which verifies
 /// its caller and — at an enforcing provider — decides it (`cap.invoke/…` is protected work there, 2026-11-14)
@@ -490,11 +507,25 @@ async fn serve_one(agent: &Arc<GossipAgent>, served: &Arc<Served>, slot: &mut Op
 /// a provider that decides this family would have decided a second time, as the node. The channel is not a
 /// request and carries no sender: nothing that arrives on the mesh — a frame naming this node as its sender
 /// included — can reach it, so there is no "from this node" exemption for a member to forge.
-async fn serve_loop(agent: Arc<GossipAgent>, instance: Instance, mut rx: mycelium::RpcRequestRx, served: Served, #[allow(unused_mut, unused_variables)] mut bridged: Bridged) {
+async fn serve_loop(
+    agent: Arc<GossipAgent>,
+    instance: Instance,
+    mut rx: mycelium::RpcRequestRx,
+    served: Served,
+    #[allow(unused_mut, unused_variables)] mut bridged: Bridged,
+    mut retired: tokio::sync::oneshot::Receiver<()>,
+) {
     let served = Arc::new(served);
     let mut slot = Some(instance);
     #[cfg(not(feature = "gateway"))]
-    while let Some(req) = rx.recv().await {
+    loop {
+        // The retire channel first: a `recv` dropped here loses nothing the loop would still have served.
+        let req = tokio::select! {
+            biased;
+            _ = &mut retired => return,
+            req = rx.recv() => req,
+        };
+        let Some(req) = req else { return };
         let payload = req.payload().to_vec();
         if !serve_one(&agent, &served, &mut slot, payload, Asked::Mesh(req)).await {
             return;
@@ -503,11 +534,14 @@ async fn serve_loop(agent: Arc<GossipAgent>, instance: Instance, mut rx: myceliu
     #[cfg(feature = "gateway")]
     loop {
         // `recv` is not cancel-safe — it may hold a request whose provider check is still running — so one call of
-        // it is kept across the bridged calls that arrive meanwhile, and replaced only once it has yielded.
+        // it is kept across the bridged calls that arrive meanwhile, and replaced only once it has yielded. Only the
+        // retire arm drops it unfinished, and then the loop ends (that request goes unanswered with the queue).
         let recv = rx.recv();
         tokio::pin!(recv);
         loop {
             let (payload, asked) = tokio::select! {
+                biased;
+                _ = &mut retired => return,
                 req = &mut recv => match req {
                     Some(req) => (req.payload().to_vec(), Asked::Mesh(req)),
                     None => return,
@@ -666,7 +700,8 @@ impl ArtifactRuntime for WasmComponentRuntime {
         };
         #[cfg(not(feature = "gateway"))]
         let bridged = ();
-        let serve = tokio::spawn(serve_loop(Arc::clone(&ctx.agent), instance, rx, served, bridged));
+        let (retire, retired) = tokio::sync::oneshot::channel::<()>();
+        let serve = tokio::spawn(serve_loop(Arc::clone(&ctx.agent), instance, rx, served, bridged, retired));
         #[cfg(feature = "gateway")]
         let mcp_tool = if let Some(bridge_tx) = bridge_tx {
             let generic = format!("{} — an installed WASM component, bridged over mcp.invoke", entry.provides.name);
@@ -712,6 +747,7 @@ impl ArtifactRuntime for WasmComponentRuntime {
         };
         Ok(Box::new(WasmInstalled {
             serve,
+            _retire: retire,
             gone,
             #[cfg(feature = "gateway")]
             _mcp_tool: mcp_tool,
@@ -719,10 +755,15 @@ impl ArtifactRuntime for WasmComponentRuntime {
     }
 }
 
-/// A live, serving WASM component installation.
+/// A live, serving WASM component installation. **Dropping it stops it** (ER5): the retire sender
+/// goes with it, and the serve loop returns before its next request — however the install leaves
+/// (`uninstall`, `retire`, or a plain drop), and never by an abort, so a call it is running is answered.
 struct WasmInstalled {
+    /// Read by the probe only: the serve task ends by itself once `_retire` is dropped.
     serve: tokio::task::JoinHandle<()>,
-    /// Shared with the serve loop's `Served::gone`: set before the abort, so a call still running
+    /// The serve loop's retire channel; never sent on — dropping it is the signal.
+    _retire: tokio::sync::oneshot::Sender<()>,
+    /// Shared with the serve loop's `Served::gone`: set as the install goes, so a call still running
     /// on its blocking thread does not replace its instance.
     gone:  Arc<std::sync::atomic::AtomicBool>,
     /// X2: a `tool/{name}` component is also an MCP tool `{name}` (`tools/{name}/{node}` in KV,
@@ -737,9 +778,15 @@ impl Installed for WasmInstalled {
         !self.serve.is_finished()
     }
 
-    fn uninstall(self: Box<Self>) {
+    /// Nothing is placed, so this is the drop; `retire` (the default) is the same.
+    fn uninstall(self: Box<Self>) {}
+}
+
+impl Drop for WasmInstalled {
+    fn drop(&mut self) {
+        // Before `_retire` drops (fields drop after this body): a trapped call still on its thread
+        // finds the install gone and makes no fresh instance.
         self.gone.store(true, std::sync::atomic::Ordering::Release);
-        self.serve.abort();
     }
 }
 
@@ -996,6 +1043,10 @@ impl Installed for BlobInstalled {
     fn uninstall(self: Box<Self>) {
         std::fs::remove_file(&self.path).ok();
     }
+
+    /// A stop keeps the placed file: the next install of this artifact reuses it (`dest.exists()` in
+    /// [`BlobRuntime::install`]) rather than pulling it again.
+    fn retire(self: Box<Self>) {}
 }
 
 #[cfg(test)]

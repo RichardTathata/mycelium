@@ -113,6 +113,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   parked worker is counted once in `taken`/`take_total`, not twice; `waiters` includes workers parked on
   `take_by_key`; a timed-out take closes its receiver before its last drain, so an item handed to it in that instant
   stays queued. `deprecations.md` §134.
+- **A stopped or dropped stem stops what it installed** (ER5 PR 1, R14-01; `docs/plans/engineering-review-urgent-fixes.md`
+  §7). A stem's ticker ended with `drop(prov)` and `Provisioner` had no `Drop`, so a WASM install's serve task detached
+  and kept its receiver: a stem started again on the same node ran one call on the retired build and the current one.
+  `Provisioner::shutdown` and `Drop for Provisioner` now withdraw every advertisement and retire every install (it
+  stops serving and keeps placed bytes; a withdraw still removes them), and an install in flight at the shutdown is
+  neither advertised nor served when it finishes. A serve loop stops by a retire channel ahead of its next request
+  instead of an abort, so a call running when its install is withdrawn or retired is answered; calls queued behind it
+  are dropped unanswered (a timeout, never a negative). `Installed` gains a defaulted `retire`. Not yet: a dropped
+  stem's re-probe, `[[serve]]` and peer-serve tasks (ER5 PR 2). Upgrade note: deprecations §TBD-ER5.
+
 - **A gateway sends an unanswered cancel-forward again** (unreleased code: I4's cancel-forward; identity-and-lifecycle
   §9 O13, the maintainer's decision of 2026-11-22; found on #824, where behind about 12 000 concurrent mints the
   provider's stop came about 25 s after the cancel in 4 runs of 9). The forward is a best-effort signal on the

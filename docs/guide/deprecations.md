@@ -6008,3 +6008,41 @@ holds unless a replicated `Post` for it arrives later, which the mirror then ref
   `wal.rs` (`Tombstones`, `fold_wal`, compaction), `rpc.rs` (`snapshot_to_bytes`, `dec_snapshot_resp`), `lib.rs`
   (`apply_snapshot`, `probe_primary`). Tests: `mycelium-blackboard/tests/board_failover.rs`, and the ER6 tests in each
   of those files.
+## §TBD-ER5. A dropped or shut-down `Provisioner` stops what it installed; `Installed::retire` (defaulted); an `Installed` must stop serving when dropped (unreleased, ER5 PR 1, R14-01)
+
+*Numbered by the release: rows of `docs/plans/engineering-review-urgent-fixes.md` land in parallel.*
+
+**Before.** `Stem::stop()` and a dropped `Stem` ended the ticker with `drop(prov)`, and `Provisioner` had no `Drop`.
+Each live install's advertisement was withdrawn, but its `Installed` was dropped without `uninstall`: a WASM
+component's serve task was a `JoinHandle` aborted only in `uninstall`, so dropped, it detached and kept its receiver on
+`cap.invoke/{ns}/{name}`. A stem started again on the same node registered a second receiver, and one call ran on the
+retired build and the current one. An install still in flight when the provisioner was dropped was advertised and
+served on completion, then orphaned. The `Stem` doc's *"installed capabilities are withdrawn with the provisioner"*
+was true of the advertisement only.
+
+**Now.**
+- `Provisioner::shutdown(&mut self)` and `impl Drop for Provisioner`: every advertisement is withdrawn and every
+  install is **retired** (`Installed::retire`: it stops serving and keeps placed bytes). A round after `shutdown`
+  starts nothing. The stem's ticker ends in `prov.shutdown()`.
+- An install in flight at the shutdown is not waited for; when it finishes it is not advertised and not served, it is
+  retired (its placed bytes are kept), and its `prov.install` record says `superseded`.
+- A WASM install's serve loop stops by a retire channel checked ahead of each request, never by an abort: a call
+  already running is answered; requests queued behind it are dropped unanswered (their callers time out,
+  `DeliveryUnknown`). `uninstall` (a withdraw, a shed, a probe failure) no longer aborts the serve task mid-call.
+- `Installed` gains `fn retire(self: Box<Self>)`, defaulted to dropping the install. `uninstall` stays *stop and remove
+  placed bytes*. The trait's doc now says a dropped `Installed` must stop serving.
+
+**What did not change.** Placed bytes are removed on a withdraw, a shed or a probe failure, as before, and kept on a
+stop. No KV key, wire, unit-file or trace-reason change.
+
+***Check:*** an embedder that dropped a `Provisioner` and relied on its WASM installs serving on is the one case this
+breaks: keep the `Provisioner` alive for as long as its installs should serve. An `Installed` implemented outside this
+crate whose drop leaves something serving should stop it in `Drop` (or in `retire` and `uninstall`); one that holds
+placed state it wants removed on a stop should override `retire` to do so.
+- **Code:** `mycelium-wasm-host/src/provisioner.rs` (`Hosted`, `shutdown`, `Drop`, the completion path),
+  `mycelium-wasm-host/src/runtime.rs` (`Installed::retire`, `serve_loop`, `WasmInstalled`), `mycelium-wasm-host/src/stem.rs`
+  (the ticker). Tests: `a_restarted_stem_dispatches_only_to_the_current_build`,
+  `a_dropped_stem_stops_serving_its_installs`, `a_stopped_stem_keeps_its_placed_blob_and_a_withdraw_removes_it`
+  (`stem.rs`); `a_dropped_provisioner_stops_its_serve_loops`,
+  `an_install_that_finishes_after_shutdown_is_not_advertised_or_served`,
+  `a_call_in_flight_when_its_install_retires_is_answered` (`provisioner.rs`).

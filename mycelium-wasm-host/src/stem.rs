@@ -115,7 +115,8 @@ impl std::error::Error for StemError {}
 
 /// A running stem node. Dropping it retracts every advertisement, requirement and group it
 /// declared and stops the provisioner's ticker; installed capabilities are withdrawn with the
-/// provisioner. Prefer [`stop`](Self::stop) to wait for the ticker.
+/// provisioner, which stops their serving and keeps what they placed (ER5). Prefer
+/// [`stop`](Self::stop) to wait for the ticker.
 pub struct Stem {
     _caps:   Vec<CapabilityReg>,
     _reqs:   Vec<RequirementHandle>,
@@ -535,7 +536,9 @@ impl Stem {
                         }
                     }
                     drop(cache_cap);
-                    drop(prov);
+                    // ER5: withdraw every advertisement and retire every install — its serve loop stops, its
+                    // placed bytes stay. An abort of this task drops `prov`, which does the same.
+                    prov.shutdown();
                 });
                 (Some(stop_tx), Some(ticker), peer_serve)
             }
@@ -1250,6 +1253,133 @@ mod tests {
         stem.stop().await;
         node.shutdown().await;
         seed.shutdown().await;
+    }
+
+    /// ER5's fixtures: a library holding `blobs`, a key that signs its catalogue lines, and a unit file whose
+    /// `[hosts]` declares `kind` and keeps one provider of `units/convert` present.
+    fn er5_library(tag: &str, kind: &str, blobs: &[&[u8]]) -> (std::path::PathBuf, std::path::PathBuf, SigningKey, NodeCapabilityConfig) {
+        let lib_dir = scratch(tag);
+        let lib = FsLibrarySource::open(&lib_dir).unwrap();
+        for b in blobs {
+            lib.store(b).unwrap();
+        }
+        let key = SigningKey::from_bytes(&[14u8; 32]);
+        let publisher_hex: String = key.verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        let place = lib_dir.join("placed");
+        let units = NodeCapabilityConfig::from_toml_str(&format!(
+            "principal=\"stem\"\n[hosts]\nkinds=[\"{kind}\"]\ntrusted_publishers=[\"ed25519:{publisher_hex}\"]\nplacement_root=\"{}\"\n\
+             [[presence]]\nns=\"units\"\nname=\"convert\"\nmin_providers=1\n",
+            place.display()
+        ))
+        .unwrap();
+        (lib_dir, place, key, units)
+    }
+
+    /// Publish `bytes` as this node's catalogue line for `units/convert`, of `kind`.
+    fn er5_publish(node: &GossipAgent, key: &SigningKey, bytes: &[u8], kind: crate::artifact::ArtifactKind) -> InstallableEntry {
+        let entry = InstallableEntry::new(Capability::new("units", "convert"), crate::artifact::ArtifactId::of(bytes))
+            .with_kind(kind)
+            .with_cost(bytes.len() as u64, 1)
+            .signed_by(key);
+        assert!(crate::catalog::publish_installable(&node.kv(), &entry));
+        entry
+    }
+
+    /// Whether this node advertises `units/convert`.
+    fn er5_provides(node: &GossipAgent) -> bool {
+        node.capabilities().resolve(&CapFilter::new("units", "convert")).iter().any(|(n, _)| n == node.node_id())
+    }
+
+    async fn er5_call(node: &GossipAgent, payload: &[u8]) -> Result<bytes::Bytes, mycelium::RpcError> {
+        node.service()
+            .rpc_call(node.node_id().clone(), crate::runtime::cap_invoke_kind("units", "convert"), payload.to_vec(), Duration::from_secs(2))
+            .await
+    }
+
+    /// ER5 (R14-01, the reviewer's sequence): a stem hosts one build of `units/convert`, is stopped, its catalogue
+    /// line is replaced by another build's, and a new stem starts on the same running node. One call then reaches
+    /// the current build only. The first build (the echo component) writes each input under its `last-input` key
+    /// before replying; the second (the unit converter) writes nothing, so the key shows whether the retired build
+    /// ran. Seen failing first: the retired build's serve loop, detached by `drop(prov)`, still held its receiver
+    /// and recorded the second input.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_restarted_stem_dispatches_only_to_the_current_build() {
+        const CONVERT: &[u8] = include_bytes!("../tests/fixtures/unit_convert_component.wasm");
+        let (lib_dir, _place, key, units) = er5_library("restart", "wasm-component", &[ECHO_COMPONENT, CONVERT]);
+        let node = agent(alloc_port(), None).await;
+        let echo = er5_publish(&node, &key, ECHO_COMPONENT, crate::artifact::ArtifactKind::WasmComponent);
+        let first = Stem::start(Arc::clone(&node), &units, stem_opts(&lib_dir)).unwrap();
+        assert!(wait_until(30, || first.hosted_count() == 1 && er5_provides(&node)).await, "the first build is live");
+        let receipt = format!("comp/{}/units/last-input", node.node_id());
+        let control = br#"{"kg":1}"#;
+        assert_eq!(er5_call(&node, control).await.expect("the first build serves").as_ref(), control);
+        assert_eq!(node.kv().get(&receipt).as_deref(), Some(&control[..]));
+
+        first.stop().await;
+        assert!(wait_until(30, || !er5_provides(&node)).await, "the stopped stem's advertisement is withdrawn");
+        assert!(node.kv().delete(echo.kv_key().as_str()));
+        er5_publish(&node, &key, CONVERT, crate::artifact::ArtifactKind::WasmComponent);
+        let next = Stem::start(Arc::clone(&node), &units, stem_opts(&lib_dir)).unwrap();
+        assert!(wait_until(30, || next.hosted_count() == 1 && er5_provides(&node)).await, "the second build is live");
+
+        let current = br#"{"kg":2000}"#;
+        let reply = er5_call(&node, current).await.expect("the current build serves");
+        // Either receiver could answer first; the retired build, if it ran, has written its receipt by now.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let receipt_now = node.kv().get(&receipt);
+        next.stop().await;
+        node.shutdown().await;
+        assert_eq!(String::from_utf8_lossy(&reply), r#"{"tonnes":2.0}"#, "the current build answers");
+        assert_eq!(receipt_now.as_deref(), Some(&control[..]), "the retired build ran the call too");
+    }
+
+    /// ER5 (R14-01): a stem dropped without [`Stem::stop`] stops serving what it installed — its ticker is aborted, and
+    /// the provisioner it owned stops its installs as it drops. Seen failing first: the advertisement was withdrawn
+    /// but the install's serve loop still answered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_dropped_stem_stops_serving_its_installs() {
+        let (lib_dir, _place, key, units) = er5_library("dropped", "wasm-component", &[ECHO_COMPONENT]);
+        let node = agent(alloc_port(), None).await;
+        er5_publish(&node, &key, ECHO_COMPONENT, crate::artifact::ArtifactKind::WasmComponent);
+        let stem = Stem::start(Arc::clone(&node), &units, stem_opts(&lib_dir)).unwrap();
+        assert!(wait_until(30, || stem.hosted_count() == 1 && er5_provides(&node)).await, "live");
+        assert_eq!(er5_call(&node, b"before").await.expect("serves").as_ref(), b"before");
+        drop(stem);
+        assert!(wait_until(30, || !er5_provides(&node)).await, "the dropped stem's advertisement is withdrawn");
+        let after = er5_call(&node, b"after").await;
+        node.shutdown().await;
+        assert!(after.is_err(), "the dropped stem's install still serves: {after:?}");
+    }
+
+    /// ER5 (R14-01, item 2): a stop retires an install — it stops serving and keeps what it placed, so the next
+    /// start reuses the file — while a withdraw uninstalls it, removing the file. A pin: the unfixed stop dropped the
+    /// install without tearing it down, which kept the file too; it fails if a stop is made an uninstall.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_stopped_stem_keeps_its_placed_blob_and_a_withdraw_removes_it() {
+        let pack: &[u8] = b"a weekly data pack, placed once";
+        let (lib_dir, place, key, units) = er5_library("blob-kept", "blob", &[pack]);
+        let node = agent(alloc_port(), None).await;
+        let entry = er5_publish(&node, &key, pack, crate::artifact::ArtifactKind::Blob);
+        let placed = place.join(entry.artifact.to_hex());
+        let stem = Stem::start(Arc::clone(&node), &units, stem_opts(&lib_dir)).unwrap();
+        assert!(wait_until(30, || stem.hosted_count() == 1 && er5_provides(&node)).await, "live");
+        assert_eq!(std::fs::read(&placed).unwrap(), pack);
+        stem.stop().await;
+        assert!(wait_until(30, || !er5_provides(&node)).await, "the stop withdraws the advertisement");
+        assert_eq!(std::fs::read(&placed).ok().as_deref(), Some(pack), "a stop keeps the placed file");
+
+        let host = Arc::new(crate::host::WasmHost::new().unwrap());
+        let source = Arc::new(FsLibrarySource::open(&lib_dir).unwrap());
+        let mut prov = crate::provisioner::Provisioner::new(Arc::clone(&node), host, InstallableCatalog::from_kv(&node.kv()), source, 1.0);
+        prov.restrict_kinds([crate::artifact::ArtifactKind::Blob]);
+        prov.register_runtime(Arc::new(crate::runtime::BlobRuntime::new(&place)));
+        prov.supervise(CapFilter::new("units", "convert"), 1);
+        assert_eq!(prov.provision_round(), 1);
+        assert!(wait_until(30, || prov.hosted_count() == 1).await, "reinstalled over the kept file");
+        assert!(prov.withdraw(&entry.artifact));
+        assert!(!placed.exists(), "a withdraw removes the placed file");
+        drop(prov);
+        node.shutdown().await;
     }
 
     /// X2 (the model demos' gap): a unit's `[[activation]]` hands a placed blob to the local
