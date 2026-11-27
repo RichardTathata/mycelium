@@ -293,7 +293,9 @@ impl ServiceHandle {
 
     /// Delivers an event to `target`'s mailbox.
     ///
-    /// Writes to the gossip KV store at `mailbox/{target}/{kind}/{hlc}`.
+    /// Writes to the gossip KV store at `mailbox/{target}/{kind}/{hlc:016x}/{sender}` — the sender segment keeps
+    /// two nodes' events at one HLC stamp apart (ER1). A target before this release reads such an event with
+    /// `hlc_ts == 0`: upgrade receivers before or with senders.
     /// Returns `true` if the write was queued for gossip propagation.
     pub fn deliver_event(
         &self,

@@ -1649,7 +1649,8 @@ class MyceliumAgent:
         """Deliver a mailbox event to a target node.
 
         The event is written to the gossip KV store at
-        ``mailbox/{target}/{kind}/{hlc_ts}`` and gossiped to all peers.
+        ``mailbox/{target}/{kind}/{hlc_ts}/{sender}`` (the sender is the node the
+        gateway runs on) and gossiped to all peers.
         The target's :meth:`mailbox` watcher picks it up and tombstones it
         on delivery (at-least-once within the gossip TTL).
 

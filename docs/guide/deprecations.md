@@ -5810,3 +5810,33 @@ that replicates after its position has passed it ([what is proven](../operations
 - **Code:** `mycelium-core/src/log_cursor.rs` (`LiveCursor`), `mycelium-core/src/kv_handle.rs` (`subscribe_log`),
   `src/agent/http/overlay.rs` (`gw_overlay_log_subscribe`). Tests: `src/agent/kv_handle_tests.rs`,
   `src/agent/http/remainder_tests.rs`, `src/lib_tests.rs` (`a_log_subscription_ends_at_shutdown`).
+## §TBD-ER1. A mailbox key names its sender: `mailbox/{target}/{kind}/{hlc:016x}/{sender}`; a consumed event's delete is handed to the WAL (unreleased, engineering review 2026-11-26, ER1)
+
+**What changes.** `deliver_event` (and `deliver_event_in`, and `POST /gateway/mailbox/deliver`) writes an event under
+`mailbox/{target}/{kind}/{hlc:016x}/{sender}`, the log route's shape; before, the key was `…/{hlc:016x}` and two nodes
+whose clocks handed out one stamp in one millisecond wrote one key, so last-writer-wins kept one of the two events while
+both calls returned `true` (R7-01). The reader accepts both shapes, with no removal date for the old one: sixteen hex
+digits, then nothing or one `/{sender}` segment. Events are delivered in `(hlc, key)` order; at one stamp an old-shape
+entry comes before a salted one. An entry under a mailbox's prefix whose remainder is **neither** shape — a kind
+containing `/`, such as kind `a/b`'s entries under mailbox `a` — is no longer delivered to that mailbox with
+`hlc_ts = 0` and deleted: it is left alone, for its own mailbox. Refusing a `/` in a kind at `deliver` is a follow-up.
+`MeshEvent` is unchanged: `hlc_ts` is the key's first segment, `sender` still comes from the value.
+
+**The delete (R7-03).** A consumed event's tombstone is now handed to the WAL after it is applied, as the insert is, so
+a node that exits without `shutdown()` no longer brings a consumed event back on restart from the WAL's insert. The
+rung is *queued to the WAL writer*, not synced: `append_try` drops on a full queue, so the mailbox stays
+at-least-once — a consumed event can return after a crash before the delete reaches disk.
+
+**Mixed fleets.** Wire v12, the WAL and the snapshot format are unchanged. An old writer's event is read by a new
+receiver through the old-shape branch. **A new writer's event read by an older receiver is delivered, in order and with
+the right sender, but with `hlc_ts == 0`** (the old parse reads the whole remainder as hex); the same after a
+downgrade. **Upgrade receivers before or with senders.**
+
+**Will the compiler tell me?** No: no public signature changes. Code that reads `mailbox/` keys itself and parses the
+remainder as one hex number must take the first segment.
+
+- ***Check:*** after upgrading, `kv().scan_prefix("mailbox/{node}/{kind}/")` keys end in `/{sender}`; an application
+  that orders on `MeshEvent::hlc_ts` sees no zero stamps once every receiver is upgraded.
+- **Code:** `src/agent/mailbox.rs` (`mailbox_prefix`, `mailbox_key`, `deliver_event_at`, `parse_suffix`,
+  `drain_prefix`, `tombstone`). Tests: `src/agent/mailbox.rs` (the ER1 block),
+  `src/agent/http/remainder_tests.rs` (`two_gateways_delivering_at_one_stamp_both_arrive`).

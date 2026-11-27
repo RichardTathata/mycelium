@@ -125,7 +125,7 @@
 //! | `req/{node}/{ns}/{name}`            | Node-level requirement declarations                          |
 //! | `cap-group/{group}`                 | Emergent capability-group definitions                        |
 //! | `gcap/{group}/{ns}/{name}/{contrib}`| Group-level capability projections                           |
-//! | `mailbox/{target}/{kind}/{hlc_hex}` | Service Patterns — event mailbox entries (value: `sender_len(2LE) | sender_bytes | payload`) |
+//! | `mailbox/{target}/{kind}/{hlc_hex}/{sender}` | Service Patterns — event mailbox entries (value: `sender_len(2LE) | sender_bytes | payload`); the sender segment keeps two senders' events at one stamp apart (ER1); the 2.40 shape `…/{hlc_hex}` is still read |
 //! | `schemas/{schema_id}`              | Schema registry — authoritative JSON Schema bytes for a capability `schema_id`; written via `publish_schema`; gossip-propagated and WAL-persisted |
 //! | `tools/{name}/{node}`              | Layer IV MCP tool registrations (value: JSON Schema bytes)   |
 //! | `agent/{node}/state`               | Layer V agent state machine — current state string (gossips to mesh) |

@@ -45,6 +45,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sender in a `compute`, which papaya's CAS serialises against the evictor's conditional remove, and loops if it
   lost. The three copies (`KvHandle::subscribe_prefix`, `ops::kv_subscribe_prefix`, the gateway's
   `subscribe_prefix_on_kv`) are one function, `mycelium_core::store::subscribe_prefix_watch`.
+- **A mailbox key names its sender** (engineering review 2026-11-26, ER1; the reviewer's R7-01). Two nodes delivering
+  to one target and kind in one millisecond with one logical count wrote one key, `mailbox/{target}/{kind}/{hlc}`, and
+  last-writer-wins kept one of the two events while both calls returned `true`. The key is now
+  `mailbox/{target}/{kind}/{hlc:016x}/{sender}`; the old shape is still read. An entry under a mailbox's prefix that is
+  neither shape (kind `a/b` under mailbox `a`) is no longer delivered to the wrong mailbox with `hlc_ts = 0` and
+  deleted: it is left for its own. **Upgrade receivers before or with senders:** an older receiver delivers a salted
+  event with `hlc_ts == 0`. `deprecations.md` §TBD-ER1.
+
 - **A gateway sends an unanswered cancel-forward again** (unreleased code: I4's cancel-forward; identity-and-lifecycle
   §9 O13, the maintainer's decision of 2026-11-22; found on #824, where behind about 12 000 concurrent mints the
   provider's stop came about 25 s after the cancel in 4 runs of 9). The forward is a best-effort signal on the

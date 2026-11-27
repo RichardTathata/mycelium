@@ -3,11 +3,18 @@
 ## What it is
 
 A [mailbox](../guide/00-concepts.md#mailbox) delivers events to one node in order, through the gossip KV. Any node that
-knows a target's id writes an event under `mailbox/{target}/{kind}/{hlc}`; it spreads like any other key, so a target
+knows a target's id writes an event under `mailbox/{target}/{kind}/{hlc}/{sender}`; it spreads like any other key, so a target
 that was down receives its pending events when it reconnects. The target's watcher hands events over in HLC order and
 then deletes each one, gossiping the tombstone so it is not delivered again after a restart. Where the delete happens
 differs by consumer: the in-process mailbox deletes an event when it enters the receiver's channel, the gateway's
 stream only once it has handed the event to the HTTP connection.
+
+The sender segment keeps two nodes' events apart when their clocks hand out one stamp (before ER1 the key held only
+the stamp, and one of the two events was lost). The 2.40 shape, `mailbox/{target}/{kind}/{hlc}`, is still read. An
+entry under a mailbox's prefix whose remainder is neither shape (a kind containing `/`, such as `a/b` under mailbox
+`a`) is not that mailbox's: it is not delivered and not deleted. **Mixed fleets:** a target older than this release
+delivers a salted event in order and with the right sender, but with `hlc_ts == 0`; upgrade receivers before or with
+senders.
 
 ## When to use it, and when not
 

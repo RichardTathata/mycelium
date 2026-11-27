@@ -434,7 +434,7 @@ agent.set_with_min_acks("key", b"value", min_acks=0)
 #### `deliver_event(target, kind, payload)`
 
 Delivers a mailbox event to `target`'s mailbox at key
-`mailbox/{target}/{kind}/{hlc_ts}`. Gossiped to all peers; at-least-once — the event stays in the KV until it is
+`mailbox/{target}/{kind}/{hlc_ts}/{sender}`. Gossiped to all peers; at-least-once — the event stays in the KV until it is
 delivered.
 
 ```python
