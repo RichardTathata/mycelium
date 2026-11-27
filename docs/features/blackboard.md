@@ -52,6 +52,11 @@ in-flight claim survives a primary's failover is `inflight_claim_survives_primar
 - **Not built:** exactly-once processing — one claimer wins, but a re-queued claim can be processed again, so the effect
   should be idempotent ([destination commit](destination-commit.md)); expiry or eviction of facts; durability of the
   last ~1 s at a clean shutdown, which does not fsync the WAL ([companions § mycelium-blackboard](../operations/companions.md#mycelium-blackboard--shared-fact-pool)).
+- **A fact's id is not reissued, under one assumption** (ER3): a board with no id history (transient, or a missing or
+  empty WAL) starts its ids at the wall clock (ms × 1024), a WAL with history at its highest id + 1. **The limit**, as
+  for the [tuple space](tuple-space.md): fresh starts within *N*/1024 ms of each other can overlap, the in-process bump
+  is 1 024 per board, and *N* boards created in one process put the last base about *N* ms ahead of the clock
+  ([the ledger row](../operations/what-is-proven.md#fresh-id-space-not-reissued)).
 - **Evidence:** the ledger row
   [a failed WAL append is never followed by an acknowledged one](../operations/what-is-proven.md#failed-wal-append-never-followed-acknowledged),
   both companions' WALs included.

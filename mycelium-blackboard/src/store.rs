@@ -26,6 +26,35 @@ thread_local! {
 }
 use crate::{BlackboardError, Fact, Predicate};
 
+/// The last base [`fresh_id_base`] handed out in this process, so two stores created in the same
+/// millisecond still get disjoint bases.
+static LAST_FRESH_BASE: AtomicU64 = AtomicU64::new(0);
+
+/// The first id of an id space with **no history** — a transient board, or a WAL that names no id
+/// (ER3, R4-01). An fact's id is its identity everywhere: a mirror's `admit`, the gateway's JSON `id`, and any
+/// worker that keys an effect on it. A space that started
+/// at 0 reissued its previous life's ids after a restart, and a destination answered `Replayed` for
+/// new work. The base is the wall clock's milliseconds shifted left by 10 (read through
+/// `mycelium::sim_seam::wall_now_ms`), strictly increasing in-process by at least 1 024 per store.
+///
+/// **The assumption:** two fresh starts of one namespace whose clocks read within *N*/1024 ms of each
+/// other (*N* the ids the earlier one issued) can overlap — a clock stepped back, or a device with no
+/// real-time clock booting at a repeatable time. In one process the bump is 1 024 per store, not per
+/// id, and *N* stores created in one process push the last base about *N* ms ahead of the clock. A
+/// WAL with history never calls this: it fences at `max_id + 1`. Ids stay below 2^53 until about the
+/// year 2248, so they are exact as JSON numbers.
+pub(crate) fn fresh_id_base() -> u64 {
+    let now = mycelium::sim_seam::wall_now_ms() << 10;
+    let mut prev = LAST_FRESH_BASE.load(Ordering::Relaxed);
+    loop {
+        let next = now.max(prev + (1 << 10));
+        match LAST_FRESH_BASE.compare_exchange(prev, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(p) => prev = p,
+        }
+    }
+}
+
 /// An in-flight (claimed-but-not-terminal) fact and when it was claimed (for the deadline sweep).
 struct Inflight {
     fact: Fact,
@@ -98,7 +127,11 @@ impl BoardStore {
     pub fn persistent(path: impl AsRef<Path>, checkpoint_every: u64) -> Result<Self, BlackboardError> {
         let (wal, live, max_id) = WalWriter::open(path.as_ref(), checkpoint_every)?;
         let store = Self::with_wal(Some(wal));
-        store.next_id.store(max_id.map_or(0, |m| m + 1), Ordering::Relaxed);
+        // A WAL that names ids fences at its highest + 1; one that names none keeps the fresh base
+        // `with_wal` gave it (a deleted WAL must not recycle ids, ER3).
+        if let Some(m) = max_id {
+            store.next_id.store(m + 1, Ordering::Relaxed);
+        }
         {
             let mut g = store.inner.lock();
             for (id, attributes, payload) in live {
@@ -112,7 +145,8 @@ impl BoardStore {
     fn with_wal(wal: Option<WalWriter>) -> Self {
         Self {
             inner: Mutex::new(BoardInner { available: BTreeMap::new(), inflight: HashMap::new() }),
-            next_id: AtomicU64::new(0),
+            // No id history yet: start past every id an earlier life could have issued (ER3).
+            next_id: AtomicU64::new(fresh_id_base()),
             posted: AtomicU64::new(0),
             rejected: AtomicU64::new(0),
             high_watermark: None,
@@ -559,16 +593,18 @@ mod tests {
     fn posted_facts_survive_wal_replay() {
         let path = temp_wal("post-replay");
         let pred = Predicate::new().eq("kind", "surplus");
+        let first;
         {
             let store = BoardStore::persistent(&path, 1).unwrap();
-            store.post(surplus("4", "1.0"), Bytes::from("a")).unwrap();
+            // Relative to the first id: a fresh WAL's id space does not start at 0 (ER3).
+            first = store.post(surplus("4", "1.0"), Bytes::from("a")).unwrap();
             store.post(surplus("4", "2.0"), Bytes::from("b")).unwrap();
         }
         // Reopen — both facts replay as claimable, ids fenced.
         let store = BoardStore::persistent(&path, 1).unwrap();
         assert_eq!(store.read(&pred).len(), 2);
         let fresh = store.post(surplus("4", "3.0"), Bytes::from("c")).unwrap();
-        assert!(fresh >= 2, "next_id fenced past replayed ids");
+        assert!(fresh >= first + 2, "next_id fenced past replayed ids");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -707,9 +743,12 @@ mod tests {
     #[test]
     fn a_restart_never_reuses_an_acked_id() {
         let path = temp_wal("id-high-water");
+        let first;
         {
             let store = BoardStore::persistent(&path, 1).unwrap();
-            for i in 0..3 {
+            // Relative to the first id: a fresh WAL's id space does not start at 0 (ER3).
+            first = store.post(surplus("0", "1.0"), Bytes::from("x")).unwrap();
+            for i in 1..3 {
                 store.post(surplus(&i.to_string(), "1.0"), Bytes::from("x")).unwrap();
             }
             while let Some(f) = store.claim(&Predicate::new()).unwrap() {
@@ -718,8 +757,52 @@ mod tests {
             store.compact().unwrap();
         }
         let store = BoardStore::persistent(&path, 1).unwrap();
-        assert_eq!(store.post(surplus("9", "1.0"), Bytes::from("next")).unwrap(), 3, "the next id is past every id the log held");
+        assert_eq!(store.post(surplus("9", "1.0"), Bytes::from("next")).unwrap(), first + 3, "the next id is past every id the log held");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// ER3 (R4-01), the board's form: a fresh id space started at 0, so a transient board recreated
+    /// in the same namespace reissued the ids of its previous life.
+    #[test]
+    fn fresh_id_spaces_do_not_overlap() {
+        let first = BoardStore::transient();
+        let old: Vec<u64> =
+            (0..3).map(|i| first.post(surplus(&i.to_string(), "1.0"), Bytes::from("x")).unwrap()).collect();
+        drop(first);
+        let second = BoardStore::transient();
+        let new = second.post(surplus("9", "1.0"), Bytes::from("new")).unwrap();
+        assert!(new > *old.iter().max().unwrap(), "the restarted board reissued an id: old {old:?}, new {new}");
+        // And a WAL with no history starts fresh too: a deleted WAL does not recycle ids.
+        let path = temp_wal("fresh-after-transient");
+        let walled = BoardStore::persistent(&path, 1).unwrap();
+        let from_wal = walled.post(surplus("9", "1.0"), Bytes::from("wal")).unwrap();
+        assert!(from_wal > new, "a WAL with no history reissued an id: {from_wal} after {new}");
+        drop(walled);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ER3: a WAL that names ids keeps its fence at exactly `max_id + 1`, whatever the clock says.
+    /// A control: passes before and after the fix.
+    #[test]
+    fn a_wal_with_history_keeps_its_fence() {
+        let path = temp_wal("history-fence");
+        let last;
+        {
+            let store = BoardStore::persistent(&path, 1).unwrap();
+            store.post(surplus("1", "1.0"), Bytes::from("a")).unwrap();
+            last = store.post(surplus("2", "1.0"), Bytes::from("b")).unwrap();
+        }
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        assert_eq!(store.post(surplus("3", "1.0"), Bytes::from("c")).unwrap(), last + 1, "the fence is the log's");
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ER3: ids stay below 2^53, exact as JSON numbers. A pin: an id space at 0 passes it too.
+    #[test]
+    fn ids_stay_below_two_to_the_53() {
+        let id = BoardStore::transient().post(surplus("1", "1.0"), Bytes::from("x")).unwrap();
+        assert!(id < 1u64 << 53, "id {id} is not exact as a JSON number");
     }
 
     /// #597 review, finding 3: a valid kind byte followed by zeros is a zero-extended partial append —
@@ -931,9 +1014,12 @@ mod tests {
     #[test]
     fn the_high_water_mark_survives_two_compactions_and_a_restart() {
         let path = temp_wal("hw-twice");
+        let first;
         {
             let store = BoardStore::persistent(&path, 1).unwrap();
-            for i in 0..3 {
+            // Relative to the first id: a fresh WAL's id space does not start at 0 (ER3).
+            first = store.post(surplus("0", "1.0"), Bytes::from("x")).unwrap();
+            for i in 1..3 {
                 store.post(surplus(&i.to_string(), "1.0"), Bytes::from("x")).unwrap();
             }
             while let Some(f) = store.claim(&Predicate::new()).unwrap() {
@@ -943,14 +1029,14 @@ mod tests {
         }
         {
             let store = BoardStore::persistent(&path, 1).unwrap();
-            assert_eq!(store.post(surplus("y", "1.0"), Bytes::from("y")).unwrap(), 3);
+            assert_eq!(store.post(surplus("y", "1.0"), Bytes::from("y")).unwrap(), first + 3);
             let f = store.claim(&Predicate::new()).unwrap().unwrap();
             store.ack(f.id).unwrap();
             store.compact().unwrap();
             store.compact().unwrap();
         }
         let store = BoardStore::persistent(&path, 1).unwrap();
-        assert_eq!(store.post(surplus("z", "1.0"), Bytes::from("z")).unwrap(), 4, "past both compactions and restarts");
+        assert_eq!(store.post(surplus("z", "1.0"), Bytes::from("z")).unwrap(), first + 4, "past both compactions and restarts");
         let _ = std::fs::remove_file(&path);
     }
 

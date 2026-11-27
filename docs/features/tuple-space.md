@@ -50,6 +50,15 @@ each pulling from the deepest pending lane. CI runs it. That a secondary promote
 - **Not built:** exactly-once delivery; a payload above `mirror_payload_limit` is not live-replicated and relies on the
   WAL; the first promotion on a fresh cluster can take about 100 s (the orphan grace); one owner per `wal_path`, and a
   WAL with a corrupt middle record refuses the open rather than truncating.
+- **An item's id is not reissued, under one assumption** (ER3). A space with no id history — transient, or a WAL that is
+  missing or empty — starts its ids at the wall clock (ms × 1024), so a restarted space does not reuse the ids of its
+  previous life, which [destination commit](destination-commit.md) keys effects on; a WAL with history fences at its
+  highest id + 1 and needs no clock. **The limit:** two fresh starts of one namespace whose clocks read within
+  *N*/1024 ms of each other (*N* the ids the earlier one issued) can overlap — a clock stepped back, or a device with
+  no real-time clock booting at a repeatable time; in one process the bump is 1 024 per store, so a store that issued
+  more than 1 024 ids and is recreated within milliseconds can overlap, and *N* stores created in one process put the
+  last base about *N* ms ahead of the clock. Ids stay below 2^53
+  ([the ledger row](../operations/what-is-proven.md#fresh-id-space-not-reissued)).
 - **Evidence:** the ledger row
   [a failed WAL append is never followed by an acknowledged one](../operations/what-is-proven.md#failed-wal-append-never-followed-acknowledged),
   both companions' WALs included.

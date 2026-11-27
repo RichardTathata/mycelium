@@ -16,7 +16,9 @@ Design: `docs/design/contracts-receipts.md` §6 (item 1 PR 5). Key facts:
   all** — that single fact is the whole design, and everything below follows from it.
 - **`Fresh` / `Replayed` are facts, not guesses.** Same `operation_id`, same content, any attempt:
   `Replayed`, nothing applied twice — the retry may come from another worker, after a restart, a week
-  later. The attempt id may differ; the operation identity is what dedups.
+  later. The attempt id may differ; the operation identity is what dedups. **Content equality is not identity:**
+  the dedup holds only while the issuer never reissues an `operation_id` — the tuple space's id rule (ER3,
+  [tuple-space](tuple-space.md)).
 - **Same identity, different content is a `Conflict`.** A retry that changed its mind is not a retry,
   and a destination that quietly took the second version would have two effects under one identity.
   The first version stands.

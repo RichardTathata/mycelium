@@ -168,7 +168,8 @@ impl TupleStore {
         Self {
             stages: papaya::HashMap::new(),
             inflight: Mutex::new(HashMap::new()),
-            next_id: AtomicU64::new(0),
+            // No id history: start past every id an earlier life could have issued (ER3).
+            next_id: AtomicU64::new(fresh_id_base()),
             high_watermark,
             wal: None,
         }
@@ -186,7 +187,9 @@ impl TupleStore {
         let store = Self {
             stages: papaya::HashMap::new(),
             inflight: Mutex::new(HashMap::new()),
-            next_id: AtomicU64::new(max_id.map_or(0, |m| m + 1)),
+            // A WAL that names ids fences at its highest + 1; one that names none has no history,
+            // so it starts fresh rather than at 0 (a deleted WAL must not recycle ids, ER3).
+            next_id: AtomicU64::new(max_id.map_or_else(fresh_id_base, |m| m + 1)),
             high_watermark,
             wal: Some(wal),
         };
@@ -896,6 +899,35 @@ impl TupleStore {
         match &self.wal {
             Some(wal) => wal.sync_if_due(force),
             None => Ok(()),
+        }
+    }
+}
+
+/// The last base [`fresh_id_base`] handed out in this process, so two stores created in the same
+/// millisecond still get disjoint bases.
+static LAST_FRESH_BASE: AtomicU64 = AtomicU64::new(0);
+
+/// The first id of an id space with **no history** — a transient store, or a WAL that names no id
+/// (ER3, R4-01). An item's id is its identity everywhere: the effects companion's `operation_id`
+/// (`tuple/{ns}/{stage}/{id}`), the advisory in-flight key, a mirror's `admit`. A space that started
+/// at 0 reissued its previous life's ids after a restart, and a destination answered `Replayed` for
+/// new work. The base is the wall clock's milliseconds shifted left by 10 (read through
+/// `mycelium::sim_seam::wall_now_ms`), strictly increasing in-process by at least 1 024 per store.
+///
+/// **The assumption:** two fresh starts of one namespace whose clocks read within *N*/1024 ms of each
+/// other (*N* the ids the earlier one issued) can overlap — a clock stepped back, or a device with no
+/// real-time clock booting at a repeatable time. In one process the bump is 1 024 per store, not per
+/// id, and *N* stores created in one process push the last base about *N* ms ahead of the clock. A
+/// WAL with history never calls this: it fences at `max_id + 1`. Ids stay below 2^53 until about the
+/// year 2248, so they are exact as JSON numbers.
+pub(crate) fn fresh_id_base() -> u64 {
+    let now = mycelium::sim_seam::wall_now_ms() << 10;
+    let mut prev = LAST_FRESH_BASE.load(Ordering::Relaxed);
+    loop {
+        let next = now.max(prev + (1 << 10));
+        match LAST_FRESH_BASE.compare_exchange(prev, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(p) => prev = p,
         }
     }
 }
@@ -2233,11 +2265,14 @@ mod tests {
     #[tokio::test]
     async fn put_with_id_fences_next_id() {
         let store = TupleStore::transient(500);
-        store.put_with_id("s", 41, b("mirrored"), None).unwrap();
+        // Relative to the store's first id: a fresh id space does not start at 0 (ER3).
+        let first = store.put("s", b("first")).unwrap();
+        let mirrored = first + 41;
+        store.put_with_id("s", mirrored, b("mirrored"), None).unwrap();
         let fresh = store.put("s", b("new")).unwrap();
-        assert!(fresh > 41, "next_id not fenced past replicated id");
-        assert!(store.remove_queued("s", 41));
-        assert!(!store.remove_queued("s", 41), "double remove must be a no-op");
+        assert!(fresh > mirrored, "next_id not fenced past replicated id");
+        assert!(store.remove_queued("s", mirrored));
+        assert!(!store.remove_queued("s", mirrored), "double remove must be a no-op");
     }
 
     /// M2 Run-17 falsification probe (Semantic Correctness): a crash mid-append
@@ -2363,9 +2398,12 @@ mod tests {
     #[tokio::test]
     async fn a_restart_never_reuses_an_acked_id() {
         let path = temp_wal("id-high-water");
+        let first;
         {
             let store = TupleStore::persistent(&path, 1, 500).unwrap();
-            for i in 0..3 {
+            // Relative to the first id: a fresh WAL's id space does not start at 0 (ER3).
+            first = store.put("s", b("0")).unwrap();
+            for i in 1..3 {
                 store.put("s", Bytes::from(format!("{i}"))).unwrap();
             }
             for _ in 0..3 {
@@ -2375,8 +2413,55 @@ mod tests {
             store.compact_now().unwrap();
         }
         let store = TupleStore::persistent(&path, 1, 500).unwrap();
-        assert_eq!(store.put("s", b("next")).unwrap(), 3, "the next id is past every id the log ever held");
+        assert_eq!(store.put("s", b("next")).unwrap(), first + 3, "the next id is past every id the log ever held");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// ER3 (R4-01): a fresh id space started at 0, so a transient store recreated in the same
+    /// namespace reissued the ids of its previous life, and a destination keyed on the id answered
+    /// `Replayed` for new work. Two transient stores back to back must not overlap.
+    #[tokio::test]
+    async fn fresh_id_spaces_do_not_overlap() {
+        let first = TupleStore::transient(500);
+        let old: Vec<u64> = (0..3).map(|i| first.put("s", Bytes::from(format!("{i}"))).unwrap()).collect();
+        drop(first);
+        let second = TupleStore::transient(500);
+        let new = second.put("s", b("new")).unwrap();
+        assert!(new > *old.iter().max().unwrap(), "the restarted store reissued an id: old {old:?}, new {new}");
+        // And a WAL with no history starts fresh too: a deleted WAL does not recycle ids.
+        let path = temp_wal("fresh-after-transient");
+        let walled = TupleStore::persistent(&path, 1, 500).unwrap();
+        let from_wal = walled.put("s", b("wal")).unwrap();
+        assert!(from_wal > new, "a WAL with no history reissued an id: {from_wal} after {new}");
+        drop(walled);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ER3: the fresh base is applied only where a store has no id history. A WAL that names ids
+    /// keeps its fence at exactly `max_id + 1`, whatever the clock says, so a redelivery after a
+    /// restart still carries the same id. A control: passes before and after the fix.
+    #[tokio::test]
+    async fn a_wal_with_history_keeps_its_fence() {
+        let path = temp_wal("history-fence");
+        let last;
+        {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            store.put("s", b("a")).unwrap();
+            last = store.put("s", b("b")).unwrap();
+        }
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        assert_eq!(store.put("s", b("c")).unwrap(), last + 1, "the fence is the log's, not the clock's");
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ER3: ids stay below 2^53, so the gateway's JSON numbers are exact in TypeScript. A pin: an id
+    /// space at 0 passes it too.
+    #[tokio::test]
+    async fn ids_stay_below_two_to_the_53() {
+        let store = TupleStore::transient(500);
+        let id = store.put("s", b("x")).unwrap();
+        assert!(id < 1u64 << 53, "id {id} is not exact as a JSON number");
     }
 
     /// #597 review, finding 3: a valid kind byte followed by zeros is what a crash leaves when the
@@ -2613,10 +2698,13 @@ mod tests {
     #[tokio::test]
     async fn the_high_water_mark_survives_two_compactions_and_a_restart() {
         let path = temp_wal("hw-twice");
+        let mut first = None;
         {
             let store = TupleStore::persistent(&path, 1, 500).unwrap();
             for _ in 0..3 {
-                store.put("s", b("x")).unwrap();
+                let put = store.put("s", b("x")).unwrap();
+                // Relative to the first id: a fresh WAL's id space does not start at 0 (ER3).
+                first.get_or_insert(put);
                 let (id, _) = store.take("s", Duration::from_millis(50)).await.unwrap();
                 store.ack(id).unwrap();
             }
@@ -2624,14 +2712,15 @@ mod tests {
         }
         {
             let store = TupleStore::persistent(&path, 1, 500).unwrap();
-            assert_eq!(store.put("s", b("y")).unwrap(), 3);
+            let first = first.unwrap();
+            assert_eq!(store.put("s", b("y")).unwrap(), first + 3);
             let (id, _) = store.take("s", Duration::from_millis(50)).await.unwrap();
             store.ack(id).unwrap();
             store.compact_now().unwrap();
             store.compact_now().unwrap();
         }
         let store = TupleStore::persistent(&path, 1, 500).unwrap();
-        assert_eq!(store.put("s", b("z")).unwrap(), 4, "past both compactions and both restarts");
+        assert_eq!(store.put("s", b("z")).unwrap(), first.unwrap() + 4, "past both compactions and both restarts");
         let _ = std::fs::remove_file(&path);
     }
 

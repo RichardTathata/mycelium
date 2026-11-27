@@ -5901,3 +5901,37 @@ projecting. Upgrade every member of a governed group; until then a reader may st
 - **Code:** `src/agent/emergent_groups.rs` (`reconcile_emergent_groups`), `src/agent/membership_governor.rs`
   (`governed_groups`, `is_governed`), `src/agent/lifecycle.rs` (`start_capability_group_watcher`). Tests:
   `a_governed_groups_projection_follows_a_drain_and_a_join` and its siblings in `src/lib_tests.rs`.
+## §TBD-ER3. A fresh tuple space or blackboard does not start its ids at 0 (unreleased, engineering review ER3, R4-01)
+
+This applies to `mycelium-tuple-space` and `mycelium-blackboard` wherever a store has **no id history**: a transient
+space or board (`persist: false`, the default), and a WAL-backed one opened over a missing or empty WAL. A WAL that
+names ids is unchanged.
+
+**Before.** Such a store issued ids from 0. A `TupleConsumer` commits each item under
+`tuple/{namespace}/{stage}/{id}`, so after a restart of a transient primary (or with its WAL deleted) a new item reused
+an id the destination had already committed: the same payload came back `Replayed` and was acknowledged with no
+write; a changed payload came back `Conflict` and stayed in flight for good. A surviving mirror refused the reused ids
+silently (as acked, or as still live, keeping the old payload under the new item's id), and a stale
+`tuple/inflight/{ns}/{id}` key was cleared by the new item's ack.
+
+**Now.** A fresh id space starts at the wall clock's milliseconds shifted left by 10 (read through
+`mycelium::sim_seam::wall_now_ms`), strictly increasing in-process by at least 1 024 per store created. Ids are
+therefore large (about 1.8e15 today) and do not start at 0; they stay below 2^53, so the gateway's JSON numbers stay
+exact in TypeScript. A WAL with history fences at `max_id + 1` as before, so a redelivery after a restart or a
+failover still carries its id and is still `Replayed`.
+
+**The assumption.** Two fresh starts of one namespace whose wall clocks read within *N*/1024 ms of each other, *N*
+being the ids the earlier one issued, can overlap: a clock stepped back onto an earlier start, or a device with no
+real-time clock booting at a repeatable time. In one process the bump is 1 024 per store, not per id, so a store that
+issues more than 1 024 ids and is recreated within a few milliseconds can overlap too, and *N* stores created in one
+process put the last base about *N* ms ahead of the clock. A WAL-backed space does not depend on the clock.
+
+**Will the compiler tell me?** No — no type changes; wire, RPC and WAL unchanged, and mixed versions are fine (ids
+are opaque and `put_with_id` fences with `max`). Code or tests that assumed a fresh space's first id is 0, or that ids
+are small, must read the first id instead.
+
+- ***Check:*** nothing asserts a literal id of 0; an id stored in a 32-bit or floating field outside JSON is wide
+  enough for 2^53.
+- **Code:** `fresh_id_base` in `mycelium-tuple-space/src/store.rs` and `mycelium-blackboard/src/store.rs`. Tests:
+  `mycelium-effects/tests/tuple_restart.rs`; `fresh_id_spaces_do_not_overlap`, `a_wal_with_history_keeps_its_fence`,
+  `ids_stay_below_two_to_the_53` in both stores; the mirror tests in both crates' `lib.rs`.

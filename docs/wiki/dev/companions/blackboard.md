@@ -25,7 +25,7 @@ attributes** where the tuple space routes by lane position. WS-G G3, PRs #95–#
   refused, compaction folds the log itself (not memory) and installs with `sync_data →
   rename → fsync_parent` (it used `std::fs::write` + `rename`, neither synced). Maintenance
   runs on every WAL holder, secondaries included; a refused mirror fact re-syncs from the
-  primary (`mirror_gap`); the id high-water mark survives compaction (#597 review).
+  primary (`mirror_gap`); the id high-water mark survives compaction (#597 review). A board with no id history starts at `fresh_id_base` (ER3, 2026-11-27; the tuple space's rule — [tuple-space](tuple-space.md)).
 - **Gates:** `cargo test -p mycelium-blackboard --features gateway` (+ clippy); `microgrid`
   example + CI smoke; cross-node `tests/board_failover.rs`; gateway `POST /gateway/bb/*` +
   `GET /gateway/bb/depth`; py/ts SDKs.
