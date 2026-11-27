@@ -56,6 +56,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   delete was applied and gossiped but never handed to the WAL, so a node that exited without `shutdown()` replayed the
   insert and delivered the event again. The delete is now appended as the insert is: queued to the WAL writer, not
   synced, so a consumed event can still return after a crash before the delete reaches disk.
+- **A governed group's `gcap/` projection follows its membership** (ER9, R10-01; `deprecations.md` §TBD-ER9). The
+  emergent-group watcher took governed groups out of its join and its leave so that a membership intent's `max` and
+  `drain` could hold (#56), and the projection, fused to those two branches, went with them: a node drained from a
+  group kept projecting its `provides` (dispatch reported a send to an empty group), and a node the governor joined
+  never projected (`Unwired`). The `requires` opacity, the same task, was never tracked for a governed joiner nor
+  cleared for a governed leaver, and an electorate group's members never projected. Now the watcher projects a
+  governed group exactly while `grp/{g}/{self}` is live and the node matches the definition's filter, whoever wrote
+  the membership — the governor, `/gateway/govern/group`, `join_group`, or a peer — and never writes a governed
+  group's `grp/` itself; it wakes on its own `grp/` entries and on the membership intents. When an intent evaporates,
+  a matching node the governor had drained is written back into the roster. "Governed" has one definition
+  (`membership_governor::governed_groups`), read fleet-wide by the gateway and per node by the watcher.
+  *Check:* after a drain, `GET /gateway/kv/keys?prefix=gcap/{group}/` lists no key ending in the drained node.
 
 - **A gateway sends an unanswered cancel-forward again** (unreleased code: I4's cancel-forward; identity-and-lifecycle
   §9 O13, the maintainer's decision of 2026-11-22; found on #824, where behind about 12 000 concurrent mints the

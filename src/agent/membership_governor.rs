@@ -70,6 +70,56 @@ impl super::intent::FleetIntent for MembershipIntent {
     fn target(&self) -> Option<&NodeId> { self.target.as_ref() }
 }
 
+/// Whose membership a reading of "governed" is about ([`governed_groups`], [`is_governed`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum GovernedFor<'a> {
+    /// Whether the group's **population** is governed anywhere in the fleet: an intent `target`ed at one node still
+    /// governs the group. The gateway's refusals read it so, as do the electorate floor and the conflict detector.
+    #[cfg_attr(not(feature = "gateway"), allow(dead_code))]
+    Fleet,
+    /// Whether **this node's** membership of the group is the governor's: an intent `target`ed at another node does
+    /// not govern it here — the governor's own reading (`intent::read_fresh_intent`), so the emergent watcher defers
+    /// exactly where the governor acts.
+    Node(&'a NodeId),
+}
+
+/// The groups the fresh membership intents govern, as `for_` reads them. An intent names its group **by its body**,
+/// as the governor reads it (`converge`); it is fresh within [`MEMBERSHIP_INTENT_TTL_MS`] of `now_ms` (wall clock,
+/// saturating — a future-dated stamp reads as fresh, as it does for the governor).
+fn fresh_intent_groups(ctx: &TaskCtx, now_ms: u64, for_: GovernedFor<'_>) -> impl Iterator<Item = String> {
+    scan_prefix_kv(&ctx.kv_state, MEMBERSHIP_PREFIX).into_iter().filter_map(move |(_key, bytes)| {
+        let intent = mycelium_core::serde_fixint::from_slice::<MembershipIntent>(&bytes).ok()?;
+        if now_ms.saturating_sub(intent.written_at_ms) > MEMBERSHIP_INTENT_TTL_MS {
+            return None; // evaporated — not governed
+        }
+        if let GovernedFor::Node(me) = for_
+            && intent.target.as_ref().is_some_and(|t| t != me)
+        {
+            return None; // targeted at another node — not governed for this one
+        }
+        Some(intent.group)
+    })
+}
+
+/// **The one definition of a governed group** (ER9, D9c): a group under a fresh membership intent (read as `for_`
+/// says), or an electorate group (P2), which is governed for good — its membership moves only by a decided step, so
+/// it never lapses back to emergent membership. Its population is governed: the emergent watcher neither joins nor
+/// leaves it on a capability match (it only projects for a live member that matches the filter), and the gateway
+/// moves a node in or out of it only through `/gateway/govern/group`. One wall reading, `now_ms`, from the caller.
+pub(crate) fn governed_groups(ctx: &Arc<TaskCtx>, now_ms: u64, for_: GovernedFor<'_>) -> ahash::AHashSet<Arc<str>> {
+    let mut set: ahash::AHashSet<Arc<str>> = fresh_intent_groups(ctx, now_ms, for_).map(|g| Arc::from(g.as_str())).collect();
+    for d in super::electorate::all_views(ctx) {
+        set.insert(Arc::from(d.group.as_str()));
+    }
+    set
+}
+
+/// Whether `group` is governed — [`governed_groups`]'s definition, for one group.
+#[cfg(feature = "gateway")]
+pub(crate) fn is_governed(ctx: &Arc<TaskCtx>, group: &str, now_ms: u64, for_: GovernedFor<'_>) -> bool {
+    super::electorate::view(ctx, group).is_some() || fresh_intent_groups(ctx, now_ms, for_).any(|g| g == group)
+}
+
 /// What a node decides this tick for one group.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MembershipAction {

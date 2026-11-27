@@ -1061,6 +1061,270 @@ async fn test_membership_intent_governs_against_emergent_autojoin() {
          emergent watcher is re-joining shed nodes (regression of #56)");
 }
 
+// ── ER9 (R10-01): a governed group's `gcap/` projection follows its membership ────────────────
+
+/// One node for the ER9 tests: a one-second governor tick, so a governed join or drain lands in seconds.
+#[cfg(test)]
+async fn er9_node() -> GossipAgent {
+    let port = alloc_port();
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.health_check_interval_secs = 1;
+    cfg.health_check_max_jitter_ms = 50;
+    let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+    a.start().await.unwrap();
+    a
+}
+
+/// A definition whose filter is `svc/worker`, projecting `dispatch/{provides}` and requiring `requires` (each an
+/// `absent/{name}` no node advertises, so the requirement is unmet).
+#[cfg(test)]
+fn er9_def(provides: &str, requires: &[&str]) -> crate::capability::CapabilityGroupDef {
+    use crate::capability::{Capability, CapFilter, CapabilityGroupDef};
+    CapabilityGroupDef {
+        filter: CapFilter::new("svc", "worker"), topology_policy: None,
+        provides: if provides.is_empty() { vec![] } else { vec![Capability::new("dispatch", provides)] },
+        requires: requires.iter().map(|r| CapFilter::new("absent", *r)).collect(),
+    }
+}
+
+#[cfg(test)]
+fn er9_projects(a: &GossipAgent, group: &str, provides: &str) -> bool {
+    a.kv().get(&format!("gcap/{group}/dispatch/{provides}/{}", a.node_id())).is_some()
+}
+
+#[cfg(test)]
+fn er9_member(a: &GossipAgent, group: &str) -> bool {
+    a.kv().get(&crate::signal::grp_member_key(group, a.node_id())).is_some()
+}
+
+#[cfg(test)]
+fn er9_opaque(a: &GossipAgent, group: &str) -> bool {
+    a.kv().get(&format!("sys/load/{}/group-req/{group}/0", a.node_id())).is_some()
+}
+
+/// Waits up to `timeout_ms` for `predicate` and says whether it held — without panicking, unlike `poll_until`, so
+/// each test's assertion names what did not happen.
+#[cfg(test)]
+async fn er9_until(mut predicate: impl FnMut() -> bool, timeout_ms: u64) -> bool {
+    let held = tokio::time::timeout(Duration::from_millis(timeout_ms), async {
+        while !predicate() { time::sleep(Duration::from_millis(10)).await; }
+    }).await;
+    held.is_ok() || predicate()
+}
+
+/// **A governed group's projection follows a drain and a join** (ER9, R10-01; the reviewer's
+/// `provider_projection_follows_governed_join_and_drain`). `south` is joined emergently and projected; an intent then
+/// drains it. `north` is governed from the start, and the governor joins it. After both, discovery and dispatch must
+/// see `north` only. Seen failing first: `south`'s projection stayed (dispatch `Emitted` to an empty group) and
+/// `north`'s never appeared (`Unwired`).
+#[tokio::test]
+async fn a_governed_groups_projection_follows_a_drain_and_a_join() {
+    use crate::capability::{Capability, CapFilter, WiredEmitOutcome};
+    let a = er9_node().await;
+    let life = Duration::from_secs(30);
+    let _worker = a.capabilities().advertise_capability(Capability::new("svc", "worker"), life);
+    let _south = a.capabilities().define_capability_group("south", er9_def("south-sort", &[]), life);
+    assert!(er9_until(|| er9_member(&a, "south") && er9_projects(&a, "south", "south-sort"), 10_000).await,
+        "south joined and projected emergently");
+    assert!(a.publish_membership_intent(crate::MembershipIntent::new("north", 1, Some(1))));
+    let _north = a.capabilities().define_capability_group("north", er9_def("north-sort", &[]), life);
+    assert!(er9_until(|| a.kv().get("cap-group/north").is_some(), 5_000).await);
+    assert!(a.publish_membership_intent(
+        crate::MembershipIntent::new("south", 0, Some(0)).with_drain(vec![a.node_id().clone()])));
+    a.start_membership_governor();
+    assert!(er9_until(|| !er9_member(&a, "south") && er9_member(&a, "north"), 20_000).await,
+        "the governor drained south and joined north");
+
+    let converged = er9_until(|| !er9_projects(&a, "south", "south-sort") && er9_projects(&a, "north", "north-sort"), 10_000).await;
+    let seen = (er9_projects(&a, "south", "south-sort"), er9_projects(&a, "north", "north-sort"));
+    let mut rx = a.mesh().signal_rx("er9-sort");
+    let south = a.capabilities().signal_wired_via(&CapFilter::new("dispatch", "south-sort"), "er9-sort", "s");
+    let north = a.capabilities().signal_wired_via(&CapFilter::new("dispatch", "north-sort"), "er9-sort", "n");
+    let received = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await.ok().flatten();
+    a.shutdown().await;
+    assert!(converged, "projection must follow membership: (south, north) = {seen:?}, want (false, true)");
+    assert!(matches!(south, WiredEmitOutcome::Unwired { .. }), "south has no member: {south:?}");
+    assert!(matches!(north, WiredEmitOutcome::Emitted { .. }), "north has a member: {north:?}");
+    assert_eq!(received.map(|s| s.payload), Some(Bytes::from_static(b"n")), "north's dispatch is received");
+}
+
+/// **A drained member clears its group requirement's opacity** (ER9). The opacity is the projection's task: kept
+/// with a stale projection, the drained node stayed opaque for a group it had left. Seen failing first: the
+/// `sys/load/{self}/group-req/south/0` key stayed after the drain.
+#[tokio::test]
+async fn a_drained_member_clears_its_group_requirement_opacity() {
+    use crate::capability::Capability;
+    let a = er9_node().await;
+    let life = Duration::from_secs(30);
+    let _worker = a.capabilities().advertise_capability(Capability::new("svc", "worker"), life);
+    let _south = a.capabilities().define_capability_group("south", er9_def("", &["thing"]), life);
+    assert!(er9_until(|| er9_member(&a, "south") && er9_opaque(&a, "south"), 10_000).await,
+        "an unmet group requirement makes the emergent member opaque");
+    assert!(a.publish_membership_intent(
+        crate::MembershipIntent::new("south", 0, Some(0)).with_drain(vec![a.node_id().clone()])));
+    a.start_membership_governor();
+    assert!(er9_until(|| !er9_member(&a, "south"), 20_000).await, "the governor drained south");
+    let cleared = er9_until(|| !er9_opaque(&a, "south"), 10_000).await;
+    a.shutdown().await;
+    assert!(cleared, "a drained member must clear its group-requirement opacity");
+}
+
+/// **A governed joiner goes opaque on an unmet group requirement** (ER9). Seen failing first: the governor joined
+/// the node and no opacity key was written — the requirement was never tracked for a governed member.
+#[tokio::test]
+async fn a_governed_joiner_goes_opaque_on_an_unmet_group_requirement() {
+    use crate::capability::Capability;
+    let a = er9_node().await;
+    let life = Duration::from_secs(30);
+    let _worker = a.capabilities().advertise_capability(Capability::new("svc", "worker"), life);
+    assert!(a.publish_membership_intent(crate::MembershipIntent::new("north", 1, Some(1))));
+    let _north = a.capabilities().define_capability_group("north", er9_def("", &["thing"]), life);
+    a.start_membership_governor();
+    assert!(er9_until(|| er9_member(&a, "north"), 20_000).await, "the governor joined north");
+    let opaque = er9_until(|| er9_opaque(&a, "north"), 10_000).await;
+    a.shutdown().await;
+    assert!(opaque, "a governed member must track its group requirement");
+}
+
+/// **A node joined through the govern route projects, and stops when it leaves through it** (ER9: the route's door,
+/// which writes `grp/` and never touches a projection). Seen failing first: no projection after the route's join.
+#[cfg(feature = "gateway")]
+#[tokio::test]
+async fn a_node_joined_through_the_govern_route_projects() {
+    use axum::http::header::AUTHORIZATION;
+    use crate::capability::Capability;
+    let (gossip_port, http_port) = (alloc_port(), alloc_port());
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    cfg.gateway_auth_token = Some("t".into());
+    let a = GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg);
+    a.start().await.unwrap();
+    let life = Duration::from_secs(30);
+    let _worker = a.capabilities().advertise_capability(Capability::new("svc", "worker"), life);
+    // Governed from the start, and no governor runs here: only the route moves this node.
+    assert!(a.publish_membership_intent(crate::MembershipIntent::new("ruled", 0, None)));
+    let _ruled = a.capabilities().define_capability_group("ruled", er9_def("ruled-sort", &[]), life);
+    assert!(er9_until(|| a.kv().get("cap-group/ruled").is_some(), 5_000).await);
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{http_port}/gateway");
+    let r = client.post(format!("{base}/govern/group")).header(AUTHORIZATION, "Bearer t")
+        .json(&serde_json::json!({"group": "ruled"})).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(er9_member(&a, "ruled"));
+    let joined = er9_until(|| er9_projects(&a, "ruled", "ruled-sort"), 10_000).await;
+    let r = client.delete(format!("{base}/govern/group?group=ruled")).header(AUTHORIZATION, "Bearer t").send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let left = er9_until(|| !er9_projects(&a, "ruled", "ruled-sort"), 10_000).await;
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+    assert!(joined, "a member joined through the govern route must project the group's provides");
+    assert!(left, "and stop when it leaves through it");
+}
+
+/// **An electorate group's member projects its `provides`** (ER9: electorate groups are governed for good, so the
+/// watcher never projected them). Seen failing first: no `gcap/council/...` key for the declared member.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_electorate_group_member_projects_its_provides() {
+    use crate::capability::Capability;
+    let (agents, _l, _serial) = electorate_mesh(1, |_| {}).await;
+    let a = &agents[0];
+    a.mesh().join_group("council");
+    roster_converges(&agents, "council", &[a]).await;
+    declare(a, "council", false).await.expect("a genesis of one");
+    let life = Duration::from_secs(30);
+    let _worker = a.capabilities().advertise_capability(Capability::new("svc", "worker"), life);
+    let _council = a.capabilities().define_capability_group("council", er9_def("council-sort", &[]), life);
+    let projected = er9_until(|| er9_projects(a, "council", "council-sort"), 10_000).await;
+    let member = er9_member(a, "council");
+    agents[0].shutdown_with_timeout(Duration::from_secs(5)).await;
+    assert!(member, "the declared member is in the roster");
+    assert!(projected, "an electorate group's member must project its provides");
+}
+
+/// **After an intent evaporates, a projecting node is back in the roster** (ER9, item 4). The node is drained under a
+/// short-lived intent; when it evaporates the group is emergent again and the node matches, so the watcher re-joins
+/// it — it projects, so it must be a member. Seen failing first: the drained node's projection was never dropped,
+/// so the group stayed in the watcher's joined set and no join was written: projecting, and absent from `grp/`.
+#[tokio::test]
+async fn after_an_intent_evaporates_a_projecting_node_is_back_in_the_roster() {
+    use crate::capability::Capability;
+    use crate::agent::membership_governor::{MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
+    let a = er9_node().await;
+    // A one-second refresh: each re-advertisement wakes the watcher, which is what notices the evaporation.
+    let _worker = a.capabilities().advertise_capability(Capability::new("svc", "worker"), Duration::from_secs(1));
+    let _south = a.capabilities().define_capability_group("south", er9_def("south-sort", &[]), Duration::from_secs(30));
+    assert!(er9_until(|| er9_member(&a, "south") && er9_projects(&a, "south", "south-sort"), 10_000).await);
+    // A drain that evaporates six seconds from now: written as if published TTL − 6 s ago.
+    let mut intent = MembershipIntent::new("south", 0, Some(0)).with_drain(vec![a.node_id().clone()]);
+    intent.written_at_ms = mycelium_core::sim_seam::wall_now_ms() - MEMBERSHIP_INTENT_TTL_MS + 6_000;
+    assert!(a.kv().set(format!("{MEMBERSHIP_PREFIX}south"), mycelium_core::serde_fixint::to_vec(&intent).unwrap()));
+    a.start_membership_governor();
+    assert!(er9_until(|| !er9_member(&a, "south"), 5_000).await, "the governor drained south");
+    // The intent evaporates; the group is emergent again and the node still matches.
+    let back = er9_until(|| er9_member(&a, "south") && er9_projects(&a, "south", "south-sort"), 20_000).await;
+    let seen = (er9_member(&a, "south"), er9_projects(&a, "south", "south-sort"));
+    a.shutdown().await;
+    assert!(back, "after the intent evaporates the node must be back in the roster and projecting: (member, projects) = {seen:?}");
+}
+
+/// **A governed member that does not match the filter does not project** (ER9, D9a). Two halves: a node joined by
+/// hand to a governed group it does not match never projects (the new rule — it cannot fail first, since the unfixed
+/// code never projected any governed member); and a governed member that stops matching stops projecting. Seen
+/// failing first, the second half: the projection stayed after the capability was withdrawn.
+#[tokio::test]
+async fn a_governed_member_that_does_not_match_the_filter_does_not_project() {
+    use crate::capability::{Capability, CapFilter, CapabilityGroupDef};
+    let a = er9_node().await;
+    let life = Duration::from_secs(30);
+    let _other = a.capabilities().advertise_capability(Capability::new("svc", "other"), life);
+    assert!(a.publish_membership_intent(crate::MembershipIntent::new("ruled", 0, None)));
+    let _ruled = a.capabilities().define_capability_group("ruled", er9_def("ruled-sort", &[]), life);
+    a.mesh().join_group("ruled");
+    // A pass after the join: a control group this node does match, projected.
+    let _audit = a.capabilities().define_capability_group("audit", CapabilityGroupDef {
+        filter: CapFilter::new("svc", "other"), topology_policy: None,
+        provides: vec![Capability::new("dispatch", "audit-sort")], requires: vec![] }, life);
+    assert!(er9_until(|| er9_projects(&a, "audit", "audit-sort"), 10_000).await, "a pass ran");
+    assert!(er9_member(&a, "ruled"), "joined by hand");
+    assert!(!er9_projects(&a, "ruled", "ruled-sort"), "an ineligible governed member must not project");
+
+    // The second half: emergent, then governed while a member, then the capability goes.
+    let worker = a.capabilities().advertise_capability(Capability::new("svc", "worker"), life);
+    let _pool = a.capabilities().define_capability_group("pool", er9_def("pool-sort", &[]), life);
+    assert!(er9_until(|| er9_member(&a, "pool") && er9_projects(&a, "pool", "pool-sort"), 10_000).await);
+    assert!(a.publish_membership_intent(crate::MembershipIntent::new("pool", 0, None)));
+    drop(worker);
+    let stopped = er9_until(|| !er9_projects(&a, "pool", "pool-sort"), 10_000).await;
+    let still_member = er9_member(&a, "pool");
+    a.shutdown().await;
+    assert!(stopped, "a governed member that stopped matching must stop projecting");
+    assert!(still_member, "and its membership stays the governor's: the watcher does not leave a governed group");
+}
+
+/// **An emergent group the application left by hand is not rejoined** (ER9, item 4's control): the evaporation
+/// re-join is restricted to the governed → emergent transition, and the new `grp/` wake source does not turn a
+/// hand-made leave into a rejoin. Passes on the unfixed code.
+#[tokio::test]
+async fn an_emergent_group_left_by_hand_is_not_rejoined() {
+    use crate::capability::{Capability, CapFilter, CapabilityGroupDef};
+    let a = er9_node().await;
+    let life = Duration::from_secs(30);
+    let _worker = a.capabilities().advertise_capability(Capability::new("svc", "worker"), Duration::from_secs(1));
+    let _sorters = a.capabilities().define_capability_group("sorters", er9_def("group-sort", &[]), life);
+    assert!(er9_until(|| er9_member(&a, "sorters"), 10_000).await);
+    a.mesh().leave_group("sorters");
+    // Passes after the leave: a control group, and two re-advertisements.
+    let _audit = a.capabilities().define_capability_group("audit", CapabilityGroupDef {
+        filter: CapFilter::new("svc", "worker"), topology_policy: None,
+        provides: vec![Capability::new("dispatch", "audit-sort")], requires: vec![] }, life);
+    assert!(er9_until(|| er9_projects(&a, "audit", "audit-sort"), 10_000).await, "a pass ran");
+    let rejoined = er9_until(|| er9_member(&a, "sorters"), 2_500).await;
+    a.shutdown().await;
+    assert!(!rejoined, "an emergent group left by hand must not be rejoined by the watcher");
+}
+
 // Compile-time proof that GossipAgent is Send + Sync so it can be wrapped in Arc.
 #[allow(dead_code)]
 fn assert_gossip_agent_is_send_sync() {

@@ -990,16 +990,24 @@ impl GossipAgent {
 
     /// Spawns the background task that keeps this node's `grp/` membership in
     /// sync with the `cap-group/` definitions whose filter matches its own
-    /// capabilities (Phase 3h dual-subscription watcher).
+    /// capabilities (Phase 3h watcher), and its `gcap/` projections in sync with
+    /// its membership of governed groups (ER9) — so it also wakes on this node's
+    /// own `grp/` entries and on the membership intents, into the same debounce.
     fn start_capability_group_watcher(&self) {
         let def_rx      = kv_subscribe_prefix(&self.task_ctx, Arc::<str>::from("cap-group/"));
         let own_prefix  = Arc::<str>::from(format!("cap/{}/", self.node_id).as_str());
         let own_rx      = kv_subscribe_prefix(&self.task_ctx, own_prefix);
+        let own_grp     = format!("/{}", self.node_id);
+        let grp_rx      = super::helpers::kv_subscribe_prefix_with_predicate(
+            &self.task_ctx, Arc::<str>::from("grp/"), move |k| k.ends_with(own_grp.as_str()));
+        let intent_rx   = kv_subscribe_prefix(
+            &self.task_ctx, Arc::<str>::from(super::membership_governor::MEMBERSHIP_PREFIX));
         let shutdown_rx = self.shutdown_tx.subscribe();
         let ctx         = Arc::clone(&self.task_ctx);
         let own_node_id = self.node_id.clone();
+        let wakes = super::emergent_groups::WatcherWakes { defs: def_rx, own: own_rx, grp: grp_rx, intents: intent_rx };
         self.spawn_task(super::emergent_groups::watch_capability_group_definitions(
-            ctx, own_node_id, def_rx, own_rx, shutdown_rx,
+            ctx, own_node_id, wakes, shutdown_rx,
         ));
     }
 

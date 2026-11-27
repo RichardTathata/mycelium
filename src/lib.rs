@@ -92,7 +92,7 @@
 //! | `grp/{group}/{node}`                | Signal Mesh — group membership                               |
 //! | `sys/load/{node}/{kind}`            | Signal Mesh — opacity (load + auto-opacity composition)      |
 //! | `sys/load/{node}/req/{ns}/{name}`   | Phase 3 requirement opacity (composes via `is_self_opaque`)  |
-//! | `sys/load/{node}/group-req/{g}/{i}` | Group-requirement opacity; written by the emergent-group membership task when a `CapabilityGroupDef::requires` filter is unsatisfied |
+//! | `sys/load/{node}/group-req/{g}/{i}` | Group-requirement opacity; written by the emergent-group membership task when a `CapabilityGroupDef::requires` filter is unsatisfied — for an emergent group's member, and for a governed group's live member that matches its filter (ER9) |
 //! | `sys/quorum/{kind}/{sender}`        | Persistent quorum evidence                                   |
 //! | `sys/topology-override/{group}`     | Consensus — operator escape hatch (value: `b"true"`); written through `POST /gateway/govern/topology-override` (`govern:write`; audited with `compliance`) |
 //! | `sys/health/{node}`                 | Emergent detectors (Phase 2) — periodic store self-report feeding cross-node store-convergence |
@@ -124,7 +124,7 @@
 //! | `cap/{node}/locality/self`          | Locality (also a capability — single namespace, single shape)|
 //! | `req/{node}/{ns}/{name}`            | Node-level requirement declarations                          |
 //! | `cap-group/{group}`                 | Emergent capability-group definitions                        |
-//! | `gcap/{group}/{ns}/{name}/{contrib}`| Group-level capability projections                           |
+//! | `gcap/{group}/{ns}/{name}/{contrib}`| Group-level capability projections — written by a node that matches the group's filter: on that match for an emergent group, and while it is in `grp/{group}/` for a governed one (ER9) |
 //! | `mailbox/{target}/{kind}/{hlc_hex}/{sender}` | Service Patterns — event mailbox entries (value: `sender_len(2LE) | sender_bytes | payload`); the sender segment keeps two senders' events at one stamp apart (ER1); the 2.40 shape `…/{hlc_hex}` is still read |
 //! | `schemas/{schema_id}`              | Schema registry — authoritative JSON Schema bytes for a capability `schema_id`; written via `publish_schema`; gossip-propagated and WAL-persisted |
 //! | `tools/{name}/{node}`              | Layer IV MCP tool registrations (value: JSON Schema bytes)   |
