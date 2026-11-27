@@ -820,7 +820,7 @@ let cursor = agent.kv().append("events", b"order-placed");
 // Consumer — one-shot scan
 let entries = agent.kv().scan_log("events", 0, u64::MAX);
 
-// Live subscriber — mpsc channel, new entries arrive on each gossip tick
+// Live subscriber — mpsc channel, each entry handed on as it lands in this node's store
 let mut rx = agent.kv().subscribe_log("events", 0);
 while let Some(entry) = rx.recv().await {
     println!("{} {:?}", entry.hlc, entry.value);
@@ -829,6 +829,16 @@ while let Some(entry) = rx.recv().await {
 // Trim old entries
 agent.kv().compact_log("events", checkpoint_hlc);
 ```
+
+A live subscription hands on **every entry at or after `since` once**. The backlog, and each batch after it,
+is in `(hlc, key)` order; an entry that arrives late — a peer's append at the same stamp, or one stamped below
+the last delivered, from a lagging writer or a healed partition — is delivered when it arrives, so across batches
+the order is arrival order and a stamp can be lower than the one before (engineering review ER8; until it, both
+were skipped). `since` is a floor, not a resume token: resume from the last stamp you handled, inclusive, and
+expect its entries again. The subscription ends when its receiver is dropped or the node shuts down; it holds one
+key suffix per live entry at or after `since`, which `compact_log` shrinks. A group consumer has a persisted
+position instead and does not deliver a late entry that sorts before it
+([what is proven](../operations/what-is-proven.md#log-group-skips-a-late-row)).
 
 #### Consumer Groups (`subscribe_log_group`)
 

@@ -79,6 +79,7 @@ the notice.
 | 56 | a `FleetTally` rule reading a member's entries this node holds without its heartbeat as zero, or counting a forged (future) time as a permit | 2.37.0 (row K2, #656) | nothing to migrate: such a member is unknown coverage while its entry is inside the window plus the staleness and drift bounds | **No** — a tally rule can decide `Indeterminate` where it admitted before, for at most that window ([§56](#56-a-members-tally-entries-without-its-heartbeat-are-unknown-coverage-not-zero-2370-post-360-plan-row-k2)) |
 | 109 | a struct literal of `GossipConfig`, `TlsConfig`, `GatewayTlsConfig` or `OidcConfig` outside `mycelium-core`, with or without `..Default::default()` | 2.41.0 (critique plan CR12) | `let mut c = X::default();` and assign the fields | **Yes** — `E0639`; a field added later then breaks nothing ([§109](#109-gossipconfig-tlsconfig-gatewaytlsconfig-and-oidcconfig-are-non_exhaustive-build-one-with-default-and-assignment-2410-critique-plan-row-cr12)) |
 | 126 | a `SystemStats`, `CoreCtx` or `WriterEntry` literal; a direct `run_peer_writer` call; `max_connections_per_source` at 1 per address for nodes running the control lane | unreleased (B1, PR 1) | add the new fields and arguments; a per-source cap of at least 2 per node, or `control_lane = false` | **Yes** for the literals and the call; **no** for the cap — a refused lane falls back to the shared path, counted ([§126](#126-a-control-lane-a-second-connection-per-peer-for-the-closed-set-of-control-kinds-behind-control_lane-on-by-default-max_connections_per_source-must-allow-two-per-node-behind-one-address-unreleased-b1-pr-1)) |
+| TBD-ER8 | a live log consumer (`subscribe_log`, `GET /gateway/overlay/log/subscribe`, the SDKs' `subscribe_log` / `subscribeLog`) that assumes stamps only rise, or resumes from `entry.hlc + 1` | unreleased (engineering review ER8) | dedupe by what you handled, not by "stamp went up"; resume from `entry.hlc` inclusive | **No** — entries it used to miss now arrive, some with a lower stamp ([§TBD-ER8](#tbd-er8-a-live-log-subscription-delivers-every-entry-once-a-late-entry-arrives-out-of-stamp-order-unreleased-engineering-review-er8)) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -5773,3 +5774,39 @@ unaffected.
 - **Code:** `mycelium-core/src/control_lane.rs`, `mycelium-core/src/writer.rs` (`run_peer_writer`'s lane role,
   `claim_or_spawn`), `mycelium-core/src/ops.rs` (`emit_signal_control`), `mycelium-core/src/connection.rs` (the
   evidence append). Tests: `src/control_lane_tests.rs`.
+
+## TBD-ER8. A live log subscription delivers every entry once; a late entry arrives out of stamp order (unreleased, engineering review ER8)
+
+**What changed.** `KvHandle::subscribe_log` and `GET /gateway/overlay/log/subscribe` advanced a floor to the last
+delivered entry's stamp plus one, so an entry that reached the node after the scan that passed its stamp — a peer's
+append at the **same** stamp (two nodes in one millisecond), or one stamped **below** it, from a lagging writer or a
+healed partition — was never delivered to a running subscription (R8-01). Each subscription now keeps the key
+suffixes it has handed on (`mycelium_core::log_cursor::LiveCursor`) and delivers **every live entry at or after
+`since` once**. The backlog and each later batch are in `(hlc, key)` order; a late entry is delivered when it
+arrives, so **a subscriber can see a stamp lower than the one before it**. The SSE payload is unchanged; no wire, key
+or signature change.
+
+Both loops also end when the receiver is dropped or the HTTP client disconnects, and at node shutdown — before,
+a quiet stream kept its task and its prefix-watch receiver until the next write under the prefix (R8-09). A crafted
+`log/{stream}/ffffffffffffffff/…` entry is delivered like any other and no longer stalls the gateway stream (the
+floor used to saturate at `u64::MAX`).
+
+**What to do.**
+
+- A consumer that dropped an entry whose stamp was not above the last one seen now drops real entries: dedupe on
+  what you have handled (the stamp *and* the value, or an id in the value), not on a rising stamp.
+- **Resume from `entry.hlc`, inclusive, and expect that stamp's entries again** — `since` is a floor, not a resume
+  token. `entry.hlc + 1`, which the SDK docstrings advised until this release, skips a sibling at that stamp. An
+  entry stamped below `since` is not delivered by a new subscription; a lossless resume reads the gap with
+  `scan_log` first.
+- Memory: a subscription holds one key suffix per live entry of the stream at or after `since`; `compact_log`
+  shrinks it, and nothing caps it. Open a long-lived subscription on a stream that is compacted, or with a recent
+  `since`.
+
+The group consumer (`subscribe_log_group`, `/log/group/subscribe`) is unchanged and still does not deliver an entry
+that replicates after its position has passed it ([what is proven](../operations/what-is-proven.md#log-group-skips-a-late-row)).
+
+- ***Check:*** a subscription opened at `since = H` receives an entry written afterwards at `log/{stream}/{H:016x}/{other node}`.
+- **Code:** `mycelium-core/src/log_cursor.rs` (`LiveCursor`), `mycelium-core/src/kv_handle.rs` (`subscribe_log`),
+  `src/agent/http/overlay.rs` (`gw_overlay_log_subscribe`). Tests: `src/agent/kv_handle_tests.rs`,
+  `src/agent/http/remainder_tests.rs`, `src/lib_tests.rs` (`a_log_subscription_ends_at_shutdown`).

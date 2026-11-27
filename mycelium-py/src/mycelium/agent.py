@@ -1843,6 +1843,12 @@ class MyceliumAgent:
             async for entry in agent.subscribe_log("events"):
                 print(entry.hlc, entry.value)
 
+        Every entry at or after ``since_hlc`` is yielded once per subscription, including one that arrives
+        late (a peer's entry at the same stamp, or one stamped below the last yielded), so stamps are not
+        always increasing. ``since_hlc`` is a floor, not a resume token: to resume, pass the last
+        ``entry.hlc`` handled (not ``entry.hlc + 1``, which skips a late sibling at that stamp) and expect
+        that stamp's entries again.
+
         Raises :class:`ProtectedStreamError` for a stream under ``cn/``, ``wiki/`` or ``reason/``, before any
         entry is yielded.
         """

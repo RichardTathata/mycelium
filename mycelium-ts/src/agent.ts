@@ -1357,8 +1357,11 @@ export class MyceliumAgent {
   }
 
   /**
-   * Live SSE subscription. Yields entries with `hlc >= sinceHlc` (inclusive), then new ones as they
-   * arrive. To resume after an entry you have handled, pass `entry.hlc + 1n`.
+   * Live SSE subscription. Yields every entry with `hlc >= sinceHlc` (inclusive) once, then each new
+   * one as it arrives — including one that arrives late (a peer's entry at the same stamp, or one stamped
+   * below the last yielded), so stamps are not always increasing. `sinceHlc` is a floor, not a resume
+   * token: to resume, pass the last `entry.hlc` you handled (not `+ 1n`, which skips a late sibling at that
+   * stamp) and expect to see that stamp's entries again.
    * Throws `ProtectedStreamError` for a stream under `cn/`, `wiki/` or `reason/`, before any entry.
    */
   async *subscribeLog(stream: string, options: { sinceHlc?: bigint } = {}): AsyncGenerator<LogEntry> {

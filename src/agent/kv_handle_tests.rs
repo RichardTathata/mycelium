@@ -425,6 +425,158 @@ async fn test_subscribe_log_receives_live_append() {
     a.shutdown().await;
 }
 
+// ── The live log subscription (engineering review ER8, R8-01 and R8-09) ─────
+//
+// A sibling key is written directly — `log/{stream}/{hlc:016x}/{node}`, as a peer's append arrives — so
+// each case is deterministic on one node. A sentinel written after the late entry is the progress
+// marker: the next entry received must be the late one, not the sentinel.
+
+fn put_log(a: &GossipAgent, stream: &str, hlc: u64, node: &str, value: &str) {
+    assert!(a.kv().set(format!("log/{stream}/{hlc:016x}/{node}"), value.as_bytes().to_vec()));
+}
+
+async fn next_value(rx: &mut tokio::sync::mpsc::Receiver<mycelium_core::kv_handle::LogEntry>) -> (u64, String) {
+    let e = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await
+        .expect("an entry within 5 s").expect("the subscription is open");
+    (e.hlc, String::from_utf8(e.value.to_vec()).unwrap())
+}
+
+/// The prefix watcher's receiver count for `log/{stream}/` — 0 once every subscription task has ended
+/// (or no sender is registered).
+fn log_watchers(a: &GossipAgent, stream: &str) -> usize {
+    a.kv().core().kv_state.prefix_watchers.pin()
+        .get(format!("log/{stream}/").as_str())
+        .map_or(0, |tx| tx.receiver_count())
+}
+
+async fn until_no_log_watchers(a: &GossipAgent, stream: &str, within: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    while log_watchers(a, stream) > 0 {
+        if tokio::time::Instant::now() >= deadline { return false; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    true
+}
+
+/// R8-01: the subscription advanced to `hlc + 1` after each entry, so a sibling at the same stamp that
+/// replicated after the first scan was below the next scan's floor and never sent.
+#[tokio::test]
+async fn a_live_subscription_delivers_a_same_stamp_sibling_that_arrives_later() {
+    let a = make_started_agent(alloc_port()).await;
+    put_log(&a, "er8.sib", 0x100, "aa", "first");
+    let mut rx = a.kv().subscribe_log("er8.sib", 0);
+    assert_eq!(next_value(&mut rx).await, (0x100, "first".into()));
+    put_log(&a, "er8.sib", 0x100, "zz", "second");
+    put_log(&a, "er8.sib", 0x101, "aa", "sentinel");
+    assert_eq!(next_value(&mut rx).await, (0x100, "second".into()), "the same-stamp sibling, before the sentinel");
+    assert_eq!(next_value(&mut rx).await, (0x101, "sentinel".into()));
+    a.shutdown().await;
+}
+
+/// R8-01, the likelier case: an entry stamped below the last one delivered — a lagging writer, a healed
+/// partition — arrives late. It is delivered when it arrives, so a subscriber may see a lower stamp.
+#[tokio::test]
+async fn a_live_subscription_delivers_a_late_append_with_a_lower_stamp() {
+    let a = make_started_agent(alloc_port()).await;
+    put_log(&a, "er8.low", 0x200, "aa", "first");
+    let mut rx = a.kv().subscribe_log("er8.low", 0);
+    assert_eq!(next_value(&mut rx).await, (0x200, "first".into()));
+    put_log(&a, "er8.low", 0x1ff, "bb", "late");
+    put_log(&a, "er8.low", 0x201, "aa", "sentinel");
+    assert_eq!(next_value(&mut rx).await, (0x1ff, "late".into()), "the late, lower-stamped entry");
+    assert_eq!(next_value(&mut rx).await, (0x201, "sentinel".into()));
+    a.shutdown().await;
+}
+
+/// Control: every rescan (one per write under the prefix) sends only what was not yet sent.
+#[tokio::test]
+async fn each_entry_is_delivered_once_across_rescans() {
+    let a = make_started_agent(alloc_port()).await;
+    for (h, v) in [(0x100, "a"), (0x101, "b"), (0x102, "c")] { put_log(&a, "er8.once", h, "n", v); }
+    let mut rx = a.kv().subscribe_log("er8.once", 0);
+    for (h, v) in [(0x100, "a"), (0x101, "b"), (0x102, "c")] { assert_eq!(next_value(&mut rx).await, (h, v.into())); }
+    put_log(&a, "er8.once", 0x103, "n", "d");
+    assert_eq!(next_value(&mut rx).await, (0x103, "d".into()));
+    // A write under the prefix that is not an entry (an unparsable key) rescans and sends nothing.
+    assert!(a.kv().set("log/er8.once/not-an-entry", b"x".to_vec()));
+    put_log(&a, "er8.once", 0x104, "n", "e");
+    assert_eq!(next_value(&mut rx).await, (0x104, "e".into()), "no repeat of a..d");
+    a.shutdown().await;
+}
+
+/// Control: `since` is a floor — an entry below it is never sent, even when it arrives late.
+#[tokio::test]
+async fn since_is_a_floor() {
+    let a = make_started_agent(alloc_port()).await;
+    for (h, v) in [(0x100, "a"), (0x200, "b"), (0x300, "c")] { put_log(&a, "er8.floor", h, "n", v); }
+    let mut rx = a.kv().subscribe_log("er8.floor", 0x200);
+    assert_eq!(next_value(&mut rx).await, (0x200, "b".into()), "inclusive");
+    assert_eq!(next_value(&mut rx).await, (0x300, "c".into()));
+    put_log(&a, "er8.floor", 0x1ff, "late", "below");
+    put_log(&a, "er8.floor", 0x400, "n", "d");
+    assert_eq!(next_value(&mut rx).await, (0x400, "d".into()), "the late entry below the floor is not sent");
+    a.shutdown().await;
+}
+
+/// R8-09: the task awaited only the prefix watcher, so a dropped receiver was noticed by the next failed
+/// send — on a quiet stream, never — and its watch receiver stayed registered. It now ends on the drop.
+#[tokio::test]
+async fn dropping_an_idle_log_receiver_ends_its_task() {
+    let a = make_started_agent(alloc_port()).await;
+    let mut rx = a.kv().subscribe_log("er8.idle", 0);
+    a.kv().append("er8.idle", Bytes::from_static(b"ready"));
+    assert_eq!(next_value(&mut rx).await.1, "ready");
+    assert_eq!(log_watchers(&a, "er8.idle"), 1, "the task holds its watch receiver");
+    drop(rx);
+    assert!(until_no_log_watchers(&a, "er8.idle", Duration::from_secs(3)).await,
+        "the task must end with no further append (receivers left: {})", log_watchers(&a, "er8.idle"));
+    a.shutdown().await;
+}
+
+/// R8-01 across two nodes, as the reviewer reproduced it: two nodes append in one millisecond and take
+/// one stamp; a running subscriber on the first has delivered its own row before the second's arrives.
+/// It must deliver the second, then a later sentinel.
+#[tokio::test]
+async fn a_running_log_subscription_receives_a_same_stamp_append_from_a_peer() {
+    let (p1, p2) = (alloc_port(), alloc_port());
+    let id1 = NodeId::new("127.0.0.1", p1).unwrap();
+    let id2 = NodeId::new("127.0.0.1", p2).unwrap();
+    let mut c1 = GossipConfig::default();
+    c1.bind_address = "127.0.0.1".parse().unwrap();
+    c1.bind_port = p1;
+    let mut c2 = GossipConfig::default();
+    c2.bind_address = "127.0.0.1".parse().unwrap();
+    c2.bind_port = p2;
+    c2.bootstrap_peers = vec![id1.clone()];
+    let first  = GossipAgent::new(id1, c1);
+    let second = GossipAgent::new(id2, c2);
+    // Sample a pair of appends that took one stamp, before the nodes connect.
+    let mut sample = None;
+    for i in 0..64 {
+        let stream = format!("er8.peer-{i}");
+        let a = first.kv().append(&stream, Bytes::from_static(b"first"));
+        let b = second.kv().append(&stream, Bytes::from_static(b"second"));
+        if a == b { sample = Some((stream, a)); break; }
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    }
+    let (stream, stamp) = sample.expect("two nodes appending in one millisecond take one stamp");
+    let mut live = first.kv().subscribe_log(&stream, stamp);
+    assert_eq!(next_value(&mut live).await, (stamp, "first".into()));
+    first.start().await.unwrap();
+    second.start().await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while first.kv().scan_log(&stream, 0, u64::MAX).len() < 2 {
+        assert!(tokio::time::Instant::now() < deadline, "the second node's append never replicated");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let sentinel = first.kv().append(&stream, Bytes::from_static(b"sentinel"));
+    assert!(sentinel > stamp);
+    assert_eq!(next_value(&mut live).await, (stamp, "second".into()), "the peer's same-stamp append");
+    assert_eq!(next_value(&mut live).await, (sentinel, "sentinel".into()));
+    first.shutdown().await;
+    second.shutdown().await;
+}
+
 
 /// **The replica gate, through a restart that keeps only the WAL** (external review 2026-10-31, R2). The gate above
 /// restarts B through `shutdown()`, whose exit snapshot is taken from the store — so it proved the exit-snapshot path.

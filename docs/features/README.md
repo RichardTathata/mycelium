@@ -166,6 +166,7 @@ suite is `scripts/test-check-feature-pages.py`.
 | [MCP tools](mcp-tools.md) | Tools registered with a schema and discovered fleet-wide, served to outside clients at `/mcp`, external servers bridged in | Run tools and reasoning |
 | [The reason router](reason-router.md) | `mycelium-reason`: model calls routed to a healthy server with failover, an OpenAI-compatible façade, traces and the checkpointer's blob store | Run tools and reasoning |
 | [The tuple space](tuple-space.md) | `mycelium-tuple-space`: stage lanes workers pull from when ready, an atomic advance, at-least-once with failover | Coordinate work |
+| [Log overlay](log-overlay.md) | Append-only streams in the gossip KV, read in `(hlc, key)` order: a scan, a live subscription that delivers every entry once, a group consumer | Coordinate work |
 | [The blackboard](blackboard.md) | `mycelium-blackboard`: facts posted with attributes and claimed by predicate, exactly one claimer per fact | Coordinate work |
 | [The contract net](contract-net.md) | `mycelium-commitment`: announce, offer, close, award once with a receipt, report and assess — signed records, no dispatcher | Coordinate work |
 | [Federated domains](federation.md) | Two domains calling each other's exports without merging, through a signed per-partner catalogue and a body-bound credential on `/a2a` | Connect trust domains |

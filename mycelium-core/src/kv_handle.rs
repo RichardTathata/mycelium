@@ -23,8 +23,9 @@ use tokio::sync::{mpsc, watch};
 /// A single entry in an ordered durable log stream.
 #[derive(Debug, Clone)]
 pub struct LogEntry {
-    /// HLC timestamp — use as a cursor for [`KvHandle::subscribe_log`] and
-    /// [`KvHandle::scan_log`].
+    /// HLC timestamp — a bound for [`KvHandle::scan_log`] and an inclusive floor for
+    /// [`KvHandle::subscribe_log`] (not a resume token: entries can share a stamp, and a live
+    /// subscription can deliver a lower stamp after a higher one).
     pub hlc:   u64,
     pub value: Bytes,
 }
@@ -549,24 +550,41 @@ impl KvHandle {
 
     /// Subscribes to live entries in `stream` at or after `since_hlc`.
     ///
-    /// Spawns a background watcher task that re-scans on every prefix change and
-    /// forwards new entries. The task shuts down automatically when the returned
-    /// receiver is dropped.
+    /// **Every live entry at or after `since_hlc` is delivered once per subscription.** The backlog, and each
+    /// batch after it, is in `(hlc, key)` order, as [`scan_log`](Self::scan_log) sorts; an entry that reaches
+    /// this node late — a peer's append at the same stamp, or one stamped *below* the last delivered, from a
+    /// lagging writer or a healed partition — is delivered when it arrives, so across batches the order is
+    /// **arrival order** and a stamp can be lower than the one before it. `since_hlc` is a floor, not a
+    /// resume token: a resumed subscription opens at the last stamp it handled, inclusive, and sees that
+    /// stamp's entries again. The subscription keeps one key suffix per live entry at or after `since_hlc`
+    /// ([`LiveCursor`](crate::log_cursor::LiveCursor)); [`compact_log`](Self::compact_log) shrinks it.
+    ///
+    /// A background task re-scans on every write under `log/{stream}/`. It ends when the returned receiver
+    /// is dropped — at once, not at the next write — or when the node shuts down (engineering review ER8).
     pub fn subscribe_log(&self, stream: &str, since_hlc: u64) -> mpsc::Receiver<LogEntry> {
-        let (tx, rx)    = mpsc::channel::<LogEntry>(256);
-        let prefix      = Arc::from(format!("log/{stream}/").as_str());
-        let stream_str  = stream.to_string();
-        let handle      = self.clone();
-        let mut watcher = self.subscribe_prefix(Arc::clone(&prefix));
-        let mut last_seen = since_hlc;
+        let (tx, rx)     = mpsc::channel::<LogEntry>(256);
+        let prefix       = Arc::from(format!("log/{stream}/").as_str());
+        let stream_str   = stream.to_string();
+        let handle       = self.clone();
+        let mut watcher  = self.subscribe_prefix(Arc::clone(&prefix));
+        let mut shutdown = self.ctx.shutdown_tx.subscribe();
+        let mut cursor   = crate::log_cursor::LiveCursor::new(since_hlc);
 
         tokio::spawn(async move {
             loop {
-                for entry in handle.scan_log(&stream_str, last_seen, u64::MAX) {
-                    last_seen = entry.hlc + 1;
-                    if tx.send(entry).await.is_err() { return; }
+                for row in cursor.pending(&handle.ctx.kv_state, &stream_str) {
+                    let entry = LogEntry { hlc: row.hlc, value: row.value.clone() };
+                    tokio::select! {
+                        sent = tx.send(entry) => if sent.is_err() { return; },
+                        _ = shutdown.wait_for(|v| *v) => return,
+                    }
+                    cursor.mark(&row);
                 }
-                if watcher.changed().await.is_err() { return; }
+                tokio::select! {
+                    _ = tx.closed() => return,
+                    changed = watcher.changed() => if changed.is_err() { return; },
+                    _ = shutdown.wait_for(|v| *v) => return,
+                }
             }
         });
 

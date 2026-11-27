@@ -562,7 +562,19 @@ Two different patterns keep getting conflated because the word "consumer group" 
   **Reusable lesson:** a consensus-backed lock is not mutually exclusive on the *propose return* —
   confirm via the converged committed value. The `mycelium-core` library
   `KvHandle::subscribe_log_group` is the **best-effort** version (LWW claim, no consensus — can
-  double-deliver under contention; documented as such).
+  double-deliver under contention; documented as such). **Its limit:** one persisted position skips an
+  entry that replicates after the position has passed it — a same-stamp sibling with a lower key, or a
+  lower stamp ([what-is-proven](../../../operations/what-is-proven.md#log-group-skips-a-late-row), ER8 D10c).
+- **Every-entry-once *live* consumption** → `subscribe_log` / `GET /gateway/overlay/log/subscribe`. Contract
+  (engineering review ER8, D10): every live entry at or after `since` once per subscription; the backlog and
+  each batch in `(hlc, key)` order; a late entry delivered when it arrives, so across batches **arrival
+  order** — a stamp can go down. `since` is a floor, not a resume token. Built on
+  `mycelium-core/src/log_cursor.rs` `LiveCursor`, a task-local set of delivered key suffixes (forgotten
+  when the entry is no longer live), **not** a position: any position, `hlc + 1` or `(hlc, key)`, skips what
+  arrives late and sorts before it. Both loops `select!` on `tx.closed()`, the prefix watcher and node
+  shutdown — no timer — so a dropped receiver or a disconnected client ends the task at once, not at the
+  next write. **Do not** "optimise" the set into a position, or deliver from write notifications (the prefix
+  watcher carries a counter, not keys).
 - **Load-balanced exactly-once *work distribution*** (each item claimed by exactly one of many
   competing workers) → the **`mycelium-tuple-space`** companion (O(1) FIFO `take`, single-owner
   claim). `examples/fluid_pipeline` is the worked demo.

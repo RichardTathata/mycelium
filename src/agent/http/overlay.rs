@@ -668,6 +668,12 @@ pub(super) struct LogSubscribeQuery { stream: String, since: Option<u64> }
 /// `GET /gateway/overlay/log/subscribe?stream=S&since=0` — SSE stream of log entries. A stream a component
 /// owns is refused 403 `protected_stream` with a JSON body, before a watcher is registered or an event sent
 /// ([`refuse_owned_stream_read`]).
+///
+/// The core's contract ([`KvHandle::subscribe_log`](mycelium_core::KvHandle::subscribe_log), engineering review
+/// ER8): every live entry at or after `since` is sent once per stream; the backlog and each batch in `(hlc, key)`
+/// order, a late entry — a peer's at the same stamp, or one stamped below the last sent — when it arrives, so a
+/// client can see a stamp lower than the one before. `since` is a floor, not a resume token. The stream's task
+/// ends when the client disconnects (its receiver is dropped), at once, or when the node shuts down.
 pub(super) async fn gw_overlay_log_subscribe(
     Query(q):   Query<LogSubscribeQuery>,
     State(ctx): State<Arc<HttpCtx>>,
@@ -678,35 +684,34 @@ pub(super) async fn gw_overlay_log_subscribe(
     let prefix      = format!("log/{}/", q.stream);
     let prefix_arc: Arc<str> = Arc::from(prefix.as_str());
     let mut watcher  = super::capability_ops::subscribe_prefix_on_kv(&ctx.agent_ctx.kv_state, Arc::clone(&prefix_arc));
+    let mut shutdown = ctx.shutdown_rx.clone();
     let stream_name  = q.stream.clone();
     let kv_state     = Arc::clone(&ctx.agent_ctx.kv_state);
-    let mut last_seen = q.since.unwrap_or(0);
+    // Comparisons only: a crafted `log/{stream}/ffffffffffffffff/…` entry (the key is any-node-writable) is
+    // sent like any other and moves nothing — the `hlc + 1` floor it once overflowed or pinned is gone.
+    let mut cursor   = mycelium_core::log_cursor::LiveCursor::new(q.since.unwrap_or(0));
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(256);
     tokio::spawn(async move {
         loop {
-            // `(hlc, key)` order, as the core's `subscribe_log` (post-360 row E).
-            let entries: Vec<LogEntry> = mycelium_core::log_cursor::rows_after(
-                    &kv_state, &stream_name, &mycelium_core::log_cursor::LogPosition::Start)
-                .into_iter()
-                .filter(|r| r.hlc >= last_seen)
-                .map(|r| LogEntry { hlc: r.hlc, value: r.value })
-                .collect();
-            for entry in entries {
+            for row in cursor.pending(&kv_state, &stream_name) {
                 use base64::Engine as _;
-                // `saturating_add`: the HLC is parsed from the (any-node-writable) log key, so a
-                // crafted `log/{stream}/ffffffffffffffff/...` entry gives `hlc == u64::MAX`; `+ 1`
-                // panicked (overflow-checks → node-abort) or wrapped to 0 (release → the cursor resets
-                // and the subscriber re-floods the whole stream on every change) (audit 2026-07-15 pass 4).
-                last_seen = entry.hlc.saturating_add(1);
                 let data  = json!({
                     "stream":    stream_name,
-                    "hlc":       entry.hlc,
-                    "value_b64": base64::engine::general_purpose::STANDARD.encode(&entry.value),
+                    "hlc":       row.hlc,
+                    "value_b64": base64::engine::general_purpose::STANDARD.encode(&row.value),
                 });
-                if tx.send(Event::default().data(data.to_string())).await.is_err() { return; }
+                tokio::select! {
+                    sent = tx.send(Event::default().data(data.to_string())) => if sent.is_err() { return; },
+                    _ = shutdown.wait_for(|v| *v) => return,
+                }
+                cursor.mark(&row);
             }
-            if watcher.changed().await.is_err() { return; }
+            tokio::select! {
+                _ = tx.closed() => return,
+                changed = watcher.changed() => if changed.is_err() { return; },
+                _ = shutdown.wait_for(|v| *v) => return,
+            }
         }
     });
 
