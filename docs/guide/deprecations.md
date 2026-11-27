@@ -5936,3 +5936,31 @@ are small, must read the first id instead.
 - **Code:** `fresh_id_base` in `mycelium-tuple-space/src/store.rs` and `mycelium-blackboard/src/store.rs`. Tests:
   `mycelium-effects/tests/tuple_restart.rs`; `fresh_id_spaces_do_not_overlap`, `a_wal_with_history_keeps_its_fence`,
   `ids_stay_below_two_to_the_53`, `a_fresh_store_starts_at_or_above_the_wall_clock`, `a_new_process_starts_above_the_old_stores_ids` in both stores; the mirror tests in both crates' `lib.rs`.
+## §TBD-ER7. Tuple space: items and workers under one correlation key queue in arrival order; `taken` counts each delivery once; keyed workers count in `waiters` (unreleased, engineering-review ER7 — R11-03, R11-10, R11-11)
+
+**What changes** (`mycelium-tuple-space`; no API, RPC, WAL, gateway or SDK change):
+
+- **A second item under a key no longer displaces the first.** `put_keyed`, `complete_keyed`, a mirror's apply, a
+  requeue of an expired keyed item and WAL replay each push onto a FIFO queue per key; `take_by_key` claims the oldest.
+  Before, the newer item overwrote the older one in memory — the older one could not be taken, its depth was never
+  given back (so the stage refused puts early, at a watermark it did not hold), and it came back only after a WAL
+  reopen. A WAL holding two live same-key records now recovers both, in id order. A requeued keyed item goes to the
+  back of its key's queue.
+- **A second worker parked on a key no longer evicts the first**, whose take used to return `Timeout` at once; same-key
+  workers are served in arrival order. A timed-out keyed take removes only its own (closed) registration.
+- **`taken` (`TupleSpace::admission`) and `take_total` (`sys/tuple/…/take_total`, `metrics_snapshot`) fall to the true
+  figure.** A hand-off to a parked worker was counted twice (by the producer and by the woken taker); it is now counted
+  once, where the item enters in flight. `taken` counts deliveries, redeliveries after an expired lease included, so it
+  can exceed `admitted`. `hot_total ≤ take_total` still holds.
+- **`waiters` (`depth()`, `local_depth()`, `sys/tuple/…/waiters`) now includes workers parked on `take_by_key`.**
+- A plain `take` (and a keyed one) that times out now closes its receiver before its last drain, so an item a
+  producer was handing it in that instant stays queued instead of sitting in flight, ownerless, until its lease expires.
+
+**Mixed fleets.** A mirror of an older version keeps the overwrite until it is upgraded; upgrade secondaries with the
+primary. An application that relied on a same-key put replacing the queued item must now take (or ack) the older one.
+
+- ***Check:*** after a burst of same-key puts, `take_by_key` drains them all and `depth` returns to 0; `taken` equals
+  the number of items workers received.
+- **Code:** `mycelium-tuple-space/src/store.rs` (`StageInner`, `dispatch_keyed`, `take_by_key`,
+  `prune_keyed_waiters`). Tests: `mycelium-tuple-space/tests/keyed_join.rs`, `store.rs` (`a_requeued_keyed_item_*`,
+  `a_mirror_keeps_two_same_key_records`, `two_waiters_on_one_key_are_both_served`, …).

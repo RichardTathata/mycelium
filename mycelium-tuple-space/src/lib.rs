@@ -257,8 +257,9 @@ pub struct TupleDepth {
     pub stage: Arc<str>,
     /// Items queued (not yet taken).
     pub depth: u32,
-    /// Workers parked on `take` (may transiently include timed-out waiters
-    /// not yet reaped by a dispatch).
+    /// Workers parked on `take` or `take_by_key` (may transiently include
+    /// timed-out `take`s not yet reaped by a dispatch, and dropped
+    /// `take_by_key`s not yet pruned by their key's next registration or put).
     pub waiters: u32,
     /// Items taken but not yet acked.
     pub inflight: u32,
@@ -1343,7 +1344,9 @@ impl TupleSpace {
     /// Put `payload` on `stage` under correlation `key` (WS-G / M13). Claimed only by a
     /// [`take_by_key`](Self::take_by_key) with the same key — the two-stream rendezvous ("an invoice
     /// AND its matching purchase order") that exact lane names can't express without one lane per key.
-    /// Exact-match only (O(1) hash), never template matching.
+    /// Exact-match only (O(1) hash), never template matching. A key need not be unique: items put under
+    /// one key queue in arrival order and are claimed oldest first (an expired item re-queued under its
+    /// key goes to the back), and workers parked on one key are served in arrival order.
     pub async fn put_keyed(&self, stage: &str, key: &str, payload: Bytes) -> Result<u64, TupleError> {
         if self.serving_locally().is_some() {
             return self.serve_put_keyed(stage, Arc::from(key), payload);
@@ -1366,8 +1369,9 @@ impl TupleSpace {
         rpc::dec_id_resp(&resp)
     }
 
-    /// Blocking keyed claim (WS-G / M13): claims the item on `stage` whose correlation key is `key`,
-    /// or parks until one arrives or `timeout` elapses.
+    /// Blocking keyed claim (WS-G / M13): claims the oldest item on `stage` whose correlation key is
+    /// `key`, or parks — behind any worker already parked on `key` — until one arrives or `timeout`
+    /// elapses.
     pub async fn take_by_key(
         &self,
         stage: &str,

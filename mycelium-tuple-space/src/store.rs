@@ -49,10 +49,15 @@ struct StageInner {
     /// `take_by_key` and an unkeyed `take` on the same stage never interfere. Items put with a
     /// correlation key wait here to be claimed by that exact key (an O(1) hash lookup — not template
     /// matching). Both count toward `depth` (backpressure sees all queued items).
-    keyed_entries: HashMap<Arc<str>, (u64, Bytes, std::time::Instant)>,
-    /// Workers parked on a specific key (one per key — a second waiter on the same pending key
-    /// replaces the first, whose oneshot then times out; a correlation key is, by definition, unique).
-    keyed_waiters: HashMap<Arc<str>, oneshot::Sender<(u64, Bytes)>>,
+    ///
+    /// **A FIFO queue per key** (ER7): items under one key are claimed in arrival order, a re-queued
+    /// item at the back, as in the FIFO lane. A key is not unique — two outputs under one correlation
+    /// are both kept. The map entry is removed when its queue empties.
+    keyed_entries: HashMap<Arc<str>, VecDeque<(u64, Bytes, std::time::Instant)>>,
+    /// Workers parked on a specific key, served in arrival order (ER7: a second waiter on a key no
+    /// longer evicts the first). A timed-out or dropped waiter's closed sender is pruned when its own
+    /// take times out and when another waiter registers on the key; the entry is removed when empty.
+    keyed_waiters: HashMap<Arc<str>, VecDeque<oneshot::Sender<(u64, Bytes)>>>,
 }
 
 /// Ring of the last N store-path queue waits (µs), for P99 reporting.
@@ -65,12 +70,16 @@ pub(crate) struct StageState {
     inner: Mutex<StageInner>,
     /// Shadow counter for lock-free monitoring reads.
     pub(crate) depth: AtomicU32,
-    /// Strict mirror of `waiters.len()`: incremented at push, decremented at
-    /// pop, BOTH under the stage lock. The timeout path deliberately does not
-    /// touch it — the dead sender is still in the deque until a dispatch
-    /// skips it, so the count may transiently include timed-out waiters but
-    /// can never underflow. (Run-17 probe `metrics_accounting_identity`
-    /// caught the previous double-decrement wrapping this to ~4.29e9.)
+    /// Strict mirror of `waiters.len()` plus every keyed waiter queue's length
+    /// (ER7: a worker parked on `take_by_key` is a waiting worker too):
+    /// incremented at push, decremented at pop or prune, ALL under the stage
+    /// lock. The plain timeout path deliberately does not touch it — the dead
+    /// sender is still in the deque until a dispatch skips it, so the count
+    /// may transiently include timed-out waiters but can never underflow. A
+    /// keyed waiter prunes its own dead sender on timeout, so only a dropped
+    /// (cancelled) keyed take lingers, until the key's next registration or
+    /// dispatch. (Run-17 probe `metrics_accounting_identity` caught the
+    /// previous double-decrement wrapping this to ~4.29e9.)
     pub(crate) waiters_count: AtomicU32,
     pub(crate) put_total: AtomicU64,
     pub(crate) take_total: AtomicU64,
@@ -201,8 +210,8 @@ impl TupleStore {
             {
                 let mut g = state.inner.lock();
                 match key {
-                    Some(k) => { g.keyed_entries.insert(k, (id, payload, std::time::Instant::now())); }
-                    None => { g.entries.push_back((id, payload, std::time::Instant::now())); }
+                    Some(k) => g.keyed_entries.entry(k).or_default().push_back((id, payload, std::time::Instant::now())),
+                    None => g.entries.push_back((id, payload, std::time::Instant::now())),
                 }
             }
             state.depth.fetch_add(1, Ordering::Relaxed);
@@ -254,7 +263,6 @@ impl TupleStore {
         let hot = self.dispatch(&state, Arc::from(stage), id, payload)?;
         if hot {
             state.hot_total.fetch_add(1, Ordering::Relaxed);
-            state.take_total.fetch_add(1, Ordering::Relaxed);
         }
         Ok(id)
     }
@@ -293,6 +301,9 @@ impl TupleStore {
                     drop(g); // release before send — no I/O or wakeup under lock
                     match tx.send((id, payload)) {
                         Ok(()) => {
+                            // One take per hand-off, counted where the item enters in flight (ER7,
+                            // R11-10) — the woken taker does not count it again.
+                            state.take_total.fetch_add(1, Ordering::Relaxed);
                             if let Some(wal) = &self.wal {
                                 wal.append(&Record::Take { id, taken_at_ms: now_ms() })?;
                             }
@@ -331,11 +342,11 @@ impl TupleStore {
                         key: None,
                     },
                 );
+                state.take_total.fetch_add(1, Ordering::Relaxed);
                 drop(g);
                 if let Some(wal) = &self.wal {
                     wal.append(&Record::Take { id, taken_at_ms: now_ms() })?;
                 }
-                state.take_total.fetch_add(1, Ordering::Relaxed);
                 return Ok((id, payload));
             }
             let (tx, rx) = oneshot::channel();
@@ -344,28 +355,18 @@ impl TupleStore {
             rx
         }; // stage lock released before parking
         tokio::select! {
-            item = &mut rx => match item {
-                Ok((id, payload)) => {
-                    state.take_total.fetch_add(1, Ordering::Relaxed);
-                    Ok((id, payload))
-                }
-                // Sender dropped without sending (store shutdown).
-                Err(_) => Err(TupleError::Timeout),
-            },
+            // The dispatcher counted the hand-off in `take_total` when it sent.
+            item = &mut rx => item.map_err(|_| TupleError::Timeout), // sender dropped: store shutdown
             _ = tokio::time::sleep(timeout) => {
-                // The dispatcher may have sent in the same instant the timer
-                // fired — drain the channel before giving up so the item is
-                // not lost (it is already registered as inflight).
-                match rx.try_recv() {
-                    Ok((id, payload)) => {
-                        state.take_total.fetch_add(1, Ordering::Relaxed);
-                        Ok((id, payload))
-                    }
-                    // No waiters_count decrement here: the dead sender is
-                    // still queued; the dispatch that eventually pops it
-                    // performs the matching decrement.
-                    Err(_) => Err(TupleError::Timeout),
-                }
+                // Close first, so a dispatcher that has popped our sender but not yet sent
+                // fails its send and keeps the item (ER7): without the close, a send after
+                // the `try_recv` below would succeed into a receiver about to be dropped, and
+                // the item would sit in flight with no owner until its lease expired. Then
+                // drain: a send that landed before the close is ours (already in flight).
+                rx.close();
+                // No waiters_count decrement here: the dead sender is still queued; the
+                // dispatch that eventually pops it performs the matching decrement.
+                rx.try_recv().map_err(|_| TupleError::Timeout)
             }
         }
     }
@@ -375,7 +376,8 @@ impl TupleStore {
     /// Put `payload` on `stage` under correlation `key` (WS-G / M13). Claimed only by
     /// [`take_by_key`](Self::take_by_key) with the same key — the two-stream rendezvous ("an invoice
     /// AND its matching purchase order") that exact lane names can't express without one lane per
-    /// key. Hands off to a parked keyed waiter (hot path) or stores under the key.
+    /// key. Hands off to a parked keyed waiter (hot path) or stores under the key. Items under one
+    /// key queue in arrival order and same-key waiters are served in arrival order (ER7).
     pub(crate) fn put_keyed(&self, stage: &str, key: Arc<str>, payload: Bytes) -> Result<u64, TupleError> {
         let state = self.stage(stage);
         if state.depth.load(Ordering::Relaxed) >= self.high_watermark {
@@ -397,54 +399,90 @@ impl TupleStore {
         let hot = self.dispatch_keyed(&state, Arc::from(stage), key, id, payload)?;
         if hot {
             state.hot_total.fetch_add(1, Ordering::Relaxed);
-            state.take_total.fetch_add(1, Ordering::Relaxed);
         }
         Ok(id)
     }
 
-    /// Hand a keyed `(id, payload)` to a waiter parked on `key`, or store it under `key`. Returns
-    /// `true` on a direct (hot-path) delivery. Mirrors [`dispatch`](Self::dispatch): the item is
-    /// registered in `inflight` before the oneshot send so a compaction snapshot never loses it.
+    /// Hand a keyed `(id, payload)` to the oldest waiter parked on `key`, or push it at the back of
+    /// `key`'s queue. Returns `true` on a direct (hot-path) delivery. The same loop as
+    /// [`dispatch`](Self::dispatch): the item is registered in `inflight` before the oneshot send so a
+    /// compaction snapshot never loses it; a failed send (a timed-out or dropped taker) is undone and
+    /// the next waiter tried.
     fn dispatch_keyed(
         &self,
         state: &StageState,
         stage: Arc<str>,
         key: Arc<str>,
         id: u64,
-        payload: Bytes,
+        mut payload: Bytes,
     ) -> Result<bool, TupleError> {
         let mut g = state.inner.lock();
-        if let Some(tx) = g.keyed_waiters.remove(&key) {
-            self.inflight.lock().insert(
-                id,
-                Inflight { stage: Arc::clone(&stage), payload: payload.clone(), taken_at_ms: now_ms(), key: Some(Arc::clone(&key)) },
-            );
-            drop(g);
-            match tx.send((id, payload)) {
-                Ok(()) => {
-                    if let Some(wal) = &self.wal {
-                        wal.append(&Record::Take { id, taken_at_ms: now_ms() })?;
+        loop {
+            let next = match g.keyed_waiters.get_mut(&key) {
+                Some(q) => {
+                    let tx = q.pop_front();
+                    if q.is_empty() {
+                        g.keyed_waiters.remove(&key);
                     }
-                    return Ok(true);
+                    tx
                 }
-                Err(p) => {
-                    // The keyed waiter timed out — undo the in-flight claim and fall through to store.
-                    self.inflight.lock().remove(&id);
-                    let mut g2 = state.inner.lock();
-                    g2.keyed_entries.insert(key, (p.0, p.1, std::time::Instant::now()));
+                None => None,
+            };
+            match next {
+                None => {
+                    g.keyed_entries.entry(key).or_default().push_back((id, payload, std::time::Instant::now()));
                     state.depth.fetch_add(1, Ordering::Relaxed);
                     return Ok(false);
                 }
+                Some(tx) => {
+                    state.waiters_count.fetch_sub(1, Ordering::Relaxed);
+                    self.inflight.lock().insert(
+                        id,
+                        Inflight { stage: Arc::clone(&stage), payload: payload.clone(), taken_at_ms: now_ms(), key: Some(Arc::clone(&key)) },
+                    );
+                    drop(g); // release before send — no I/O or wakeup under lock
+                    match tx.send((id, payload)) {
+                        Ok(()) => {
+                            // One take per hand-off, counted where the item enters in flight (R11-10).
+                            state.take_total.fetch_add(1, Ordering::Relaxed);
+                            if let Some(wal) = &self.wal {
+                                wal.append(&Record::Take { id, taken_at_ms: now_ms() })?;
+                            }
+                            return Ok(true);
+                        }
+                        Err(p) => {
+                            // The keyed waiter timed out or was dropped — undo, try the next or store.
+                            self.inflight.lock().remove(&id);
+                            payload = p.1;
+                            g = state.inner.lock();
+                        }
+                    }
+                }
             }
         }
-        g.keyed_entries.insert(key, (id, payload, std::time::Instant::now()));
-        state.depth.fetch_add(1, Ordering::Relaxed);
-        Ok(false)
+    }
+
+    /// Removes the closed senders parked on `key` (timed-out or dropped keyed takes), keeping
+    /// `waiters_count` exact for them, and the map entry when its queue is empty — so a cold key
+    /// (a per-job correlation nobody touches again) leaves nothing behind. Under the stage lock.
+    fn prune_keyed_waiters(state: &StageState, g: &mut StageInner, key: &str) {
+        if let Some(q) = g.keyed_waiters.get_mut(key) {
+            let before = q.len();
+            q.retain(|tx| !tx.is_closed());
+            let pruned = before - q.len();
+            if q.is_empty() {
+                g.keyed_waiters.remove(key);
+            }
+            if pruned > 0 {
+                state.waiters_count.fetch_sub(pruned as u32, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Blocking keyed claim (WS-G / M13). Claims the item on `stage` whose correlation key is `key`,
     /// or parks a keyed waiter until one arrives or `timeout` elapses. O(1) exact-match — never
-    /// template matching (that is the blackboard companion's territory).
+    /// template matching (that is the blackboard companion's territory). Claims the oldest item
+    /// under `key`; a parked waiter joins the back of `key`'s waiter queue (ER7).
     pub(crate) async fn take_by_key(
         &self,
         stage: &str,
@@ -455,43 +493,50 @@ impl TupleStore {
         let key: Arc<str> = Arc::from(key);
         let mut rx = {
             let mut g = state.inner.lock();
-            if let Some((id, payload, enqueued)) = g.keyed_entries.remove(&key) {
+            let popped = match g.keyed_entries.get_mut(&key) {
+                Some(q) => {
+                    let item = q.pop_front();
+                    if q.is_empty() {
+                        g.keyed_entries.remove(&key);
+                    }
+                    item
+                }
+                None => None,
+            };
+            if let Some((id, payload, enqueued)) = popped {
                 state.depth.fetch_sub(1, Ordering::Relaxed);
                 state.record_queue_wait(enqueued.elapsed());
                 self.inflight.lock().insert(
                     id,
                     Inflight { stage: Arc::from(stage), payload: payload.clone(), taken_at_ms: now_ms(), key: Some(Arc::clone(&key)) },
                 );
+                state.take_total.fetch_add(1, Ordering::Relaxed);
                 drop(g);
                 if let Some(wal) = &self.wal {
                     wal.append(&Record::Take { id, taken_at_ms: now_ms() })?;
                 }
-                state.take_total.fetch_add(1, Ordering::Relaxed);
                 return Ok((id, payload));
             }
+            // Join the back of the key's waiter queue, pruning dead senders (dropped takes) first.
+            Self::prune_keyed_waiters(&state, &mut g, &key);
             let (tx, rx) = oneshot::channel();
-            // One waiter per key; a prior waiter on this key is dropped (its take then times out).
-            g.keyed_waiters.insert(Arc::clone(&key), tx);
+            g.keyed_waiters.entry(Arc::clone(&key)).or_default().push_back(tx);
+            state.waiters_count.fetch_add(1, Ordering::Relaxed);
             rx
         };
         tokio::select! {
-            item = &mut rx => match item {
-                Ok((id, payload)) => {
-                    state.take_total.fetch_add(1, Ordering::Relaxed);
-                    Ok((id, payload))
-                }
-                Err(_) => Err(TupleError::Timeout),
-            },
+            // The dispatcher counted the hand-off in `take_total` when it sent.
+            item = &mut rx => item.map_err(|_| TupleError::Timeout), // sender dropped: store shutdown
             _ = tokio::time::sleep(timeout) => {
+                // Close, then drain (as in `take`): a dispatcher holding our sender now fails its send
+                // and keeps the item; one that sent before the close handed it to us.
+                rx.close();
                 match rx.try_recv() {
-                    Ok((id, payload)) => {
-                        state.take_total.fetch_add(1, Ordering::Relaxed);
-                        Ok((id, payload))
-                    }
+                    Ok(item) => Ok(item),
                     Err(_) => {
-                        // Remove our now-dead keyed waiter if it's still ours (a racing put may have
-                        // already removed it to deliver).
-                        state.inner.lock().keyed_waiters.remove(&key);
+                        // Prune our closed sender — and any other dead one — not whichever waiter is
+                        // present; a live waiter on the key stays. The entry goes when it empties.
+                        Self::prune_keyed_waiters(&state, &mut state.inner.lock(), &key);
                         Err(TupleError::Timeout)
                     }
                 }
@@ -548,7 +593,6 @@ impl TupleStore {
         let hot = self.dispatch(&state, Arc::from(next_stage), new_id, payload)?;
         if hot {
             state.hot_total.fetch_add(1, Ordering::Relaxed);
-            state.take_total.fetch_add(1, Ordering::Relaxed);
         }
         Ok(new_id)
     }
@@ -582,7 +626,6 @@ impl TupleStore {
         let hot = self.dispatch_keyed(&state, Arc::from(next_stage), key, new_id, payload)?;
         if hot {
             state.hot_total.fetch_add(1, Ordering::Relaxed);
-            state.take_total.fetch_add(1, Ordering::Relaxed);
         }
         Ok(new_id)
     }
@@ -617,7 +660,6 @@ impl TupleStore {
         };
         if hot {
             state.hot_total.fetch_add(1, Ordering::Relaxed);
-            state.take_total.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
     }
@@ -633,9 +675,18 @@ impl TupleStore {
         let mut removed = before - g.entries.len();
         // A keyed queued item (M13) lives in the keyed index, not the FIFO.
         if removed == 0 {
-            let key = g.keyed_entries.iter().find(|(_, (eid, _, _))| *eid == id).map(|(k, _)| Arc::clone(k));
+            let key = g
+                .keyed_entries
+                .iter()
+                .find(|(_, q)| q.iter().any(|(eid, _, _)| *eid == id))
+                .map(|(k, _)| Arc::clone(k));
             if let Some(k) = key {
-                g.keyed_entries.remove(&k);
+                if let Some(q) = g.keyed_entries.get_mut(&k) {
+                    q.retain(|(eid, _, _)| *eid != id);
+                    if q.is_empty() {
+                        g.keyed_entries.remove(&k);
+                    }
+                }
                 removed = 1;
             }
         }
@@ -676,7 +727,8 @@ impl TupleStore {
         let mut requeued = Vec::with_capacity(expired.len());
         for (id, item) in expired {
             let state = self.stage(&item.stage);
-            // A keyed item re-queues under its key (M13) so its waiter still rendezvouses.
+            // A keyed item re-queues under its key (M13) so its waiter still rendezvouses — at the
+            // back of the key's queue, as a plain requeue goes to the back of the lane (ER7).
             let ok = match item.key {
                 Some(k) => self.dispatch_keyed(&state, Arc::clone(&item.stage), k, id, item.payload).is_ok(),
                 None => self.dispatch(&state, Arc::clone(&item.stage), id, item.payload).is_ok(),
@@ -807,9 +859,11 @@ impl TupleStore {
                         items.push((*id, Arc::clone(stage), payload.clone(), None));
                     }
                 }
-                for (key, (id, payload, _)) in g.keyed_entries.iter() {
-                    if *id >= from_id {
-                        items.push((*id, Arc::clone(stage), payload.clone(), Some(Arc::clone(key))));
+                for (key, q) in g.keyed_entries.iter() {
+                    for (id, payload, _) in q.iter() {
+                        if *id >= from_id {
+                            items.push((*id, Arc::clone(stage), payload.clone(), Some(Arc::clone(key))));
+                        }
                     }
                 }
             }
@@ -1851,6 +1905,118 @@ mod tests {
         assert_eq!(payload.as_ref(), &b"v2"[..]);
     }
 
+    // ── ER7 (R11-03, R11-10, R11-11): a queue per key, for items and for waiters ──
+
+    /// Lets every spawned task on this current-thread runtime run to its first park.
+    async fn let_park() {
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Takes every item queued under `key`, in order, acking each; stops at the first timeout.
+    async fn drain_key(store: &TupleStore, stage: &str, key: &str) -> Vec<u64> {
+        let mut ids = Vec::new();
+        while let Ok((id, _)) = store.take_by_key(stage, key, Duration::from_millis(50)).await {
+            store.ack(id).unwrap();
+            ids.push(id);
+        }
+        ids
+    }
+
+    /// A keyed item whose lease expires goes to the back of its key's queue; it does not overwrite a newer
+    /// item put under the same key while it was in flight.
+    #[tokio::test]
+    async fn a_requeued_keyed_item_does_not_displace_a_newer_one() {
+        let store = TupleStore::transient(500);
+        let a = store.put_keyed("s", Arc::from("k"), b("a")).unwrap();
+        let (got, _) = store.take_by_key("s", "k", Duration::from_millis(50)).await.unwrap();
+        assert_eq!(got, a);
+        let newer = store.put_keyed("s", Arc::from("k"), b("b")).unwrap();
+        assert_eq!(store.requeue_expired(Duration::ZERO), vec![a]);
+        assert_eq!(drain_key(&store, "s", "k").await, vec![newer, a], "both remain, the requeued one at the back");
+        assert_eq!(store.depth(Some("s"))[0].depth, 0);
+    }
+
+    /// A mirror (or a replay) applying two keyed records under one key keeps both.
+    #[tokio::test]
+    async fn a_mirror_keeps_two_same_key_records() {
+        let store = TupleStore::transient(500);
+        store.put_with_id("s", 5, b("x"), Some(Arc::from("k"))).unwrap();
+        store.put_with_id("s", 6, b("y"), Some(Arc::from("k"))).unwrap();
+        assert_eq!(drain_key(&store, "s", "k").await, vec![5, 6]);
+        assert_eq!(store.depth(Some("s"))[0].depth, 0);
+    }
+
+    /// Two workers parked on one key are both served, in arrival order; the second does not evict the first.
+    #[tokio::test]
+    async fn two_waiters_on_one_key_are_both_served() {
+        let store = Arc::new(TupleStore::transient(500));
+        let (s1, s2) = (Arc::clone(&store), Arc::clone(&store));
+        let first = tokio::spawn(async move { s1.take_by_key("s", "k", Duration::from_secs(5)).await });
+        let_park().await;
+        let second = tokio::spawn(async move { s2.take_by_key("s", "k", Duration::from_secs(5)).await });
+        let_park().await;
+        let a = store.put_keyed("s", Arc::from("k"), b("a")).unwrap();
+        let bb = store.put_keyed("s", Arc::from("k"), b("b")).unwrap();
+        let first = first.await.unwrap().expect("the first waiter is served, not evicted");
+        let second = second.await.unwrap().expect("the second waiter is served");
+        assert_eq!((first.0, second.0), (a, bb), "same-key waiters are served in arrival order");
+        assert_eq!(store.depth(Some("s"))[0].depth, 0);
+    }
+
+    /// A keyed waiter that times out removes only its own registration: a waiter parked on the same key before it
+    /// stays, and is served by the next put.
+    #[tokio::test]
+    async fn a_timed_out_keyed_waiter_does_not_remove_another() {
+        let store = Arc::new(TupleStore::transient(500));
+        let (s1, s2) = (Arc::clone(&store), Arc::clone(&store));
+        let long = tokio::spawn(async move { s1.take_by_key("s", "k", Duration::from_secs(5)).await });
+        let_park().await;
+        let short = tokio::spawn(async move { s2.take_by_key("s", "k", Duration::from_millis(20)).await });
+        assert!(matches!(short.await.unwrap(), Err(TupleError::Timeout)));
+        let id = store.put_keyed("s", Arc::from("k"), b("x")).unwrap();
+        let (got, _) = long.await.unwrap().expect("the other waiter stayed parked");
+        assert_eq!(got, id);
+        assert_eq!(store.depth(Some("s"))[0].depth, 0, "handed over, not stored");
+    }
+
+    /// Same-key collisions leave no residue: the depth returns to zero, puts are accepted again at the watermark,
+    /// and a timed-out keyed waiter on a key nobody touches again leaves no entry behind.
+    #[tokio::test]
+    async fn depth_returns_to_zero_after_keyed_collisions() {
+        let store = TupleStore::transient(3);
+        for i in 0..3 {
+            store.put_keyed("s", Arc::from("k"), Bytes::from(format!("{i}"))).unwrap();
+        }
+        assert_eq!(drain_key(&store, "s", "k").await.len(), 3);
+        assert_eq!(store.depth(Some("s"))[0].depth, 0);
+        for i in 0..3 {
+            store.put_keyed("s", Arc::from(format!("other-{i}")), b("v")).expect("the stage is empty again");
+        }
+        // A cold key: one timed-out waiter, never touched again.
+        assert!(store.take_by_key("cold", "job-1", Duration::from_millis(10)).await.is_err());
+        let cold = store.stage("cold");
+        assert!(cold.inner.lock().keyed_waiters.is_empty(), "a timed-out waiter's entry is removed");
+        assert_eq!(cold.waiters_count.load(Ordering::Relaxed), 0);
+    }
+
+    /// R11-11: a worker parked on `take_by_key` counts in the stage's `waiters`, and leaves it when served or
+    /// timed out.
+    #[tokio::test]
+    async fn a_parked_keyed_worker_counts_as_a_waiter() {
+        let store = Arc::new(TupleStore::transient(500));
+        let s1 = Arc::clone(&store);
+        let w = tokio::spawn(async move { s1.take_by_key("s", "k", Duration::from_secs(5)).await });
+        let_park().await;
+        assert_eq!(store.depth(Some("s"))[0].waiters, 1, "the parked keyed worker is counted");
+        store.put_keyed("s", Arc::from("k"), b("x")).unwrap();
+        w.await.unwrap().unwrap();
+        assert_eq!(store.depth(Some("s"))[0].waiters, 0, "served: no longer counted");
+        assert!(store.take_by_key("s", "k", Duration::from_millis(10)).await.is_err());
+        assert_eq!(store.depth(Some("s"))[0].waiters, 0, "timed out: no longer counted");
+    }
+
     #[tokio::test]
     async fn take_before_put() {
         let store = Arc::new(TupleStore::transient(500));
@@ -2886,6 +3052,29 @@ mod tests {
             let (id, _) = store.take("t", Duration::from_millis(100)).await.unwrap();
             store.ack(id).unwrap();
         }
+        // ER7 (R11-10): parked successful takers, plain and keyed, and a requeue handed to a parked
+        // waiter, on stages "p", "k" and "r". Each hand-off is one take.
+        let store = Arc::new(store);
+        let s = Arc::clone(&store);
+        let w = tokio::spawn(async move { s.take("p", Duration::from_secs(5)).await });
+        for _ in 0..20 { tokio::task::yield_now().await; }
+        store.put("p", b("x")).unwrap();
+        let (id, _) = w.await.unwrap().unwrap();
+        store.ack(id).unwrap();
+        let s = Arc::clone(&store);
+        let w = tokio::spawn(async move { s.take_by_key("k", "c", Duration::from_secs(5)).await });
+        for _ in 0..20 { tokio::task::yield_now().await; }
+        store.put_keyed("k", Arc::from("c"), b("x")).unwrap();
+        let (id, _) = w.await.unwrap().unwrap();
+        store.ack(id).unwrap();
+        store.put("r", b("x")).unwrap();
+        let (id, _) = store.take("r", Duration::from_millis(100)).await.unwrap();
+        let s = Arc::clone(&store);
+        let w = tokio::spawn(async move { s.take("r", Duration::from_secs(5)).await });
+        for _ in 0..20 { tokio::task::yield_now().await; }
+        assert_eq!(store.requeue_expired(Duration::ZERO), vec![id]);
+        let (id, _) = w.await.unwrap().unwrap();
+        store.ack(id).unwrap();
         // Quiescence: exact zeros everywhere.
         assert_eq!(store.inflight_count(), 0);
         for m in store.metrics_snapshot() {
@@ -2901,6 +3090,13 @@ mod tests {
                 "t" => {
                     assert_eq!(m.put_total, 2); // the two completes
                     assert_eq!(m.take_total, 2);
+                }
+                "p" | "k" => {
+                    assert_eq!((m.put_total, m.take_total, m.hot_total), (1, 1, 1), "stage {}", m.stage);
+                }
+                "r" => {
+                    // One put, two deliveries (the take and the redelivery to the parked waiter).
+                    assert_eq!((m.put_total, m.take_total), (1, 2));
                 }
                 other => panic!("unexpected stage {other}"),
             }

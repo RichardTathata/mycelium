@@ -12,7 +12,13 @@ Design: `docs/plans/mycelium-tuple-space.md`. Key facts:
   atomic lane-to-lane move; per-lane depth is the pressure signal; content-style routing is
   encoded in lane names (`stage-b.high`). **Fan-in joins** are expressible via keyed
   exact-match take (M13): `put_keyed`/`take_by_key`/`complete_keyed` — O(1) keyed index +
-  keyed-waiter map, WAL v2 records, gateway + py/ts SDKs. Template matching stays the
+  keyed-waiter map, WAL v2 records, gateway + py/ts SDKs. **A FIFO queue per key, for items and
+  for waiters** (ER7, 2026-11-27; `store.rs` `StageInner`): every keyed insert (put, complete,
+  mirror apply, requeue, WAL replay) pushes, a take pops, an empty entry is removed; a
+  timed-out keyed take closes its receiver, drains it, then prunes closed senders under the
+  stage lock (a cold per-job key leaves nothing). Keyed waiters count in `waiters`. `take_total`
+  is counted once, where an item enters in flight (`dispatch`/`dispatch_keyed` on a successful
+  send, and the buffered pops) — never by the woken taker. Template matching stays the
   blackboard's territory.
 - **Roles** (`TupleRole`): `Primary` serves; `Secondary` mirrors (replicate RPCs +
   heartbeat) and promotes when the primary's capability evaporates — the ring *is* the

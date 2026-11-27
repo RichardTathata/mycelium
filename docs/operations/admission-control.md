@@ -13,7 +13,7 @@ them; nothing here is a fleet ceiling, and nothing claims exclusive rights.
 | Knob | Where | Meaning |
 |---|---|---|
 | `TupleConfig.high_watermark` (default 500) | per stage, at the primary | a `put` that finds the stage's depth at or past it is refused — `TupleError::Backpressure { retry_after_ms }` — or, under `BackpressureMode::Block(limit)`, retried with backoff until `limit` |
-| `TupleSpace::admission(stage)` | **the primary only** (`Some`); a secondary answers `None` | per stage: `admitted` (puts accepted), `rejected` (puts refused at the watermark), `taken` (items handed to a worker), `high_watermark`. Cumulative since the primary started |
+| `TupleSpace::admission(stage)` | **the primary only** (`Some`); a secondary answers `None` | per stage: `admitted` (puts accepted), `rejected` (puts refused at the watermark), `taken` (deliveries to a worker: one per item that enters in flight, whether taken from the queue or handed to a parked worker, and again for each redelivery after a lease expired, so `taken` can exceed `admitted`), `high_watermark`. Cumulative since the primary started |
 | `sys/tuple/{node}/{ns}/stage/{stage}/rejected_total` | the metrics writer, beside `put_total`, `take_total`, `hot_total`, `depth`, `inflight` | the same count, published on the metrics cadence |
 | `sys/tuple/{node}/{ns}/pressure/{stage}` | the backpressure pheromone (0.7 hysteresis) | *that* the stage is at its watermark — the signal producers should read before they retry |
 

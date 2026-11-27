@@ -665,6 +665,8 @@ sys/tuple/{node_id}/wal_bytes                    → u64  (WAL file size, 0 if t
   distribution and hide true queueing latency.
 
 Operator interpretation: `hot_total / take_total` ≈ fraction of demand met instantly.
+(`take_total` counts deliveries, once each where an item enters in flight — a redelivery after an
+expired lease counts again — so it is not bounded by `put_total`; ER7, 2026-11-27.)
 `queue_p99_us` rising → workers not keeping up with producers → scale workers or check
 for a slow stage upstream.
 
