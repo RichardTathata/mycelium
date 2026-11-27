@@ -52,6 +52,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   neither shape (kind `a/b` under mailbox `a`) is no longer delivered to the wrong mailbox with `hlc_ts = 0` and
   deleted: it is left for its own. **Upgrade receivers before or with senders:** an older receiver delivers a salted
   event with `hlc_ts == 0`. `deprecations.md` §TBD-ER1.
+- **A consumed mailbox event stays consumed after an abrupt exit** (ER1, with the reviewer's R7-03). The mailbox's
+  delete was applied and gossiped but never handed to the WAL, so a node that exited without `shutdown()` replayed the
+  insert and delivered the event again. The delete is now appended as the insert is: queued to the WAL writer, not
+  synced, so a consumed event can still return after a crash before the delete reaches disk.
 
 - **A gateway sends an unanswered cancel-forward again** (unreleased code: I4's cancel-forward; identity-and-lifecycle
   §9 O13, the maintainer's decision of 2026-11-22; found on #824, where behind about 12 000 concurrent mints the

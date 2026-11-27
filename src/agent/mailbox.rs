@@ -19,8 +19,10 @@
 //!   two senders' events at one stamp are both kept (the key names its sender)
 //!   and come in key order.
 //! - **Tombstone-on-delivery**: entries are deleted from the KV store
-//!   immediately after delivery and the tombstone is gossiped, preventing
-//!   redelivery on restart. *Delivery* differs by consumer: the in-process
+//!   immediately after delivery and the tombstone is gossiped and handed to
+//!   the WAL, preventing redelivery on restart. The WAL rung is *queued*, not
+//!   synced: a consumed event can return after a crash before the delete
+//!   reaches disk. *Delivery* differs by consumer: the in-process
 //!   [`ServiceHandle::open_mailbox`](crate::ServiceHandle::open_mailbox) deletes an
 //!   entry when it enters the receiver's channel (the library cannot see a plain
 //!   `mpsc::Receiver` being read, so a receiver dropped with events queued loses
@@ -213,11 +215,18 @@ fn parse_suffix(suffix: &str) -> Option<u64> {
     u64::from_str_radix(hex, 16).ok()
 }
 
+/// Deletes one consumed (or malformed) entry: applied, then handed to the WAL as the insert was (R7-03 —
+/// without the append a node that exited without `shutdown()` replayed the insert and delivered the event
+/// again), then gossiped. The WAL rung is **queued to the writer, not synced**: `append_try` drops on a full
+/// queue, so a consumed event can still return after a crash before the delete reaches disk (at-least-once).
 fn tombstone(ctx: &Arc<TaskCtx>, key: Arc<str>) {
     let update = make_gossip_update(
         &ctx.node_id, ctx.default_ttl, key, Bytes::new(), true, &ctx.hlc,
     );
-    apply_and_notify(&ctx.kv_state, &update);
+    apply_and_notify(&ctx.kv_state, &update); // apply, then persist (persistence.rs invariant 1)
+    if let Some(wal) = ctx.wal.get() {
+        wal.append_try(crate::framing::sync_entry_from(&update));
+    }
     dispatch_gossip_try_send(
         &ctx.gossip_txs,
         crate::framing::local_kv_wire_msg(ctx, update),
@@ -744,6 +753,72 @@ mod tests {
         assert_eq!(hlc.len(), 16, "{suffix}");
         assert_eq!(sender, id.to_string());
         agent.shutdown().await;
+    }
+
+    /// R7-03: a consumed event's tombstone was applied and gossiped but never handed to the WAL, so a node
+    /// that exited without `shutdown()` replayed the insert and delivered the event again. **The crash is
+    /// modelled by copying the files while the node runs** (as `an_acceptors_record_survives_a_crash_without_a_snapshot`
+    /// does): an orderly `shutdown()` snapshots the store, which held the delete whatever the WAL said. An
+    /// on-disk receipt for a later write is the barrier — the WAL has one writer, in order.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_consumed_event_does_not_return_after_an_abrupt_exit() {
+        use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
+        let port = alloc_port();
+        let id = NodeId::new("127.0.0.1", port).unwrap();
+        let base = std::env::temp_dir().join(format!("mycelium-er1-mailbox-wal-{port}"));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join(id.to_string()).join("kv");
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.persistence = Some(PersistenceConfig {
+            base_path: base.clone(), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000,
+            snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse,
+        });
+
+        let a = Arc::new(GossipAgent::new(id.clone(), cfg.clone()));
+        a.start().await.unwrap();
+        assert!(a.service().deliver_event(&id, "read", Bytes::from_static(b"already-processed")));
+        assert!(a.service().deliver_event(&id, "unread", Bytes::from_static(b"still-pending")));
+        let (handle, mut rx) = a.service().open_mailbox("read", 1);
+        let got = recv_up_to(&mut rx, 1).await;
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].payload.as_ref(), b"already-processed");
+        for _ in 0..200 {
+            if a.kv().scan_prefix(&format!("mailbox/{id}/read/")).is_empty() { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(a.kv().scan_prefix(&format!("mailbox/{id}/read/")).is_empty(), "the consumed entry left the store");
+        let r = a.kv().set_with_receipt(&crate::OperationId::new("er1-fence"), "er1/fence", "on-disk").await.unwrap();
+        assert_eq!(r.local_durability, crate::LocalDurability::OnDisk);
+
+        // The crash: what is on disk now, with the node still running, is all a restart would have.
+        let crash = base.join("crash");
+        std::fs::create_dir_all(&crash).unwrap();
+        for f in ["snapshot.bin", "wal.bin"] {
+            if dir.join(f).exists() { std::fs::copy(dir.join(f), crash.join(f)).unwrap(); }
+        }
+        drop(handle);
+        a.shutdown().await;
+        for f in ["snapshot.bin", "wal.bin"] {
+            let _ = std::fs::remove_file(dir.join(f));
+            if crash.join(f).exists() { std::fs::copy(crash.join(f), dir.join(f)).unwrap(); }
+        }
+
+        let b = Arc::new(GossipAgent::new(id.clone(), cfg));
+        b.start().await.unwrap();
+        assert_eq!(b.kv().get("er1/fence").as_deref(), Some(b"on-disk".as_slice()), "the barrier replayed");
+        let (h_unread, mut unread) = b.service().open_mailbox("unread", 1);
+        let pending = recv_up_to(&mut unread, 1).await;
+        assert_eq!(pending.len(), 1, "the pending event is kept");
+        assert_eq!(pending[0].payload.as_ref(), b"still-pending");
+        let (h_read, mut read) = b.service().open_mailbox("read", 1);
+        let again = tokio::time::timeout(Duration::from_millis(300), read.recv()).await.ok().flatten();
+        assert!(again.is_none(), "a consumed event came back after the restart: {:?}",
+            again.map(|e| String::from_utf8_lossy(&e.payload).into_owned()));
+        drop((h_unread, h_read));
+        b.shutdown().await;
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// The strict suffix parse: the two shapes and nothing else.

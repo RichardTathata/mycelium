@@ -46,11 +46,14 @@ answered, run in CI. That a dropped gateway stream loses only what it had handed
 - No guarantee or rule id: the mailbox registers nothing in the
   [guarantee catalogue](../reference/guarantee-catalogue.md) or the rule catalogue.
 - **Not built:** an authenticated sender — the event's `sender` is written into the value by whoever delivered it and is
-  not checked against the writer, so a handler should not authorise on it; exactly-once delivery — an in-process receiver dropped with events queued loses them, because the
+  not checked against the writer (the key's sender segment is the same claim), so a handler should not authorise on
+  it; a durable delete — the delete of a consumed event is handed to the WAL's queue, not synced, so the mailbox is
+  at-least-once: a consumed event can return after a crash before the delete reaches disk; exactly-once delivery — an in-process receiver dropped with events queued loses them, because the
   event was deleted when it entered the channel; events carry no expiry of their own, so an event for a node that never returns stays in every replica until it is
   deleted; delivery is to a node, not to an identity that moves.
-- **Evidence:** the [what-is-proven](../operations/what-is-proven.md) ledger has no row for the mailbox; the row E
-  fixes are in [post-360 hardening](../plans/post-360-hardening.md).
+- **Evidence:** the [what-is-proven](../operations/what-is-proven.md#mailbox-sender-keyed) row for ER1 (two senders at
+  one stamp, the foreign suffix, the delete after an abrupt exit); the row E fixes are in
+  [post-360 hardening](../plans/post-360-hardening.md).
 
 ## Go deeper
 
