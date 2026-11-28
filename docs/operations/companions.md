@@ -93,9 +93,11 @@ left blank. The obligations every companion owes are the
 - **A returning or lost-ack mirror is reconciled** (ER6). The snapshot carries the primary's acked ids (100 000 in
   memory, 16 384 kept through compaction) and its next id; a mirror discards what the primary names acked, never what
   the snapshot merely lacks, and fences its ids. A running mirror probes a digest every 3 × `cap_refresh` and re-syncs
-  on a settled mismatch. Watch `Blackboard::mirror_retired()`, `mirror_unvouched()` (facts kept that the primary
+  after four consecutive mismatches (within about two minutes at the default `cap_refresh`). Watch `Blackboard::mirror_retired()`, `mirror_unvouched()` (facts kept that the primary
   could not vouch for — nonzero after a mirror returns from a long absence or a primary restarted empty),
-  `mirror_refused_acked()` (a replicated post under an acked id — nonzero means two primaries' ids met) and
+  `mirror_refused_acked()` (a replicated post under an id this node remembers acked: counted at each full sync —
+  most often a fact the primary still holds whose `Ack` was lost before an old primary died, kept out of the digest's
+  mismatch; growing on every replicated post, two primaries' ids met) and
   `mirror_digest_resyncs()` (lost replication). A tombstone costs 13 bytes in the WAL; 16 384 of them about 213 kB.
 - **Observe.** `is_primary()` / `is_secondary()`, `depth()` → `{available, inflight}`, also
   `GET /gateway/bb/depth`. (`BoardStats` counters exist in-process but are **not** wired to a route or

@@ -33,12 +33,17 @@ attributes** where the tuple space routes by lane position. WS-G G3, PRs #95–#
   it (discard whether or not the fact was present, logging the `Ack` only on first insertion); `fold_wal` rebuilds it
   from every `Ack`, a later `Post` forgetting the id; compaction writes the newest 16 384 as lone `Ack`s **before** the
   `Post`s, and keeps the high-water mark a `Claim` unless the id is a known acked id. `post_with_id` refuses a
-  remembered id (counted, `refused_acked`, never `mirror_gap` — no resync cures it) and is a no-op for a held one; the
+  remembered id (counted, `refused_acked`, warned with the id, never `mirror_gap` — no resync cures it, so a full sync records
+  the carried ids it refused (`refused_live`) and the mirror's digest counts them as the primary's: an ack lost before
+  an old primary died must not start a sync every few probes, review I1) and is a no-op for a held one; the
   old `MirrorIndex` is gone. The **snapshot** (and only it — `read` shares `facts_to_bytes`) gains a trailer
   `[u8 1][u64 next_id][u32 n] n×([u64 start][u32 len])`; `apply_snapshot` discards named ids, adds facts, then
   `fence_past(next_id)` — persisted as a lone `Claim { n-1 }`, which never changes liveness in any order. A running
-  mirror probes with body `[1]` (digest only: `[u8 2][u64 rep_seq][u64 count][u64 xor-mix]`) every 3 ticks; a mismatch
-  at the same replication sequence twice → full sync. The digest skips **unvouched** facts (held, neither carried nor
+  mirror probes with body `[1]` (digest only: `[u8 2][u64 count][u64 xor-mix]`) every 3 ticks; four consecutive
+  mismatches → full sync, whatever the write rate (a replication-sequence gate, the first build, never repaired a
+  board written between every two probes — review I3); an old primary's full-snapshot answer backs the probe off to
+  one in ten. The trailer decoder refuses runs summing past the memory and a `next_id` above 2^53 (review I2: one
+  12-byte run `(0, u32::MAX)` was 4.3 billion discards). The digest skips **unvouched** facts (held, neither carried nor
   named acked by the last full snapshot — kept and counted, D6c). ER6 needs ER3: a primary restarted at 0 would name
   its new life's ids acked over a mirror's old-life facts.
 - **Gates:** `cargo test -p mycelium-blackboard --features gateway` (+ clippy); `microgrid`

@@ -66,8 +66,18 @@ and `a_new_mirror_preserves_the_highest_allocated_fact_id_on_promotion`, in the 
   `Blackboard::mirror_refused_acked`), and fences its ids past the primary's next one, so a promoted mirror never
   issues an id the old primary already did. **Positive evidence, never absence:** a fact the snapshot lacks and does
   not name acked is kept and counted (`Blackboard::mirror_unvouched`). A running mirror compares a digest of its facts
-  with the primary's every three `cap_refresh` and re-syncs when they differ twice at a settled replication sequence
-  (`Blackboard::mirror_digest_resyncs`), so a lost replicated `Post` or `Ack` is repaired without a restart. **Not
+  with the primary's every three `cap_refresh` and re-syncs after four consecutive mismatched probes — within about two minutes of the first mismatch at the default `cap_refresh` of 10 s (4 probes × 3 × `cap_refresh`, the first mismatch seen up to one probe interval after the loss)
+  (`Blackboard::mirror_digest_resyncs`), so a lost replicated `Post` or `Ack` is repaired without a restart, under
+  steady writes too; a board whose replication is always in flight at four probes in a row pays one needless full
+  sync. An id the primary holds live that the mirror refuses as acked (its `Ack` was lost before an old primary died)
+  is counted in `mirror_refused_acked` at each full sync and folded into the mirror's digest, so it does not start
+  syncs. Against a primary older than this probe, whose answer is the whole board, a mirror probes once in ten.
+  **Frame headroom:** the trailer is up to about 1.2 MB (100 000 runs of 12 bytes) of the snapshot's 10 MiB frame;
+  a mirror refuses a trailer that names more ids than a board remembers, or a next id above 2^53, and then applies
+  nothing from that snapshot. **A healed split-brain:** two primaries of one namespace that issued the same ids
+  (ER3-F1: fresh starts in one millisecond) can retire each other's facts — the other primary's trailer names an id
+  acked that is this mirror's own live fact. **Not built, and older than ER6:** a mirror does not check that a
+  `replicate` or a snapshot answer comes from the primary — any member that reaches the RPC kinds can forge one. **Not
   built:** an ack older than the tombstone memory (forgotten, so such a fact on a mirror that was away longer is kept
   as unvouched and can be served again after a promotion); an ack lost within the last probe interval, which a
   promotion in that window does not see; and unvouched facts on a returning node, kept by design (at-least-once)

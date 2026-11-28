@@ -5987,13 +5987,16 @@ it names acked, then fences its ids at `next_id` (`BoardStore::fence_past`, pers
 snapshot lacks and does not name is kept. `discard` of an absent id remembers it (logging the `Ack` the first time);
 `post_with_id` of a held id is a no-op, and of a remembered acked id is refused — nothing applied, `Ok` returned, and
 counted in `refused_acked`. A mirror probes the primary's digest every three `cap_refresh` (a `snapshot` request with
-body `[1]`) and re-syncs on a settled mismatch.
+body `[1]`) and re-syncs after four consecutive mismatches. A trailer that names more ids than a board remembers, or
+a next id above 2^53, makes the mirror refuse that snapshot.
 
 **Mixed versions.** An older mirror decodes a new snapshot and ignores the trailer; a new mirror facing an older
 primary sees no trailer and only adds, as before; an older primary ignores the probe's body and answers a full
 snapshot, which the mirror applies. WAL v1 is unchanged — a lone `Ack` or `Claim` was already valid and an older build
 folds it as nothing but the high-water mark — so a downgrade opens the file; it then forgets the tombstones at its next
-compaction. **The limit:** an ack older than the memory is forgotten
+compaction. **Downgrade, compact, upgrade:** the older build's compaction rewrites a non-live high-water id as a lone
+`Ack`, so a fence persisted as `Claim { hw }` comes back after the upgrade as a tombstone for `hw` — an id no fact
+holds unless a replicated `Post` for it arrives later, which the mirror then refuses (counted). **The limit:** an ack older than the memory is forgotten
 ([`what-is-proven.md#board-failover-retires-acked`](../operations/what-is-proven.md#board-failover-retires-acked)).
 
 **Will the compiler tell me?** No — the signatures are unchanged and the new methods are additive.
