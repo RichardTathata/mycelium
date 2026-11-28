@@ -396,27 +396,7 @@ impl KvHandle {
     /// on the next matching write.
     #[must_use]
     pub fn subscribe_prefix<P: Into<Arc<str>>>(&self, prefix: P) -> watch::Receiver<u64> {
-        let prefix_arc: Arc<str> = prefix.into();
-        loop {
-            let guard = self.ctx.kv_state.prefix_watchers.pin();
-            if let Some(tx) = guard.get(&prefix_arc)
-                && !tx.is_closed() {
-                    return tx.subscribe();
-                }
-            let (new_tx, rx) = watch::channel(0u64);
-            let new_tx_arc   = Arc::new(new_tx);
-            let mut slot     = Some(new_tx_arc);
-            let result = guard.compute(Arc::clone(&prefix_arc), |existing| match existing {
-                Some((_, tx)) if !tx.is_closed() => papaya::Operation::Abort(()),
-                _ => match slot.take() {
-                    Some(tx) => papaya::Operation::Insert(tx),
-                    None     => papaya::Operation::Abort(()),
-                },
-            });
-            if matches!(result, papaya::Compute::Inserted(..) | papaya::Compute::Updated { .. }) {
-                return rx;
-            }
-        }
+        crate::store::subscribe_prefix_watch(&self.ctx.kv_state, prefix.into())
     }
 
     /// Like [`subscribe_prefix`](Self::subscribe_prefix) but only notifies when

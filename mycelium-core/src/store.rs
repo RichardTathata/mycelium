@@ -600,6 +600,58 @@ pub(crate) fn lww_wins(incoming_ts: u64, incoming_tombstone: bool, incoming_val:
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test hook: run once between reading a live prefix sender and subscribing to it, to force the
+    /// interleaving [`subscribe_prefix_watch`] must survive.
+    static BEFORE_PREFIX_SUBSCRIBE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A receiver on the prefix watcher for `prefix` — the one sender per prefix that
+/// [`apply_and_notify`] bumps on every write under it, created when absent or closed. The one
+/// implementation behind `KvHandle::subscribe_prefix` and the full crate's gateway watchers.
+///
+/// **The check-then-subscribe window** (engineering review ER8's review; papaya rule 2, never act on a stale
+/// read). Between reading a live sender and subscribing to it, its last other receiver can drop and a writer
+/// can evict it ([`apply_and_notify`]'s conditional `Remove`, or the GC tick's): a receiver taken on the
+/// evicted sender is never notified again. So after subscribing, the subscriber **re-inserts the same `Arc`**
+/// in a `compute`, which only succeeds while that sender is still the registered one. Papaya's compute is a
+/// CAS on the entry, so the two serialise: if the evictor's CAS lands first, the re-insert sees another value
+/// (or none) and aborts, and the subscriber drops its receiver and loops; if the re-insert lands first, an
+/// evictor that judged the sender closed before the subscribe fails its CAS, re-runs its closure, and finds the
+/// sender open (it has this receiver) — so it aborts. The closure clones per invocation (rule 1).
+pub fn subscribe_prefix_watch(kv: &KvState, prefix: Arc<str>) -> watch::Receiver<u64> {
+    loop {
+        let guard = kv.prefix_watchers.pin();
+        if let Some(tx) = guard.get(&prefix).filter(|tx| !tx.is_closed()).map(Arc::clone) {
+            #[cfg(test)]
+            if let Some(hook) = BEFORE_PREFIX_SUBSCRIBE.with(|h| h.borrow_mut().take()) { hook(); }
+            let rx = tx.subscribe();
+            let confirmed = guard.compute(Arc::clone(&prefix), |existing| match existing {
+                Some((_, current)) if Arc::ptr_eq(current, &tx) => Operation::Insert(Arc::clone(&tx)),
+                _ => Operation::Abort(()),
+            });
+            if matches!(confirmed, papaya::Compute::Updated { .. }) {
+                return rx;
+            }
+            continue; // evicted under us: `rx` is on an orphan, drop it and look again
+        }
+        let (new_tx, rx) = watch::channel(0u64);
+        let new_tx_arc   = Arc::new(new_tx);
+        let mut slot     = Some(new_tx_arc);
+        let result = guard.compute(Arc::clone(&prefix), |existing| match existing {
+            Some((_, tx)) if !tx.is_closed() => Operation::Abort(()),
+            _ => match slot.take() {
+                Some(tx) => Operation::Insert(tx),
+                None     => Operation::Abort(()),
+            },
+        });
+        if matches!(result, papaya::Compute::Inserted(..) | papaya::Compute::Updated { .. }) {
+            return rx;
+        }
+    }
+}
+
 /// Applies `update` using last-write-wins. Returns `true` if the store changed.
 /// Conflict resolution is [`lww_wins`] — see its doc for the equal-timestamp rules.
 /// Uses papaya `compute` for a single atomic CAS — no separate read then write.
@@ -987,6 +1039,34 @@ mod tests {
     use super::*;
     use crate::framing::GossipUpdate;
     use bytes::Bytes;
+
+    /// The check-then-subscribe window (engineering review ER8's review; the plan's §14 question): a subscriber
+    /// reads the live sender, the last other receiver drops, a write under the prefix evicts the now-closed
+    /// sender, and the subscriber then subscribes to the evicted sender — which no write notifies again. A live
+    /// log subscription re-opened by a reconnecting client on a busy stream meets exactly this.
+    #[test]
+    fn a_prefix_subscriber_racing_an_eviction_is_still_notified() {
+        // `'static` so the hook (a `Box<dyn FnOnce()>`) can write to it.
+        let kv: &'static KvState = Box::leak(Box::new(KvState::new(0)));
+        let hlc: &'static crate::hlc::Hlc = Box::leak(Box::new(crate::hlc::Hlc::new()));
+        let id = crate::node_id::NodeId::new("127.0.0.1", 1).unwrap();
+        let write = move |key: &str| {
+            apply_and_notify(kv, &crate::framing::make_gossip_update(&id, 60, Arc::from(key), Bytes::from_static(b"v"), false, hlc));
+        };
+        let other = subscribe_prefix_watch(kv, Arc::from("log/s/"));
+        let write_in_hook = write.clone();
+        BEFORE_PREFIX_SUBSCRIBE.with(|h| *h.borrow_mut() = Some(Box::new(move || {
+            drop(other);                  // the last other receiver goes: the sender is closed
+            write_in_hook("log/s/evict"); // and a write under the prefix evicts it
+        })));
+        let mut rx = subscribe_prefix_watch(kv, Arc::from("log/s/"));
+        assert!(BEFORE_PREFIX_SUBSCRIBE.with(|h| h.borrow().is_none()), "the hook ran: the interleaving was forced");
+        rx.mark_unchanged();
+        write("log/s/next");
+        assert!(rx.has_changed().unwrap_or(false), "a write under the prefix after the subscribe must notify it");
+        let registered = kv.prefix_watchers.pin().get("log/s/").map(|tx| tx.receiver_count());
+        assert_eq!(registered, Some(1), "the subscriber's receiver is on the registered sender");
+    }
 
     #[test]
     fn tombstone_gc_sweep_unpacks_hlc_timestamps() {

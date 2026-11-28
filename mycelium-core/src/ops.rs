@@ -296,25 +296,7 @@ pub fn kv_subscribe(ctx: &CoreCtx, key: impl Into<Arc<str>>) -> tokio::sync::wat
 
 /// Subscribes to any write touching keys under `prefix`.
 pub fn kv_subscribe_prefix(ctx: &CoreCtx, prefix: impl Into<Arc<str>>) -> tokio::sync::watch::Receiver<u64> {
-    let prefix_arc: Arc<str> = prefix.into();
-    loop {
-        let guard = ctx.kv_state.prefix_watchers.pin();
-        if let Some(tx) = guard.get(&prefix_arc)
-            && !tx.is_closed() { return tx.subscribe(); }
-        let (new_tx, rx) = tokio::sync::watch::channel(0u64);
-        let new_tx_arc   = std::sync::Arc::new(new_tx);
-        let mut slot     = Some(new_tx_arc);
-        let result = guard.compute(Arc::clone(&prefix_arc), |existing| match existing {
-            Some((_, tx)) if !tx.is_closed() => papaya::Operation::Abort(()),
-            _ => match slot.take() {
-                Some(tx) => papaya::Operation::Insert(tx),
-                None     => papaya::Operation::Abort(()),
-            },
-        });
-        if matches!(result, papaya::Compute::Inserted(..) | papaya::Compute::Updated { .. }) {
-            return rx;
-        }
-    }
+    crate::store::subscribe_prefix_watch(&ctx.kv_state, prefix.into())
 }
 
 /// Per-subscriber variant: fires only when the prefix matches AND `predicate(&key)` is true.

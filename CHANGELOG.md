@@ -33,6 +33,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `entry.hlc`, inclusive). A feature page, [the log overlay](docs/features/log-overlay.md); the group consumer's
   remaining late-entry limit is a ledger row (`what-is-proven.md#log-group-skips-a-late-row`). Upgrade note:
   `deprecations.md` §TBD-ER8.
+- **A prefix subscription opened while its watcher is evicted is notified** (engineering review ER8's review; the
+  plan's §14 question, pre-existing and made reachable by ER8, whose subscriptions now drop their receivers at
+  disconnect). `subscribe_prefix` read the registered sender, then subscribed to it; if the last other receiver
+  dropped and a write evicted the closed sender in between, the new receiver sat on an orphan no write notifies,
+  so a reconnecting log subscriber on a busy stream went silent. After subscribing it now re-inserts the same
+  sender in a `compute`, which papaya's CAS serialises against the evictor's conditional remove, and loops if it
+  lost. The three copies (`KvHandle::subscribe_prefix`, `ops::kv_subscribe_prefix`, the gateway's
+  `subscribe_prefix_on_kv`) are one function, `mycelium_core::store::subscribe_prefix_watch`.
 - **A gateway sends an unanswered cancel-forward again** (unreleased code: I4's cancel-forward; identity-and-lifecycle
   §9 O13, the maintainer's decision of 2026-11-22; found on #824, where behind about 12 000 concurrent mints the
   provider's stop came about 25 s after the cancel in 4 runs of 9). The forward is a best-effort signal on the
