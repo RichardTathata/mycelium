@@ -87,6 +87,7 @@ the notice.
 | 134 | code or dashboards that expect a second `put_keyed` / `complete_keyed` under one key to replace the first, `taken <= admitted`, or `waiters` to exclude `take_by_key` workers | unreleased (engineering review ER7) | expect a FIFO queue per key; read `taken` as deliveries (redeliveries included); `waiters` now counts keyed waiters | **No** — a behaviour change only ([§134](#134-tuple-space-items-and-workers-under-one-correlation-key-queue-in-arrival-order-taken-counts-each-delivery-once-keyed-workers-count-in-waiters-unreleased-engineering-review-er7--r11-03-r11-10-r11-11)) |
 | 136 | code that calls `BoardStore::discard` or `post_with_id` directly and relies on an absent id being forgotten, on a re-post of a held id being logged again, or on a post of an acked id being applied | unreleased (engineering review ER6) | read `remembers_acked` / `refused_acked`; a board that must take an id again needs a new id, which is the rule | **No** — a behaviour change only ([§136](#136-a-blackboard-remembers-the-ids-it-acked-and-a-mirror-acts-on-them-unreleased-engineering-review-er6-r11-01-r11-04)) |
 | TBD-ER4 | a node, or code driving `Provisioner::provision_round`, that ran two builds of one capability name side by side (two catalogue lines for one `{ns}/{name}`, each a different artifact); a decision-trace reader matching `already_started_this_round` | unreleased (engineering review ER4, R12-01) | one line per name, or expect the second line to wait — it installs once the first build's entry leaves the map (a withdraw, a shed, a probe failure, a failed install, a stop); read `capability_already_held` | **No** — behaviour and trace reasons ([§TBD-ER4](#tbd-er4-one-capability-name-runs-one-build-per-provisioner-a-second-catalogue-line-for-the-name-waits-unreleased-er4-r12-01)) |
+| 135 | a node, or code driving `Provisioner::provision_round`, that ran two builds of one capability name side by side (two catalogue lines for one `{ns}/{name}`, each a different artifact); a decision-trace reader matching `already_started_this_round` | unreleased (engineering review ER4, R12-01) | one line per name, or expect the second line to wait — it installs once the first build's entry leaves the map (a withdraw, a shed, a probe failure, a failed install, a stop); read `capability_already_held` | **No** — behaviour and trace reasons ([§135](#135-one-capability-name-runs-one-build-per-provisioner-a-second-catalogue-line-for-the-name-waits-unreleased-er4-r12-01)) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -6057,7 +6058,7 @@ placed state it wants removed on a stop should override `retire` to do so.
   `a_blob_pulling_at_shutdown_stops_its_loading_tier_and_keeps_its_file` (`provisioner.rs`).
 
 
-## §TBD-ER4. One capability name runs one build per provisioner; a second catalogue line for the name waits (unreleased, ER4, R12-01)
+## 135. One capability name runs one build per provisioner; a second catalogue line for the name waits (unreleased, ER4, R12-01)
 
 *Numbered by the release: rows of `docs/plans/engineering-review-urgent-fixes.md` land in parallel.*
 

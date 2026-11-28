@@ -124,7 +124,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `prov.presence_floor` rev 4). With it (D4b, R17-01 named): a line whose artifact is hosted as another capability is
   refused `artifact_hosted_as` in place of `already_hosted`, and a presence floor tries another digest for its name.
   Per provisioner; no upgrade path is built (retire-then-replace is a separate PR). Upgrade note: deprecations
-  §TBD-ER4.
+  §135.
 
 - **A stopped or dropped stem stops what it installed** (ER5 PR 1, R14-01; `docs/plans/engineering-review-urgent-fixes.md`
   §7). A stem's ticker ended with `drop(prov)` and `Provisioner` had no `Drop`, so a WASM install's serve task detached

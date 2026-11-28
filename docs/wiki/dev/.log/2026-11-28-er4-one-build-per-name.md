@@ -21,5 +21,5 @@ no production caller withdraws an `Installing` entry); no upgrade path (retire-t
 
 Pages: `concurrency/lock-order.md` row 21. Outside the wiki: `docs/features/demand-provisioning.md`, `stem.md`,
 `hosted-components.md`, `presence-bands.md`, `shadow-acceptance.md`, the rule catalogue (`prov.demand_response` rev 2,
-`prov.presence_floor` rev 4), `docs/guide/deprecations.md` §TBD-ER4, `docs/analysis/ratings.md` (the 2026-07-15
+`prov.presence_floor` rev 4), `docs/guide/deprecations.md` §135, `docs/analysis/ratings.md` (the 2026-07-15
 entry corrected), `CHANGELOG.md`.
