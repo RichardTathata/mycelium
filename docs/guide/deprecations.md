@@ -5934,4 +5934,4 @@ are small, must read the first id instead.
   enough for 2^53.
 - **Code:** `fresh_id_base` in `mycelium-tuple-space/src/store.rs` and `mycelium-blackboard/src/store.rs`. Tests:
   `mycelium-effects/tests/tuple_restart.rs`; `fresh_id_spaces_do_not_overlap`, `a_wal_with_history_keeps_its_fence`,
-  `ids_stay_below_two_to_the_53` in both stores; the mirror tests in both crates' `lib.rs`.
+  `ids_stay_below_two_to_the_53`, `a_fresh_store_starts_at_or_above_the_wall_clock`, `a_new_process_starts_above_the_old_stores_ids` in both stores; the mirror tests in both crates' `lib.rs`.

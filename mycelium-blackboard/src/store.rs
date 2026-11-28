@@ -31,7 +31,7 @@ use crate::{BlackboardError, Fact, Predicate};
 static LAST_FRESH_BASE: AtomicU64 = AtomicU64::new(0);
 
 /// The first id of an id space with **no history** — a transient board, or a WAL that names no id
-/// (ER3, R4-01). An fact's id is its identity everywhere: a mirror's `admit`, the gateway's JSON `id`, and any
+/// (ER3, R4-01). A fact's id is its identity everywhere: a mirror's `admit`, the gateway's JSON `id`, and any
 /// worker that keys an effect on it. A space that started
 /// at 0 reissued its previous life's ids after a restart, and a destination answered `Replayed` for
 /// new work. The base is the wall clock's milliseconds shifted left by 10 (read through
@@ -43,12 +43,23 @@ static LAST_FRESH_BASE: AtomicU64 = AtomicU64::new(0);
 /// id, and *N* stores created in one process push the last base about *N* ms ahead of the clock. A
 /// WAL with history never calls this: it fences at `max_id + 1`. Ids stay below 2^53 until about the
 /// year 2248, so they are exact as JSON numbers.
+///
+/// **Keep in sync with `fresh_id_base` in `mycelium-tuple-space/src/store.rs`** — the same rule, copied, each
+/// crate with its own static (the two id spaces are independent). It is not moved into `mycelium`
+/// because the companions reach only its public API, and this is not part of it.
 pub(crate) fn fresh_id_base() -> u64 {
+    fresh_id_base_after(&LAST_FRESH_BASE)
+}
+
+/// [`fresh_id_base`] against a given process-wide mark: the clock read and the in-process bump. A
+/// test passes a mark of its own, at 0, to model a new process without touching the shared static
+/// other tests in the binary use.
+fn fresh_id_base_after(last: &AtomicU64) -> u64 {
     let now = mycelium::sim_seam::wall_now_ms() << 10;
-    let mut prev = LAST_FRESH_BASE.load(Ordering::Relaxed);
+    let mut prev = last.load(Ordering::Relaxed);
     loop {
         let next = now.max(prev + (1 << 10));
-        match LAST_FRESH_BASE.compare_exchange(prev, next, Ordering::Relaxed, Ordering::Relaxed) {
+        match last.compare_exchange(prev, next, Ordering::Relaxed, Ordering::Relaxed) {
             Ok(_) => return next,
             Err(p) => prev = p,
         }
@@ -142,6 +153,9 @@ impl BoardStore {
         Ok(store)
     }
 
+    /// Takes a fresh id base for every board, so a persistent open over a WAL with history takes one
+    /// and discards it (`persistent` overwrites `next_id` with the fence). Harmless — the only cost is
+    /// the in-process mark moving on by 1 024 — and left so: one constructor, one place the base is set.
     fn with_wal(wal: Option<WalWriter>) -> Self {
         Self {
             inner: Mutex::new(BoardInner { available: BTreeMap::new(), inflight: HashMap::new() }),
@@ -803,6 +817,38 @@ mod tests {
     fn ids_stay_below_two_to_the_53() {
         let id = BoardStore::transient().post(surplus("1", "1.0"), Bytes::from("x")).unwrap();
         assert!(id < 1u64 << 53, "id {id} is not exact as a JSON number");
+    }
+
+    /// ER3, the clock half (review of f4972912): every restart test above runs in one process, so the
+    /// in-process mark alone passes them. A fresh store's first id is at or above the wall clock's
+    /// base, so a new process — a fresh mark — cannot start below it.
+    #[test]
+    fn a_fresh_store_starts_at_or_above_the_wall_clock() {
+        let before = mycelium::sim_seam::wall_now_ms() << 10;
+        let id = BoardStore::transient().post(surplus("1", "1.0"), Bytes::from("x")).unwrap();
+        assert!(id >= before, "the first id {id} is below the clock's base {before}");
+    }
+
+    /// ER3, the clock half: a restart in a **new process** — modelled by a mark of its own at 0, not
+    /// by resetting the shared static, which other tests in this binary use concurrently — starts
+    /// above the old store's ids once the clock has moved past them (the named limit: within
+    /// *N*/1024 ms they can overlap).
+    #[test]
+    fn a_new_process_starts_above_the_old_stores_ids() {
+        let old = BoardStore::transient();
+        let old_ids: Vec<u64> = (0..3).map(|_| old.post(surplus("1", "1.0"), Bytes::from("x")).unwrap()).collect();
+        let old_max = *old_ids.iter().max().unwrap();
+        drop(old);
+        // The old process's ids may run ahead of the clock by the in-process bump (one ms per store
+        // created in this binary); wait for the clock to pass them, bounded by that bump.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while mycelium::sim_seam::wall_now_ms() << 10 <= old_max {
+            assert!(std::time::Instant::now() < deadline, "the clock did not pass {old_max}");
+            std::thread::yield_now();
+        }
+        let new_process = AtomicU64::new(0);
+        let new = fresh_id_base_after(&new_process);
+        assert!(new > old_max, "a new process reissued an id: old {old_ids:?}, new base {new}");
     }
 
     /// #597 review, finding 3: a valid kind byte followed by zeros is a zero-extended partial append —
