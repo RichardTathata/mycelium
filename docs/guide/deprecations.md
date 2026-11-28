@@ -5843,7 +5843,6 @@ remainder as one hex number must take the first segment.
 - **Code:** `src/agent/mailbox.rs` (`mailbox_prefix`, `mailbox_key`, `deliver_event_at`, `parse_suffix`,
   `drain_prefix`, `tombstone`). Tests: `src/agent/mailbox.rs` (the ER1 block),
   `src/agent/http/remainder_tests.rs` (`two_gateways_delivering_at_one_stamp_both_arrive`).
-## §TBD-ER9. A governed group's member projects its `provides` and tracks its `requires`; a drained member stops; an ineligible member does not project (unreleased, engineering-review ER9, R10-01)
 ## 130. A governed group's member projects its `provides` and tracks its `requires`; a drained member stops; an ineligible member does not project (unreleased, engineering-review ER9, R10-01)
 
 This applies to every group under a live membership intent (`sys/govern/membership/{group}`) and to every electorate
