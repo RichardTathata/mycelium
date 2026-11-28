@@ -15,5 +15,5 @@ index.
 
 Pages: `companions/blackboard.md`, `companions/tuple-space.md`, `concurrency/lock-order.md` (rows 27, 29). Outside the
 wiki: the feature pages `blackboard.md`, `tuple-space.md`; `what-is-proven.md#board-failover-retires-acked`;
-`deprecations.md` §TBD-ER6; `operations/companions.md`, `operations/admission-control.md`;
+`deprecations.md` §136; `operations/companions.md`, `operations/admission-control.md`;
 `plans/mycelium-blackboard.md`.

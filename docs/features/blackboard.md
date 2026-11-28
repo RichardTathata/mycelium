@@ -74,7 +74,9 @@ and `a_new_mirror_preserves_the_highest_allocated_fact_id_on_promotion`, in the 
   (about 2 minutes at the default `cap_refresh`) when the threshold is at rest, and within 32 (about 16 minutes)
   after a back-off; on a board whose replication is always behind the probe, the steady cost is one needless
   whole-board snapshot per mirror every 32 probes (about 16 minutes). An `Ack` in flight during a sync counts as a
-  repair and resets the threshold. An id the primary holds live that the mirror refuses as acked (its `Ack` was lost before an old primary died)
+  repair and resets the threshold — so on a board that both posts and acks under steady load, the normal workload,
+  the back-off rarely engages and the cost is closer to one whole-board snapshot per mirror every 4 probes (about
+  2 minutes). Cost, not correctness; deciding the threshold at the next probe is a follow-up. An id the primary holds live that the mirror refuses as acked (its `Ack` was lost before an old primary died)
   is counted in `mirror_refused_acked` at each full sync and folded into the mirror's digest, so it does not start
   syncs. Against a primary older than this probe, whose answer is the whole board, a mirror probes once in ten.
   **Frame headroom:** the trailer is up to about 1.2 MB (100 000 runs of 12 bytes) of the snapshot's 10 MiB frame;

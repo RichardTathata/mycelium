@@ -88,7 +88,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Blackboard::{mirror_retired, mirror_unvouched, mirror_refused_acked, mirror_digest_resyncs}`; new
   `BoardStore::{fence_past, remembers_acked, acked_memory_len, refused_acked}`. *Behaviour change* (public
   `BoardStore` methods): `discard` remembers an id it did not hold, `post_with_id` is a no-op for a held id and refuses
-  a remembered acked one (`deprecations.md` §TBD-ER6). WAL v1 and the RPC kinds unchanged; mixed versions are safe.
+  a remembered acked one (`deprecations.md` §136). WAL v1 and the RPC kinds unchanged; mixed versions are safe.
 - **A promoted tuple-space mirror does not reissue an acked id** (engineering review ER6-T, the fence half). The
   mirror's fence followed `Put`s only, so a compacted primary's `[Put 0, Ack 2]` left it able to issue 1 again; it now
   fences on every record id, and a transient primary's last state chunk ends with a lone `Take` naming its last issued
