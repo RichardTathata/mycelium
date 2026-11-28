@@ -297,3 +297,141 @@ async fn two_rings_over_the_same_candidates_do_not_elect_the_same_node() {
         a.shutdown().await;
     }
 }
+
+// ── ER6 (R11-01, R11-04): a promoted board does not bring back, or reuse, what was completed ──
+
+fn temp_wal(name: &str) -> std::path::PathBuf {
+    let p = std::env::temp_dir().join(format!("mbb-failover-{}-{name}.wal", std::process::id()));
+    let _ = std::fs::remove_file(&p);
+    p
+}
+
+fn persist_cfg(ns: &str, role: BoardRole, wal: &std::path::Path) -> BoardConfig {
+    BoardConfig {
+        persist: true,
+        wal_path: wal.to_path_buf(),
+        checkpoint_every: 1,
+        cap_refresh: Duration::from_millis(500),
+        ..bb_cfg(ns, role)
+    }
+}
+
+fn item(label: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([("item".to_string(), label.to_string())])
+}
+
+async fn wait_for(what: &str, cond: impl Fn() -> bool) {
+    for _ in 0..400 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+/// The marker reaches this WAL only through the mirror's own append (a replicated or snapshot `Post`).
+fn wal_holds(wal: &std::path::Path, marker: &str) -> bool {
+    std::fs::read(wal).is_ok_and(|b| b.windows(marker.len()).any(|w| w == marker.as_bytes()))
+}
+
+async fn claim_and_ack(bb: &Arc<Blackboard>, label: &str) -> u64 {
+    let f = bb.claim(&Predicate::new().eq("item", label)).await.unwrap().expect("claimable");
+    bb.ack(f.id).await.unwrap();
+    f.id
+}
+
+/// R11-01: a persistent mirror holds fact R, goes away; the primary acks R and posts M; the mirror
+/// returns from its own WAL, syncs (M arrives), and promotes. R was completed: it must not be
+/// claimable on the new primary, and M must be.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_returning_mirror_retires_facts_completed_during_its_absence() {
+    let (p_lo, p_hi) = alloc_two_sorted_ports();
+    let a = start_agent(p_lo, None).await;
+    let b = start_agent(p_hi, Some(p_lo)).await;
+    wait_peered(&[&a, &b]).await;
+    let (pwal, mwal) = (temp_wal("r1101-primary"), temp_wal("r1101-mirror"));
+    let primary = Blackboard::new(Arc::clone(&a), persist_cfg("r1101", BoardRole::Primary, &pwal)).await.unwrap();
+    let retired = primary.post(item("done-while-away"), Bytes::from("done-while-away")).await.unwrap();
+
+    let mirror = Blackboard::new(Arc::clone(&b), persist_cfg("r1101", BoardRole::Secondary, &mwal)).await.unwrap();
+    wait_for("the fact in the mirror's WAL", || wal_holds(&mwal, "done-while-away")).await;
+    mirror.shutdown().await;
+    drop(mirror);
+    let secondaries = mycelium::CapFilter::new("blackboard", "r1101.secondary");
+    wait_for("the primary sees no secondary", || a.capabilities().resolve(&secondaries).is_empty()).await;
+
+    assert_eq!(claim_and_ack(&primary, "done-while-away").await, retired);
+    let marker = primary.post(item("posted-while-away"), Bytes::from("posted-while-away")).await.unwrap();
+
+    let returning = Blackboard::new(Arc::clone(&b), persist_cfg("r1101", BoardRole::Secondary, &mwal)).await.unwrap();
+    wait_for("the snapshot in the returning mirror's WAL", || wal_holds(&mwal, "posted-while-away")).await;
+    assert!(!returning.is_primary());
+    primary.shutdown().await;
+    a.shutdown().await;
+    wait_for("the returning mirror promotes", || returning.is_primary()).await;
+
+    let live: Vec<u64> = returning.read(&Predicate::new()).await.unwrap().iter().map(|f| f.id).collect();
+    assert!(live.contains(&marker), "the fact posted while the mirror was away survives: {live:?}");
+    let again = returning.claim(&Predicate::new().eq("item", "done-while-away")).await.unwrap();
+    assert!(again.is_none(), "fact {retired} was acked on the old primary and is claimable again: {again:?}");
+
+    returning.shutdown().await;
+    b.shutdown().await;
+    drop(returning);
+    let _ = std::fs::remove_file(&pwal);
+    let _ = std::fs::remove_file(&mwal);
+}
+
+/// R11-04: a mirror whose store's id space is older than the primary's (ER3 masks this only when the
+/// mirror's store is the younger) syncs one live fact after the primary acked two higher ids, then
+/// promotes. Its next id must be above every id the primary issued — and stay so across a reopen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_mirror_preserves_the_highest_allocated_fact_id_on_promotion() {
+    let (p_lo, p_hi) = alloc_two_sorted_ports();
+    let a = start_agent(p_lo, None).await;
+    let b = start_agent(p_hi, Some(p_lo)).await;
+    wait_peered(&[&a, &b]).await;
+    let (pwal, mwal) = (temp_wal("r1104-primary"), temp_wal("r1104-mirror"));
+    // The mirror node's store has history from before the primary's store was created.
+    {
+        let old = mycelium_blackboard::BoardStore::persistent(&mwal, 1).unwrap();
+        let id = old.post(item("older-life"), Bytes::new()).unwrap();
+        old.claim(&Predicate::new()).unwrap();
+        old.ack(id).unwrap();
+    }
+    let primary = Blackboard::new(Arc::clone(&a), persist_cfg("r1104", BoardRole::Primary, &pwal)).await.unwrap();
+    let marker = primary.post(item("kept"), Bytes::from("kept")).await.unwrap();
+    let _first = primary.post(item("first"), Bytes::from("first")).await.unwrap();
+    let _last = primary.post(item("last"), Bytes::from("last")).await.unwrap();
+    claim_and_ack(&primary, "first").await;
+    let last = claim_and_ack(&primary, "last").await;
+
+    let mirror = Blackboard::new(Arc::clone(&b), persist_cfg("r1104", BoardRole::Secondary, &mwal)).await.unwrap();
+    wait_for("the live fact in the mirror's WAL", || wal_holds(&mwal, "kept")).await;
+    primary.shutdown().await;
+    a.shutdown().await;
+    wait_for("the mirror promotes", || mirror.is_primary()).await;
+    let ids: Vec<u64> = mirror.read(&Predicate::new().eq("item", "kept")).await.unwrap().iter().map(|f| f.id).collect();
+    assert_eq!(ids, vec![marker]);
+    let next = mirror.post(item("new-after-promotion"), Bytes::new()).await.unwrap();
+    assert!(next > last, "the promoted board issued {next}, at or below {last}, an id the old primary acked");
+
+    mirror.shutdown().await;
+    b.shutdown().await;
+    drop(mirror);
+    let mut reopened = None;
+    for _ in 0..40 {
+        if let Ok(s) = mycelium_blackboard::BoardStore::persistent(&mwal, 1) {
+            reopened = Some(s);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let reopened = reopened.expect("the promoted board's WAL reopens");
+    let after = reopened.post(item("after-reopen"), Bytes::new()).unwrap();
+    assert!(after > next, "the reopened board issued {after}, at or below {next}");
+    drop(reopened);
+    let _ = std::fs::remove_file(&pwal);
+    let _ = std::fs::remove_file(&mwal);
+}

@@ -90,6 +90,17 @@ left blank. The obligations every companion owes are the
 - **Failover.** `cap_refresh` **10 s**; the promotion watch is **simpler** than tuple-space's (no
   orphan-grace guard), so a cold start where two nodes come up together is more exposed to a brief
   split-brain — assign explicit `Primary` / `Secondary` roles on a cold cluster if that matters.
+- **A returning or lost-ack mirror is reconciled** (ER6). The snapshot carries the primary's acked ids (100 000 in
+  memory, 16 384 kept through compaction) and its next id; a mirror discards what the primary names acked, never what
+  the snapshot merely lacks, and fences its ids. A running mirror probes a digest every 3 × `cap_refresh` and re-syncs
+  after four consecutive mismatches (within about two minutes at the default `cap_refresh`); a re-sync that repaired
+  nothing doubles that, up to 32 probes (about 16 minutes), so an always-behind mirror costs one whole-board
+  snapshot per 16 minutes. Watch `Blackboard::mirror_retired()`, `mirror_unvouched()` (facts kept that the primary
+  could not vouch for — nonzero after a mirror returns from a long absence or a primary restarted empty),
+  `mirror_refused_acked()` (a replicated post under an id this node remembers acked: counted at each full sync —
+  most often a fact the primary still holds whose `Ack` was lost before an old primary died, kept out of the digest's
+  mismatch; growing on every replicated post, two primaries' ids met) and
+  `mirror_digest_resyncs()` (lost replication). A tombstone costs 13 bytes in the WAL; 16 384 of them about 213 kB.
 - **Observe.** `is_primary()` / `is_secondary()`, `depth()` → `{available, inflight}`, also
   `GET /gateway/bb/depth`. (`BoardStats` counters exist in-process but are **not** wired to a route or
   KV key — don't rely on them operationally.)

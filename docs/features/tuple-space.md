@@ -64,6 +64,14 @@ each pulling from the deepest pending lane. CI runs it. That a secondary promote
   more than 1 024 ids and is recreated within milliseconds can overlap, and *N* stores created in one process put the
   last base about *N* ms ahead of the clock. Ids stay below 2^53
   ([the ledger row](../operations/what-is-proven.md#fresh-id-space-not-reissued)).
+- **A promoted mirror does not reissue an id the primary acked** (ER6-T, the fence half). A mirror fences its ids past
+  every id a replicated or replayed record names — an `Ack`, a `Take`, a `Complete`'s old id — not only a `Put`'s, and
+  a transient primary's last state chunk ends with a lone `Take` naming the last id it issued — a record that changes
+  no liveness when a mirror applies it; a mirror that persists the fence just after the item's own `Put` may requeue
+  that item once on a restart (at-least-once). **Not built** (ER6-T's
+  other forms, to be reproduced before they are ranked): a mirror away for an ack the primary then compacted away is
+  never told of it; a transient primary's state chunk carries no acked ids; a restarted mirror's index is not seeded
+  from its WAL ([the ledger row](../operations/what-is-proven.md#board-failover-retires-acked)).
 - **Evidence:** the ledger row
   [a failed WAL append is never followed by an acknowledged one](../operations/what-is-proven.md#failed-wal-append-never-followed-acknowledged),
   both companions' WALs included.

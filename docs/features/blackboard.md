@@ -44,7 +44,9 @@ The [example index](../../examples/README.md#the-capability-matrix) lists
 [`microgrid`](../../examples/README.md#the-capability-matrix): a community microgrid's agents post and claim energy facts;
 CI runs it, and [`microgrid_viz`](../../examples/README.md#the-capability-matrix) is the browser view. That an
 in-flight claim survives a primary's failover is `inflight_claim_survives_primary_failover`, in
-[`mycelium-blackboard/tests/board_failover.rs`](../../mycelium-blackboard/tests/board_failover.rs).
+[`mycelium-blackboard/tests/board_failover.rs`](../../mycelium-blackboard/tests/board_failover.rs); that a completed
+fact stays completed, and its id unused, across one is `a_returning_mirror_retires_facts_completed_during_its_absence`
+and `a_new_mirror_preserves_the_highest_allocated_fact_id_on_promotion`, in the same file.
 
 ## What it guarantees, and what it does not
 
@@ -57,6 +59,36 @@ in-flight claim survives a primary's failover is `inflight_claim_survives_primar
   for the [tuple space](tuple-space.md): fresh starts within *N*/1024 ms of each other can overlap, the in-process bump
   is 1 024 per board, and *N* boards created in one process put the last base about *N* ms ahead of the clock
   ([the ledger row](../operations/what-is-proven.md#fresh-id-space-not-reissued)).
+- **A failover does not bring back, or reuse, what was completed** (ER6). The primary remembers the ids it acked (up
+  to 100 000 in memory, the newest 16 384 through a compaction and a reopen) and sends them, with the id it issues
+  next, on the snapshot a mirror syncs from. The mirror discards a fact the primary names acked — one completed while
+  the mirror was away, restored from its own WAL — refuses a replicated `Post` of an acked id (counted,
+  `Blackboard::mirror_refused_acked`), and fences its ids past the primary's next one, so a promoted mirror never
+  issues an id the old primary already did. **Positive evidence, never absence:** a fact the snapshot lacks and does
+  not name acked is kept and counted (`Blackboard::mirror_unvouched`). A running mirror compares a digest of its facts
+  with the primary's every three `cap_refresh` and re-syncs after four consecutive mismatched probes — within about two minutes of the first mismatch at the default `cap_refresh` of 10 s (4 probes × 3 × `cap_refresh`, the first mismatch seen up to one probe interval after the loss)
+  (`Blackboard::mirror_digest_resyncs`), so a lost replicated `Post` or `Ack` is repaired without a restart, under
+  steady writes too. Replication still in flight at probe time also mismatches, and no sync cures that: a sync that
+  retired nothing and refetched nothing issued before the mismatches began doubles the threshold, up to 32 probes;
+  a sync that repairs something resets it to 4. **The bounds:** a lost `Post` or `Ack` is repaired within 4 probes
+  (about 2 minutes at the default `cap_refresh`) when the threshold is at rest, and within 32 (about 16 minutes)
+  after a back-off; on a board whose replication is always behind the probe, the steady cost is one needless
+  whole-board snapshot per mirror every 32 probes (about 16 minutes). An `Ack` in flight during a sync counts as a
+  repair and resets the threshold — so on a board that both posts and acks under steady load, the normal workload,
+  the back-off rarely engages and the cost is closer to one whole-board snapshot per mirror every 4 probes (about
+  2 minutes). Cost, not correctness; deciding the threshold at the next probe is a follow-up. An id the primary holds live that the mirror refuses as acked (its `Ack` was lost before an old primary died)
+  is counted in `mirror_refused_acked` at each full sync and folded into the mirror's digest, so it does not start
+  syncs. Against a primary older than this probe, whose answer is the whole board, a mirror probes once in ten.
+  **Frame headroom:** the trailer is up to about 1.2 MB (100 000 runs of 12 bytes) of the snapshot's 10 MiB frame;
+  a mirror refuses a trailer that names more ids than a board remembers, or a next id above 2^53, and then applies
+  nothing from that snapshot. **A healed split-brain:** two primaries of one namespace that issued the same ids
+  (ER3-F1: fresh starts in one millisecond) can retire each other's facts — the other primary's trailer names an id
+  acked that is this mirror's own live fact. **Not built, and older than ER6:** a mirror does not check that a
+  `replicate` or a snapshot answer comes from the primary — any member that reaches the RPC kinds can forge one. **Not
+  built:** an ack older than the tombstone memory (forgotten, so such a fact on a mirror that was away longer is kept
+  as unvouched and can be served again after a promotion); an ack lost within the last probe interval, which a
+  promotion in that window does not see; and unvouched facts on a returning node, kept by design (at-least-once)
+  ([the ledger row](../operations/what-is-proven.md#board-failover-retires-acked)).
 - **Evidence:** the ledger row
   [a failed WAL append is never followed by an acknowledged one](../operations/what-is-proven.md#failed-wal-append-never-followed-acknowledged),
   both companions' WALs included.

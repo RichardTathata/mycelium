@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use parking_lot::Mutex;
 
-use crate::wal::{WalRecord, WalWriter};
+use crate::wal::{Replayed, Tombstones, WalRecord, WalWriter};
 
 #[cfg(test)]
 thread_local! {
@@ -66,6 +66,15 @@ fn fresh_id_base_after(last: &AtomicU64) -> u64 {
     }
 }
 
+/// One id's contribution to the live-set digest (ER6 PR B): the splitmix64 finaliser, so the xor of
+/// a set's mixes changes when any one id does.
+pub(crate) fn digest_mix(id: u64) -> u64 {
+    let mut z = id.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 /// An in-flight (claimed-but-not-terminal) fact and when it was claimed (for the deadline sweep).
 struct Inflight {
     fact: Fact,
@@ -80,6 +89,29 @@ struct BoardInner {
     available: BTreeMap<u64, Fact>,
     /// Claimed facts awaiting `ack` (terminal) or `release` / deadline-requeue (back to available).
     inflight: HashMap<u64, Inflight>,
+    /// The acked ids this board remembers (ER6, R11-01) — recorded by `ack` and by `discard`, rebuilt
+    /// from the WAL at open, sent to a mirror with the snapshot, and refused by `post_with_id`. The
+    /// one acked-id memory a board has; the mirror's own index went with it.
+    tombstones: Tombstones,
+}
+
+/// What [`BoardStore::apply_with_id`] did with a replicated fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PostOutcome {
+    /// Applied: the fact is now live here.
+    Applied,
+    /// Already held (or acked while it was being applied): nothing changed.
+    Held,
+    /// Refused: the id is one this board remembers acked.
+    Refused,
+}
+
+/// What a mirror needs from a primary's snapshot, read under one lock (ER6): the live facts, the
+/// id the primary issues next, and the acked ids it remembers as sorted runs.
+pub(crate) struct MirrorSnapshot {
+    pub(crate) facts: Vec<Fact>,
+    pub(crate) next_id: u64,
+    pub(crate) acked: Vec<(u64, u32)>,
 }
 
 /// Live depth snapshot for one board.
@@ -117,6 +149,9 @@ pub struct BoardStore {
     acked: AtomicU64,
     released: AtomicU64,
     requeued: AtomicU64,
+    /// Replicated `post_with_id`s refused because the id is a remembered acked id (ER6) — a
+    /// reused id from another primary, or a stale re-delivery. Detection: never a re-sync.
+    refused_acked: AtomicU64,
     /// `Some` for a persistent (WAL-backed) board; `None` for a transient one.
     wal: Option<WalWriter>,
 }
@@ -136,7 +171,7 @@ impl BoardStore {
     /// A WAL-backed board: replays `path` (creating it if absent), recovering all live (claimable)
     /// facts and fencing `next_id`. `checkpoint_every` appends between `fdatasync`s.
     pub fn persistent(path: impl AsRef<Path>, checkpoint_every: u64) -> Result<Self, BlackboardError> {
-        let (wal, live, max_id) = WalWriter::open(path.as_ref(), checkpoint_every)?;
+        let (wal, Replayed { live, max_id, tombstones }) = WalWriter::open(path.as_ref(), checkpoint_every)?;
         let store = Self::with_wal(Some(wal));
         // A WAL that names ids fences at its highest + 1; one that names none keeps the fresh base
         // `with_wal` gave it (a deleted WAL must not recycle ids, ER3).
@@ -145,6 +180,7 @@ impl BoardStore {
         }
         {
             let mut g = store.inner.lock();
+            g.tombstones = tombstones;
             for (id, attributes, payload) in live {
                 g.available.insert(id, Fact { id, attributes, payload });
                 store.posted.fetch_add(1, Ordering::Relaxed);
@@ -158,7 +194,7 @@ impl BoardStore {
     /// the in-process mark moving on by 1 024 — and left so: one constructor, one place the base is set.
     fn with_wal(wal: Option<WalWriter>) -> Self {
         Self {
-            inner: Mutex::new(BoardInner { available: BTreeMap::new(), inflight: HashMap::new() }),
+            inner: Mutex::new(BoardInner { available: BTreeMap::new(), inflight: HashMap::new(), tombstones: Tombstones::default() }),
             // No id history yet: start past every id an earlier life could have issued (ER3).
             next_id: AtomicU64::new(fresh_id_base()),
             posted: AtomicU64::new(0),
@@ -168,6 +204,7 @@ impl BoardStore {
             acked: AtomicU64::new(0),
             released: AtomicU64::new(0),
             requeued: AtomicU64::new(0),
+            refused_acked: AtomicU64::new(0),
             wal,
         }
     }
@@ -213,16 +250,94 @@ impl BoardStore {
         }
     }
 
-    /// Apply a fact under its ORIGINAL id (replication / WAL replay — later phases), fencing
-    /// `next_id` past it so a promoted secondary never re-issues a live id.
+    /// Apply a fact under its ORIGINAL id (replication), fencing `next_id` past it. With
+    /// [`fence_past`](Self::fence_past) this keeps the rule that **an issued id is never reissued,
+    /// live or acked** (ER6, R11-04).
+    ///
+    /// An id this board holds already is a no-op (a re-delivery, or a snapshot re-posting a fact the
+    /// WAL restored). An id it remembers acked is **refused**: nothing is applied or logged, it is
+    /// counted in [`refused_acked`](Self::refused_acked), and `Ok` is returned — a mirror must not
+    /// bring back a completed fact (ER6). An ack that lands between the check and the insert wins:
+    /// the fact is not inserted and an `Ack` follows its `Post` in the log.
     pub fn post_with_id(&self, id: u64, attributes: BTreeMap<String, String>, payload: Bytes) -> Result<(), BlackboardError> {
-        self.next_id.fetch_max(id + 1, Ordering::Relaxed);
+        self.apply_with_id(id, attributes, payload).map(|_| ())
+    }
+
+    /// [`post_with_id`](Self::post_with_id), saying what it did — the refusal decided under the
+    /// same lock that checks it, so a caller never counts an id refused that was applied (review
+    /// round 2: a separate `remembers_acked` read could race an eviction from the memory).
+    pub(crate) fn apply_with_id(&self, id: u64, attributes: BTreeMap<String, String>, payload: Bytes) -> Result<PostOutcome, BlackboardError> {
+        self.next_id.fetch_max(id.saturating_add(1), Ordering::Relaxed);
+        {
+            let g = self.inner.lock();
+            if g.tombstones.contains(id) {
+                drop(g);
+                self.refused_acked.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(id, "blackboard: refused a replicated fact under an id this board remembers acked");
+                return Ok(PostOutcome::Refused);
+            }
+            if g.available.contains_key(&id) || g.inflight.contains_key(&id) {
+                return Ok(PostOutcome::Held);
+            }
+        }
         if let Some(wal) = &self.wal {
             wal.append(&WalRecord::Post { id, attributes: attributes.clone(), payload: payload.clone() })?;
         }
-        self.inner.lock().available.insert(id, Fact { id, attributes, payload });
+        let acked_meanwhile = {
+            let mut g = self.inner.lock();
+            let acked = g.tombstones.contains(id);
+            if !acked {
+                g.available.insert(id, Fact { id, attributes, payload });
+            }
+            acked
+        };
+        if acked_meanwhile {
+            if let Some(wal) = &self.wal {
+                // Refused, the log replays the fact live — at-least-once, never a loss.
+                wal.append(&WalRecord::Ack { id })?;
+            }
+            return Ok(PostOutcome::Held);
+        }
         self.posted.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+        Ok(PostOutcome::Applied)
+    }
+
+    /// Fence `next_id` at `n` or above (ER6, R11-04): a mirror told the primary's next id never
+    /// issues one the primary already did, though the snapshot named only live ids. When the fence
+    /// moves on a WAL-backed board it is persisted as a lone `Claim { n - 1 }` — set, then logged — a
+    /// record every build folds into the high-water mark and that never changes a fact's liveness
+    /// (compaction keeps it a `Claim`, never a tombstone). Returns whether the fence moved; an `n` at
+    /// or below the current next id changes nothing and logs nothing.
+    pub fn fence_past(&self, n: u64) -> Result<bool, BlackboardError> {
+        let prev = self.next_id.fetch_max(n, Ordering::Relaxed);
+        if prev >= n {
+            return Ok(false);
+        }
+        if let Some(wal) = &self.wal {
+            wal.append(&WalRecord::Claim { id: n - 1 })?;
+        }
+        Ok(true)
+    }
+
+    /// The id this board issues next (ER6 PR B: the fence a digest answer carries).
+    pub(crate) fn mirror_snapshot_next_id(&self) -> u64 {
+        self.next_id.load(Ordering::Relaxed)
+    }
+
+    /// Whether this board remembers `id` as acked (ER6).
+    pub fn remembers_acked(&self, id: u64) -> bool {
+        self.inner.lock().tombstones.contains(id)
+    }
+
+    /// How many acked ids this board remembers (ER6; bounded at 100 000, oldest forgotten first).
+    pub fn acked_memory_len(&self) -> usize {
+        self.inner.lock().tombstones.len()
+    }
+
+    /// Replicated posts refused because their id is a remembered acked id (ER6) — counted, never
+    /// a re-sync: no snapshot can cure a reused id.
+    pub fn refused_acked(&self) -> u64 {
+        self.refused_acked.load(Ordering::Relaxed)
     }
 
     /// **Non-destructive read** (Linda `rd`): every currently-claimable fact matching `predicate`.
@@ -266,9 +381,14 @@ impl BoardStore {
     /// **Terminal ack**: the claimed fact was consumed — it is gone for good. The exactly-once dedup
     /// point: a duplicate ack is a `NotFound`, never a second effect.
     pub fn ack(&self, id: u64) -> Result<(), BlackboardError> {
-        let removed = self.inner.lock().inflight.remove(&id).is_some();
-        if !removed {
-            return Err(BlackboardError::NotFound);
+        {
+            let mut g = self.inner.lock();
+            if g.inflight.remove(&id).is_none() {
+                return Err(BlackboardError::NotFound);
+            }
+            // Remembered under the lock the claim state is under (ER6): a mirror's snapshot told
+            // this id cannot also be told it is live.
+            g.tombstones.insert(id);
         }
         #[cfg(test)]
         self.between_append_and_apply();
@@ -355,7 +475,38 @@ impl BoardStore {
         Ok(())
     }
 
-    /// Snapshot of every live fact (claimable + in-flight) — the secondary's initial sync source.
+    /// The mirror's sync source (ER6): every live fact, the next id, and the remembered acked ids,
+    /// under one lock — `next_id` read after the facts, so it is past every id they name.
+    pub(crate) fn mirror_snapshot(&self) -> MirrorSnapshot {
+        let g = self.inner.lock();
+        let facts = g.available.values().cloned().chain(g.inflight.values().map(|i| i.fact.clone())).collect();
+        let acked = g.tombstones.ranges();
+        drop(g);
+        MirrorSnapshot { facts, next_id: self.next_id.load(Ordering::Relaxed), acked }
+    }
+
+    /// The live-set digest (ER6 PR B): how many live facts, and the xor of each id's
+    /// [`digest_mix`], skipping `exclude` (a mirror's unvouched facts).
+    pub(crate) fn live_digest(&self, exclude: &std::collections::HashSet<u64>) -> (u64, u64) {
+        let g = self.inner.lock();
+        let mut count = 0u64;
+        let mut mix = 0u64;
+        for id in g.available.keys().chain(g.inflight.keys()) {
+            if !exclude.contains(id) {
+                count += 1;
+                mix ^= digest_mix(*id);
+            }
+        }
+        (count, mix)
+    }
+
+    /// Every live fact id (claimable + in-flight).
+    pub(crate) fn live_ids(&self) -> Vec<u64> {
+        let g = self.inner.lock();
+        g.available.keys().chain(g.inflight.keys()).copied().collect()
+    }
+
+    /// Snapshot of every live fact (claimable + in-flight).
     pub fn snapshot_live(&self) -> Vec<Fact> {
         let g = self.inner.lock();
         g.available
@@ -367,15 +518,24 @@ impl BoardStore {
 
     /// **Mirror-side terminal**: drop fact `id` (consumed on the primary) from this mirror,
     /// WAL-ing the `Ack` so the mirror's own replay agrees. Returns whether it was present.
+    ///
+    /// **Since ER6 the id is remembered as acked whether or not the fact was present**, so a later
+    /// `post_with_id` of it is refused (an `Ack` that overtook its `Post`, a snapshot's tombstone for
+    /// a fact this mirror never held). The `Ack` is logged when the fact was present or the id is new
+    /// to the memory — a re-sync re-applying known tombstones writes nothing; `stats().acked` counts
+    /// only a fact removed.
     pub fn discard(&self, id: u64) -> Result<bool, BlackboardError> {
-        let removed = {
+        let (removed, fresh) = {
             let mut g = self.inner.lock();
-            g.available.remove(&id).is_some() || g.inflight.remove(&id).is_some()
+            let removed = g.available.remove(&id).is_some() || g.inflight.remove(&id).is_some();
+            (removed, g.tombstones.insert(id))
         };
+        if (removed || fresh)
+            && let Some(wal) = &self.wal
+        {
+            wal.append(&WalRecord::Ack { id })?;
+        }
         if removed {
-            if let Some(wal) = &self.wal {
-                wal.append(&WalRecord::Ack { id })?;
-            }
             self.acked.fetch_add(1, Ordering::Relaxed);
         }
         Ok(removed)
@@ -1175,6 +1335,156 @@ mod tests {
         bytes.extend_from_slice(&999u16.to_le_bytes());
         std::fs::write(&path, &bytes).unwrap();
         assert!(BoardStore::persistent(&path, 1).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── ER6: the acked-id memory and the id fence ──
+
+    /// ER6 (R11-01): the acked ids a board remembers survive a reopen and a compaction — those `ack`
+    /// recorded and those `discard` recorded for a fact it never held — and a live fact stays live.
+    #[test]
+    fn tombstones_survive_reopen_and_compaction() {
+        let path = temp_wal("tombstones-reopen");
+        let (done, live, foreign) = {
+            let store = BoardStore::persistent(&path, 1).unwrap();
+            let done = store.post(surplus("1", "1.0"), Bytes::from("done")).unwrap();
+            let live = store.post(surplus("2", "1.0"), Bytes::from("live")).unwrap();
+            assert_eq!(claim_one(&store, &Predicate::new().eq("feeder", "1")).id, done);
+            store.ack(done).unwrap();
+            let foreign = live + 1_000;
+            assert!(!store.discard(foreign).unwrap(), "absent, and remembered anyway");
+            assert!(store.remembers_acked(done) && store.remembers_acked(foreign));
+            (done, live, foreign)
+        };
+        for round in ["reopen", "compaction"] {
+            let store = BoardStore::persistent(&path, 1).unwrap();
+            assert!(store.remembers_acked(done), "{round}: the acked id is remembered");
+            assert!(store.remembers_acked(foreign), "{round}: the discarded id is remembered");
+            assert!(!store.remembers_acked(live), "{round}: a live id is not a tombstone");
+            let ids: Vec<u64> = store.read(&Predicate::new()).iter().map(|f| f.id).collect();
+            assert_eq!(ids, vec![live], "{round}: the live fact stays live");
+            store.post_with_id(done, surplus("1", "1.0"), Bytes::from("back")).unwrap();
+            assert_eq!(store.refused_acked(), 1, "{round}: a remembered id is refused");
+            assert_eq!(store.read(&Predicate::new()).len(), 1);
+            store.compact().unwrap();
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ER6 (correction 3): a WAL an older build wrote can re-post an id after its `Ack`. Replay holds
+    /// it live; the fold does not keep it a tombstone, so a compaction (tombstones before `Post`s)
+    /// cannot kill it either.
+    #[test]
+    fn a_re_posted_id_stays_live_through_compaction() {
+        let path = temp_wal("repost");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"MBBWAL");
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        for rec in [
+            WalRecord::Post { id: 5, attributes: surplus("1", "1.0"), payload: Bytes::from("a") },
+            WalRecord::Ack { id: 5 },
+            WalRecord::Post { id: 5, attributes: surplus("1", "1.0"), payload: Bytes::from("b") },
+            WalRecord::Ack { id: 6 },
+        ] {
+            rec.encode(&mut bytes);
+        }
+        std::fs::write(&path, &bytes).unwrap();
+        for round in ["open", "after compaction"] {
+            let store = BoardStore::persistent(&path, 1).unwrap();
+            let ids: Vec<u64> = store.read(&Predicate::new()).iter().map(|f| f.id).collect();
+            assert_eq!(ids, vec![5], "{round}");
+            assert!(!store.remembers_acked(5) && store.remembers_acked(6), "{round}");
+            store.compact().unwrap();
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ER6 (R11-04, D6d): `fence_past` moves the id fence and persists it as a lone `Claim`, which
+    /// survives a compaction and a reopen *as a fence and not as a tombstone*; an `n` below the
+    /// board's own base (ER3) changes nothing and logs nothing.
+    #[test]
+    fn fence_past_persists_as_a_claim_not_a_tombstone() {
+        let path = temp_wal("fence");
+        let (first, fence) = {
+            let store = BoardStore::persistent(&path, 1).unwrap();
+            let first = store.post(surplus("1", "1.0"), Bytes::from("x")).unwrap();
+            let len = std::fs::metadata(&path).unwrap().len();
+            assert!(!store.fence_past(first).unwrap(), "below the next id: no move");
+            assert!(!store.fence_past(1).unwrap(), "below the board's own base: no move");
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), len, "and nothing logged");
+            let fence = first + 50;
+            assert!(store.fence_past(fence).unwrap());
+            assert!(!store.remembers_acked(fence - 1));
+            (first, fence)
+        };
+        for round in ["reopen", "compaction"] {
+            let store = BoardStore::persistent(&path, 1).unwrap();
+            assert!(!store.remembers_acked(fence - 1), "{round}: a fence is not a tombstone");
+            assert_eq!(store.read(&Predicate::new()).len(), 1, "{round}: the live fact {first} stays");
+            store.compact().unwrap();
+        }
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        let next = store.post(surplus("2", "1.0"), Bytes::new()).unwrap();
+        assert!(next >= fence, "the reopened board issued {next}, below its fence {fence}");
+        // A replicated fact under the fence id after all: it applies, and stays live across reopen.
+        store.post_with_id(fence - 1, surplus("3", "1.0"), Bytes::new()).unwrap();
+        drop(store);
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        assert_eq!(store.read(&Predicate::new().eq("feeder", "3")).len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ER6: a replicated post of an id this board holds is a no-op — one fact, one `Post` in the log.
+    #[test]
+    fn a_re_delivered_post_is_applied_once() {
+        let path = temp_wal("redelivered");
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        store.post_with_id(9, surplus("1", "1.0"), Bytes::from("x")).unwrap();
+        let len = std::fs::metadata(&path).unwrap().len();
+        store.post_with_id(9, surplus("1", "1.0"), Bytes::from("x")).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), len);
+        assert_eq!(store.stats().posted, 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ER6 (correction 6): a tombstone is logged once — a re-applied known tombstone writes nothing.
+    #[test]
+    fn a_known_tombstone_is_logged_once() {
+        let path = temp_wal("tombstone-once");
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        store.discard(77).unwrap();
+        let len = std::fs::metadata(&path).unwrap().len();
+        for _ in 0..3 {
+            store.discard(77).unwrap();
+        }
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), len);
+        assert_eq!(store.stats().acked, 0, "no fact was removed");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Review N7: a compaction keeps exactly the newest `COMPACTION_TOMBSTONES` and forgets the
+    /// older ones at the reopen.
+    #[test]
+    fn compaction_keeps_exactly_the_newest_tombstones() {
+        use crate::wal::COMPACTION_TOMBSTONES;
+        let path = temp_wal("newest-tombstones");
+        let extra = 10u64;
+        let first = {
+            let store = BoardStore::persistent(&path, 100_000).unwrap();
+            let first = store.post(surplus("1", "1.0"), Bytes::new()).unwrap() + 1;
+            for id in first..first + COMPACTION_TOMBSTONES as u64 + extra {
+                store.discard(id).unwrap();
+            }
+            store.compact().unwrap();
+            first
+        };
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        assert_eq!(store.acked_memory_len(), COMPACTION_TOMBSTONES);
+        for id in first..first + extra {
+            assert!(!store.remembers_acked(id), "{id}: older than the kept tombstones");
+        }
+        assert!(store.remembers_acked(first + extra));
+        assert!(store.remembers_acked(first + COMPACTION_TOMBSTONES as u64 + extra - 1));
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -73,6 +73,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`membership_governor::governed_groups`), read fleet-wide by the gateway and per node by the watcher.
   *Check:* after a drain, `GET /gateway/kv/keys?prefix=gcap/{group}/` lists no key ending in the drained node.
 
+- **A promoted blackboard does not bring back, or reuse, a completed fact** (engineering review ER6, R11-01 and
+  R11-04). A mirror's sync only added the snapshot's live facts, so a persistent mirror that was away while the primary
+  acked a fact restored it from its own WAL, kept it, and served it again after a promotion; and its id fence followed
+  live ids only, so a promoted mirror reissued an id the old primary had acked. The primary now remembers acked ids
+  (100 000 in memory, the newest 16 384 kept through compaction as lone `Ack`s) and the snapshot ends with a trailer —
+  the primary's next id and its acked ids as runs — which an older mirror ignores. A mirror discards what the primary
+  names acked, never what the snapshot merely lacks (a fact it cannot vouch for is kept and counted), and fences its
+  ids, persisted as a lone `Claim`. A running mirror compares a digest with the primary's every three `cap_refresh`
+  and re-syncs after four consecutive mismatches (about two minutes at the default 10 s; backed off up to 32 probes
+  while re-syncs repair nothing), so a lost replicated `Post`
+  or `Ack` is repaired without a restart; a trailer naming more ids than a board remembers, or a next id above 2^53,
+  is refused. New counters
+  `Blackboard::{mirror_retired, mirror_unvouched, mirror_refused_acked, mirror_digest_resyncs}`; new
+  `BoardStore::{fence_past, remembers_acked, acked_memory_len, refused_acked}`. *Behaviour change* (public
+  `BoardStore` methods): `discard` remembers an id it did not hold, `post_with_id` is a no-op for a held id and refuses
+  a remembered acked one (`deprecations.md` §136). WAL v1 and the RPC kinds unchanged; mixed versions are safe.
+- **A promoted tuple-space mirror does not reissue an acked id** (engineering review ER6-T, the fence half). The
+  mirror's fence followed `Put`s only, so a compacted primary's `[Put 0, Ack 2]` left it able to issue 1 again; it now
+  fences on every record id, and a transient primary's last state chunk ends with a lone `Take` naming its last issued
+  id (a `Take`, which changes no liveness when a mirror applies it and an older mirror ignores; persisted just after
+  its item's own `Put`, it can requeue that item once on a restart). ER6-T's other forms are not built.
 - **A restarted tuple space or blackboard no longer reissues ids** (engineering review ER3, R4-01). A space with no id
   history — transient (`persist: false`, the default), or a WAL that is missing or empty — started its ids at 0, so after
   a restart a `TupleConsumer` committed new work under an `operation_id` (`tuple/{ns}/{stage}/{id}`) the destination

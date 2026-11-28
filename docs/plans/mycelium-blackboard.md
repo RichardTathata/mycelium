@@ -93,6 +93,13 @@ claims re-queue). Roles, failover, election, and gateway routing are reused
 from the tuple-space pattern verbatim — primary discovered by capability
 advertisement, secondary promotes on evaporation.
 
+*Amended 2026-11-28 (engineering review ER6):* "snapshot-on-join + live
+replication" kept a mirror complete only by addition — a returning mirror kept a
+fact acked while it was away, and a promoted one could reissue an acked id. The
+snapshot now carries the primary's acked ids and next id, a mirror retires only
+what the primary names acked (never what the snapshot lacks) and fences its ids,
+and a digest probe repairs lost replication (`docs/features/blackboard.md`).
+
 Predicate language: start with the capability attribute-filter grammar
 (equality + presence), not unification. It is already implemented, already
 understood by users, and covers trigger conditions; full structural matching
