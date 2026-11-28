@@ -2217,6 +2217,39 @@ mod tests {
         assert!(other_after > other_before, "the requests made after the waiter left were folded ({other_before} → {other_after} folds on other threads)");
     }
 
+    /// **A fold that asks for its own fold, on the thread that holds it, is a request, not a hang** (the review of the
+    /// hand-over, 2026-11-28). A waiter holds the fold; its first two folds call [`refresh`] from inside the fold, on its
+    /// own thread. Each nested call records a request and returns at once, and the holder folds once more for it: three
+    /// folds, and the waiter returns. Seen failing first on `cd3cdec2`: in the second fold the holder had offered the run
+    /// (its ticket was answered), the nested call accepted its own thread's offer and waited for itself to hand it over
+    /// ("the waiter did not return in 10 s").
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fold_that_asks_for_its_own_fold_on_the_holding_thread_returns() {
+        let agent = crate::GossipAgent::new(NodeId::new("127.0.0.1", crate::test_util::alloc_port()).unwrap(), crate::config::GossipConfig::default());
+        let ctx = Arc::clone(agent.task_ctx_for_tests());
+        let folds = Arc::new(AtomicU64::new(0));
+        let (f, c) = (Arc::clone(&folds), Arc::downgrade(&ctx));
+        ctx.identity_ledger.fold_plant.store(Some(Arc::new(Box::new(move || {
+            if f.fetch_add(1, Ordering::SeqCst) < 2 && let Some(c) = c.upgrade() {
+                refresh(&c);
+            }
+        }))));
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let c2 = Arc::clone(&ctx);
+        std::thread::spawn(move || {
+            let ticket = fold_ticket(&c2);
+            while !refresh_answers(&c2, ticket) {
+                std::thread::yield_now();
+            }
+            let _ = done_tx.send(());
+        });
+        let returned = done_rx.recv_timeout(std::time::Duration::from_secs(10));
+        let n = folds.load(Ordering::SeqCst);
+        ctx.identity_ledger.fold_plant.store(None);
+        assert!(returned.is_ok(), "the waiter did not return in 10 s: a nested call waited for its own thread ({n} folds)");
+        assert_eq!(n, 3, "each nested call's request was folded, once");
+    }
+
     /// **#805's confirm round N3, under the decision of 2026-11-17: a node keeping more than the budget at once is still
     /// refused by name, once per certificate.** A node's 32 kept certificates are journaled; a 33rd kept beside them,
     /// offered on fold after fold, is refused, warned and counted once, and no compaction runs: nothing in the journal

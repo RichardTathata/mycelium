@@ -17,9 +17,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that found no fold running ran it. It then kept folding while any other caller asked. With requests every few µs and
   a fold taking milliseconds it never returned, though its own fold had run. It now offers the fold once its own is
   answered, and the next caller that asks takes it over (`SingleFlight::run_for`). It returns within two folds of its
-  own under a steady stream of requests, and no request goes unfolded. A background fold (the identity watcher's, the
-  maintenance tick's) that takes over waits at most for the fold in progress. No `deprecations.md` section: no caller is
-  answered differently or later than before.
+  own under a steady stream of requests, and no request goes unfolded. One thing changes for the background callers
+  (the identity watcher, the maintenance tick). When one asks while such a caller offers the fold, it now waits for at
+  most one fold, which may start after it asked, and then runs the fold itself. Before, it returned at once. A call
+  made from inside a fold, on the thread running it, only records a request. No `deprecations.md` section: no answer
+  changes, and no ticketed caller is answered later than before.
 - **A gateway sends an unanswered cancel-forward again** (unreleased code: I4's cancel-forward; identity-and-lifecycle
   §9 O13, the maintainer's decision of 2026-11-22; found on #824, where behind about 12 000 concurrent mints the
   provider's stop came about 25 s after the cancel in 4 runs of 9). The forward is a best-effort signal on the

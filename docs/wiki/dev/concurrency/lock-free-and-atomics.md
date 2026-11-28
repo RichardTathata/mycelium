@@ -99,11 +99,17 @@ the run once a pass has answered its ticket. The next caller that finds it held 
 `running` ever being released**. The holder checks for an acceptance *before* it takes the request bit, so it never
 consumes a request it will not run. It withdraws an unaccepted offer before it releases, so the release-then-look
 handshake above is unchanged. The guarantees: a ticketed holder returns after the pass it is in once someone has
-accepted, and so within two passes of the one that answered it under a steady asker. It runs a further pass only when a
-request lands in the nanoseconds between its withdrawal and its release and nobody else takes the run. No request is
-left unrun, because the taker runs from the request bit as it was left. A plain caller is unchanged except that, when it
-finds a ticketed holder offering, it waits at most for that holder's current pass and then holds the run itself. A pass
-must not call its own fold's `run_for` on the holding thread (it would accept its own offer); none does. Gates:
+accepted, and so within two passes of the one that answered it under a steady asker. It runs a further pass only
+when an asker's `running` swap lands before the holder's release and that asker's accept CAS lands after the holder
+withdrew its offer. That asker then returns, the holder's re-check sees its request, and the holder re-takes the run,
+unless another caller has taken it. No request is left unrun, because the taker runs from the request bit as it was
+left. A plain caller is unchanged with one exception. When it finds a ticketed holder offering, it waits for at most
+one of that holder's passes, which may start after the acceptance, and then holds the run itself. **A call on the
+holding thread only asks.** A pass that called its own fold's `run` or `run_for` would otherwise accept its own
+thread's offer and wait for itself. Each thread therefore records the runs it holds (a thread-local `HELD`, pushed on
+taking or being handed the run, popped on handing it on or releasing it). A call that finds its run there sets `again`
+and returns, and the holder runs that request after the pass (gate
+`a_fold_that_asks_for_its_own_fold_on_the_holding_thread_returns`, seen hanging first on `cd3cdec2`). Gates:
 `a_ticketed_holder_hands_the_run_to_an_asker_once_answered` (`single_flight`) and
 `a_waiter_holding_the_fold_leaves_when_answered_while_another_thread_asks` (`revocation`), each seen failing first on
 `01bb75b2`, and the pin `an_asker_that_accepts_as_the_holder_ends_is_handed_the_run`.

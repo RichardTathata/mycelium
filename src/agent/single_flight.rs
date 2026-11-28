@@ -11,8 +11,8 @@
 //! ([`SingleFlight::run_for`]: `revoke_key`, `change_roots`) promises only to ask and wait for its own answer: once a
 //! pass has answered its ticket it **offers** the run, and the next caller that asks while it holds it **accepts** and
 //! is handed the run whole (`running` is never released between the two, and the request bit is left for the taker), so
-//! the ticketed caller returns after the pass it is in. If nobody asks, the request bit empties and it leaves as any
-//! holder does.
+//! the ticketed caller returns after at most one more pass (the one it is in, or is about to start). If nobody asks,
+//! the request bit empties and it leaves as any holder does.
 //!
 //! Three defects this replaces:
 //! - **A livelock** (2026-11-21, #822). A waiter used to accept only a run it made itself. While another thread's run
@@ -39,12 +39,21 @@
 //! A request made while a pass panics waits for the next call: unwinding skips the holder's re-check of `again`
 //! (the guard still releases `running`, or hands it to an asker that accepted, so that next call runs).
 //!
-//! **A pass must not call its own fold's `run_for` on the thread that holds it**: it would accept its own offer and
-//! wait for itself. No pass does (a test's plant calls `refresh_answers` from inside a plain holder's pass, which makes
-//! no offer, and returns at once).
+//! **A call on the thread that holds the run is a request, not a wait** (the hand-over's review, 2026-11-28). A pass that
+//! called its own fold's `run` or `run_for` on the holding thread, after its holder had offered the run, would accept
+//! its own thread's offer and wait for itself for ever. Each thread therefore records the runs it holds (`HELD`: pushed
+//! when it takes `running` or is handed it, popped when it hands it on or releases it), and a call that finds `self`
+//! there sets `again` and returns at once: the holder, outside the pass, sees the request and runs it. No pass does
+//! this in the product; a test's plant does (`a_fold_that_asks_for_its_own_fold_on_the_holding_thread_returns`).
 //!
 //! Lock-free (atomics only): no lock-order row.
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+
+thread_local! {
+    /// The runs this thread holds, by address: at most a few (one per fold, nested only through a pass).
+    static HELD: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
 
 const NONE: u8 = 0;
 const OFFERED: u8 = 1;
@@ -80,7 +89,13 @@ struct Holding<'a> {
     armed: bool,
 }
 
-impl Holding<'_> {
+impl<'a> Holding<'a> {
+    /// This thread holds `sf`'s run now (it took `running`, or was handed it): record it.
+    fn new(sf: &'a SingleFlight) -> Self {
+        let _ = HELD.try_with(|h| h.borrow_mut().push(sf.addr()));
+        Holding { sf, armed: true }
+    }
+
     /// End the hold; `true` when the run was handed to an asker that accepted it (then that asker holds it and does
     /// the release-then-look: this caller returns at once).
     fn end(mut self) -> bool {
@@ -101,13 +116,14 @@ impl SingleFlight {
     /// Ask for a run and make it, or leave it to the run in progress. `pass` is one run; it returns whether it ran
     /// whole (`false`: cut short — it answers no ticket — and it asks for another pass itself if it wants one, with
     /// [`Self::ask_again`]). A caller that holds the run keeps running it while anyone asks; one that finds it held by
-    /// a ticketed caller that has offered it takes it over (waiting at most for the pass in progress).
+    /// a ticketed caller that has offered it takes it over (waiting for at most one of that caller's passes, which may start
+    /// after the acceptance). A call on the thread that holds this run only asks.
     pub(crate) fn run(&self, pass: impl FnMut() -> bool) {
         self.run_inner(None, pass);
     }
 
     /// [`Self::run`] for a caller that waits for `ticket`: once a pass has answered it, the caller offers the run to the
-    /// next asker and returns after the pass it is in when one accepts — or when no request is left, as any holder.
+    /// next asker and returns after at most one more pass once one accepts — or when no request is left, as any holder.
     /// Its own request is never left unrun (the taker runs it, or the caller already has), and nor is anyone else's.
     pub(crate) fn run_for(&self, ticket: u64, pass: impl FnMut() -> bool) {
         self.run_inner(Some(ticket), pass);
@@ -115,6 +131,11 @@ impl SingleFlight {
 
     fn run_inner(&self, ticket: Option<u64>, mut pass: impl FnMut() -> bool) {
         self.again.store(true, Ordering::SeqCst);
+        // Called from inside a pass of this run, on the thread that holds it: the request is recorded, and the holder runs
+        // it after the pass (waiting here would be waiting for this thread).
+        if HELD.try_with(|h| h.borrow().contains(&self.addr())).unwrap_or(false) {
+            return;
+        }
         #[cfg(test)]
         if let Some(plant) = BETWEEN_ASK_AND_TRY.with(|p| p.borrow_mut().take()) {
             plant();
@@ -133,7 +154,7 @@ impl SingleFlight {
                 // This call holds the run now (`running` was never released); the request bit is as the holder left it.
                 self.offer.store(NONE, Ordering::SeqCst);
             }
-            let hold = Holding { sf: self, armed: true };
+            let hold = Holding::new(self);
             let mut leaving = ticket.is_some_and(|t| self.answered(t));
             loop {
                 if leaving {
@@ -170,6 +191,13 @@ impl SingleFlight {
     /// Withdraw this holder's offer and release `running` — or, when an asker has accepted the offer, hand it the run
     /// (`running` stays set). `true` when handed.
     fn end_hold(&self) -> bool {
+        let addr = self.addr();
+        let _ = HELD.try_with(|h| {
+            let mut h = h.borrow_mut();
+            if let Some(i) = h.iter().rposition(|a| *a == addr) {
+                h.remove(i);
+            }
+        });
         loop {
             match self.offer.load(Ordering::SeqCst) {
                 ACCEPTED => {
@@ -186,6 +214,10 @@ impl SingleFlight {
         }
         self.running.store(false, Ordering::SeqCst);
         false
+    }
+
+    fn addr(&self) -> usize {
+        self as *const Self as usize
     }
 
     /// A run in progress asks for another pass (the identity fold, when the roots changed under it).
