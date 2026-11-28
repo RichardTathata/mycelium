@@ -59,7 +59,16 @@ Design: `docs/plans/mycelium-tuple-space.md`. Key facts:
   joins → B dies) silently lost the pre-join backlog — redundancy looked restored but never
   was. Gate: `succession_chain_late_secondary_joins_promoted_primary` (`tests/failover.rs`),
   which also executes the full ring-driven re-pairing (C pins promoted B, ops through C,
-  C's own promotion) that was previously asserted only from code-reading.
+  C's own promotion) that was previously asserted only from code-reading. **The mirror's id
+  fence covers every record id** (ER6-T fence half, 2026-11-28): `apply_records` fenced only
+  through `put_with_id`, so a compacted primary's `[Put 0, Ack 2]` left a mirror at 1 and a
+  promotion reissued an acked id. `TupleStore::fence_past` (persisted as a lone `Take`, which
+  never terminates an item) runs for `Ack`, `Take` and `Complete`'s old id; the last state
+  chunk ends with a lone `Take { next_id - 1 }`. **Not an `Ack`**, as the design proposed: an
+  `Ack` for the newest id removes it from the mirror when it is live in the same chunk, and
+  marks it acked in the mirror index so its replicated `Put` is refused. ER6-T's other forms
+  (compaction drops `Ack`s, the state chunk carries no acked ids, the mirror index unseeded at
+  restart) are not built.
 - **Discovery-wait is symmetric across the API** (#162, Run 41's API finding): every pipeline
   op (`put`/`put_keyed`/`take`/`take_by_key`/`complete`/`complete_keyed`/`ack`) resolves the
   primary via the bounded blocking path (3× `cap_refresh`) — `BackpressureMode::Raise` means

@@ -84,6 +84,7 @@ the notice.
 | 130 | code or dashboards that assume a governed or electorate group's members never project into `gcap/` or write group-requirement opacity, or that a node left by hand keeps projecting | unreleased (engineering review ER9) | read group providers from `gcap/` as members' own projections; under `abstain_when_opaque` or `count_opaque_as_absent`, expect such members' opacity to count | **No** — a behaviour change only ([§130](#130-a-governed-groups-member-projects-its-provides-and-tracks-its-requires-a-drained-member-stops-an-ineligible-member-does-not-project-unreleased-engineering-review-er9-r10-01)) |
 | 131 | code, tests or dashboards that expect a fresh tuple space or blackboard's ids to start at 0, or to be small | unreleased (engineering review ER3) | treat ids as opaque `u64`s (they stay below 2^53); assert relative to the first id | **No** — a behaviour change only ([§131](#131-a-fresh-tuple-space-or-blackboard-does-not-start-its-ids-at-0-unreleased-engineering-review-er3-r4-01)) |
 | 134 | code or dashboards that expect a second `put_keyed` / `complete_keyed` under one key to replace the first, `taken <= admitted`, or `waiters` to exclude `take_by_key` workers | unreleased (engineering review ER7) | expect a FIFO queue per key; read `taken` as deliveries (redeliveries included); `waiters` now counts keyed waiters | **No** — a behaviour change only ([§134](#134-tuple-space-items-and-workers-under-one-correlation-key-queue-in-arrival-order-taken-counts-each-delivery-once-keyed-workers-count-in-waiters-unreleased-engineering-review-er7--r11-03-r11-10-r11-11)) |
+| TBD-ER6 | code that calls `BoardStore::discard` or `post_with_id` directly and relies on an absent id being forgotten, on a re-post of a held id being logged again, or on a post of an acked id being applied | unreleased (engineering review ER6) | read `remembers_acked` / `refused_acked`; a board that must take an id again needs a new id, which is the rule | **No** — a behaviour change only ([§TBD-ER6](#tbd-er6-a-blackboard-remembers-the-ids-it-acked-and-a-mirror-acts-on-them-unreleased-engineering-review-er6-r11-01-r11-04)) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -5968,3 +5969,39 @@ primary. An application that relied on a same-key put replacing the queued item 
 - **Code:** `mycelium-tuple-space/src/store.rs` (`StageInner`, `dispatch_keyed`, `take_by_key`,
   `prune_keyed_waiters`). Tests: `mycelium-tuple-space/tests/keyed_join.rs`, `store.rs` (`a_requeued_keyed_item_*`,
   `a_mirror_keeps_two_same_key_records`, `two_waiters_on_one_key_are_both_served`, …).
+
+## §TBD-ER6. A blackboard remembers the ids it acked, and a mirror acts on them (unreleased, engineering review ER6, R11-01, R11-04)
+
+This applies to `mycelium-blackboard`: every board, and the public `BoardStore` methods a mirror uses.
+
+**Before.** A board forgot an acked id once the fact was gone. A mirror's sync added the snapshot's live facts and
+removed nothing, so a persistent mirror that returned from its own WAL kept a fact the primary acked in its absence and
+served it again after a promotion; its id fence followed live ids only, so a promoted mirror could reissue an id the
+old primary had acked. `BoardStore::discard(id)` of an absent id did nothing; `post_with_id` of a held id appended
+another `Post`; `post_with_id` of any id applied it.
+
+**Now.** A board remembers up to 100 000 acked ids (recorded by `ack` and `discard`), rebuilt from the WAL at open and
+kept through a compaction for the newest 16 384, written as lone `Ack` records before the `Post`s. The `snapshot` RPC's
+answer ends with a trailer — `[u8 1][u64 next_id][u32 n] n × ([u64 start][u32 len])` — and a mirror discards the facts
+it names acked, then fences its ids at `next_id` (`BoardStore::fence_past`, persisted as a lone `Claim`). A fact the
+snapshot lacks and does not name is kept. `discard` of an absent id remembers it (logging the `Ack` the first time);
+`post_with_id` of a held id is a no-op, and of a remembered acked id is refused — nothing applied, `Ok` returned, and
+counted in `refused_acked`. A mirror probes the primary's digest every three `cap_refresh` (a `snapshot` request with
+body `[1]`) and re-syncs on a settled mismatch.
+
+**Mixed versions.** An older mirror decodes a new snapshot and ignores the trailer; a new mirror facing an older
+primary sees no trailer and only adds, as before; an older primary ignores the probe's body and answers a full
+snapshot, which the mirror applies. WAL v1 is unchanged — a lone `Ack` or `Claim` was already valid and an older build
+folds it as nothing but the high-water mark — so a downgrade opens the file; it then forgets the tombstones at its next
+compaction. **The limit:** an ack older than the memory is forgotten
+([`what-is-proven.md#board-failover-retires-acked`](../operations/what-is-proven.md#board-failover-retires-acked)).
+
+**Will the compiler tell me?** No — the signatures are unchanged and the new methods are additive.
+
+- ***Check:*** after a mirror returns, `Blackboard::mirror_retired()` counts what it discarded and
+  `mirror_unvouched()` what it kept unvouched; `mirror_refused_acked()` stays 0 in a fleet whose primaries do not
+  share ids.
+- **Code:** `mycelium-blackboard/src/store.rs` (`post_with_id`, `discard`, `fence_past`, `mirror_snapshot`),
+  `wal.rs` (`Tombstones`, `fold_wal`, compaction), `rpc.rs` (`snapshot_to_bytes`, `dec_snapshot_resp`), `lib.rs`
+  (`apply_snapshot`, `probe_primary`). Tests: `mycelium-blackboard/tests/board_failover.rs`, and the ER6 tests in each
+  of those files.

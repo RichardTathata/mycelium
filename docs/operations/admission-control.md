@@ -31,7 +31,8 @@ everywhere, but it does not carry the count — its encoding is fixed).
 | `BoardStats.rejected` | `Blackboard::stats()`, beside `posted`, `claimed`, `acked`, `released`, `requeued` | the count of refused posts |
 
 **What the bound is not.** Replication (`post_with_id`) and WAL replay are not admission and never refuse
-— a bounded board still recovers everything it held. The check and the insert are two steps, so a burst
+for the bound — a bounded board still recovers everything it held. (Since ER6 `post_with_id` refuses one thing: an id
+the board remembers acked, counted in `Blackboard::mirror_refused_acked`; that is the failover rule, not admission.) The check and the insert are two steps, so a burst
 can briefly overshoot the watermark by the number of concurrent posters: a self-imposed bound, not a hard
 one, and the record says which tier that is. A pre-2.8 client reading a refusal from a 2.8 primary sees a
 generic `Rpc` error — the same refusal with less detail, never a false success.
