@@ -582,8 +582,11 @@ large payloads without gossip fan-out.
 No heartbeat counter, no missed-beat logic. One mechanism: capability TTL.
 
 **Why step 5 (`next_id` fence) is necessary:** the old primary assigned IDs from its own
-`AtomicU64`, starting from 0 on its last boot. The secondary starts its own `next_id`
-from 0. After replay, if secondary starts assigning IDs at 0, a new item with `id=5`
+`AtomicU64`, starting from its fresh base on its last boot. The secondary starts its own `next_id`
+from its own fresh base. *(Corrected 2026-11-27, ER3: a store with no id history starts at the wall
+clock's ms × 1024, not at 0 — `fresh_id_base` in `store.rs` — so a restarted transient space does not
+reissue the ids of its previous life; the fence below still decides on failover.)* After replay, if the
+secondary assigned ids below the replayed ones, a new item with `id=5`
 collides with a replayed item that also has `id=5`. The WAL compaction, inflight KV
 keys, and `complete()` records all key on `id` — a collision corrupts them. Setting
 `next_id = max_replayed_id + 1` is a one-line fix with no architectural cost.

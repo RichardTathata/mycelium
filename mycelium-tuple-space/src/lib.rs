@@ -1854,4 +1854,70 @@ mod wal_role_tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// ER3 (R4-01), the mirror's form: a surviving mirror remembers ids as acked or live, and
+    /// `MirrorIndex::admit` refuses both. A transient primary restarted in the same namespace
+    /// reissued ids from 0, so the mirror silently refused its new items — and kept the old payload
+    /// under a reused live id, to serve after a promotion. With a fresh id base the new items land.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restarted_transient_primary_is_not_refused_by_a_mirror_that_saw_its_old_ids_acked() {
+        let mirror = TupleSpace::new(
+            agent().await,
+            TupleConfig {
+                namespace: Arc::from("restarted-primary"),
+                role: TupleRole::Secondary,
+                persist: false,
+                cap_refresh: Duration::from_millis(300),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let put = |id: u64, payload: &'static str| Record::Put { id, stage: Arc::from("s"), payload: Bytes::from(payload), key: None };
+        // The primary's first life: one item acked, one still in flight when it stops.
+        let old = TupleStore::transient(500);
+        let acked = old.put("s", Bytes::from("old acked")).unwrap();
+        let live = old.put("s", Bytes::from("old live")).unwrap();
+        mirror.apply_records(&[put(acked, "old acked"), put(live, "old live"), Record::Ack { id: acked }]);
+        drop(old);
+        // Its second life, from a fresh transient store: two new items.
+        let new = TupleStore::transient(500);
+        let a = new.put("s", Bytes::from("new a")).unwrap();
+        let b = new.put("s", Bytes::from("new b")).unwrap();
+        mirror.apply_records(&[put(a, "new a"), put(b, "new b")]);
+        let store = mirror.store().unwrap();
+        assert_eq!(
+            store.depth(Some("s")).first().map_or(0, |d| d.depth),
+            3,
+            "the old live item and both new items are mirrored (ids {acked}, {live} then {a}, {b})"
+        );
+        mirror.shutdown().await;
+    }
+
+    /// ER3 (R4-01), the in-flight key's form: `tuple/inflight/{ns}/{id}` is keyed on the id, so a
+    /// restarted transient primary that reissued an id cleared its previous life's key on the new
+    /// item's ack. The stale key must stay, for the sweep to judge by its own deadline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stale_inflight_key_of_a_previous_life_is_not_cleared_by_a_new_items_ack() {
+        let agent = agent().await;
+        let cfg = || TupleConfig {
+            namespace: Arc::from("inflight-life"),
+            role: TupleRole::Primary,
+            persist: false,
+            cap_refresh: Duration::from_millis(300),
+            ..Default::default()
+        };
+        let first = TupleSpace::new(Arc::clone(&agent), cfg()).await.unwrap();
+        first.put("s", Bytes::from("old")).await.unwrap();
+        let (old_id, _) = first.take("s", Duration::from_secs(2)).await.unwrap();
+        first.shutdown().await;
+        let stale = format!("tuple/inflight/inflight-life/{old_id}");
+        assert!(agent.kv().get(&stale).is_some(), "the previous life left its in-flight key");
+        let second = TupleSpace::new(Arc::clone(&agent), cfg()).await.unwrap();
+        second.put("s", Bytes::from("new")).await.unwrap();
+        let (new_id, _) = second.take("s", Duration::from_secs(2)).await.unwrap();
+        second.ack(new_id).await.unwrap();
+        assert!(agent.kv().get(&stale).is_some(), "the new item ({new_id}) cleared the old one's key ({old_id})");
+        second.shutdown().await;
+    }
+
 }

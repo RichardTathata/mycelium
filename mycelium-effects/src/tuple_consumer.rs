@@ -83,6 +83,14 @@ impl<D: EffectDestination + 'static> TupleConsumer<D> {
     /// The operation an item is committed under: `tuple/{namespace}/{stage}/{id}`. Stable across
     /// re-deliveries — the tuple id survives lease expiry and a WAL restart — which is what makes
     /// the second apply a replay of the first rather than a new operation.
+    ///
+    /// **The rule it relies on: an id is never reissued to other work.** The destination dedups on
+    /// this id and compares content, so a reused id would make new work with the same bytes
+    /// `Replayed` (no write) and with other bytes `Conflict`. A WAL with history fences past every id
+    /// it held; a space with no id history — transient, or a missing or empty WAL — starts from the
+    /// wall clock (`fresh_id_base`, ER3). **Its assumption:** two fresh starts of one namespace whose
+    /// clocks read within *N*/1024 ms of each other (*N* the ids the earlier one issued) can overlap —
+    /// a clock stepped back, or a device with no real-time clock booting at a repeatable time.
     pub fn operation_id(&self, stage: &str, id: u64) -> OperationId {
         OperationId::new(format!("tuple/{}/{}/{}", self.namespace, stage, id))
     }

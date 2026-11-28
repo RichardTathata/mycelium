@@ -49,6 +49,14 @@ destination.
 - **Not built:** exactly-once at a destination that is not transactional with its dedup row; the composed effect's
   domain leg is carried, not re-verified ([`composed-effect.md`](../design/composed-effect.md) §9); `rusqlite` is
   bundled and quarantined to this crate.
+- **`Replayed` means this operation committed — while the issuer does not reissue the id.** The tuple consumer's
+  `operation_id` is `tuple/{namespace}/{stage}/{id}`, and the destination compares content, not identity: two jobs
+  with the same bytes under one reused id read as one. A tuple space does not reissue an id: a WAL with history fences
+  past every id it held, and a space with no history starts from the wall clock (ER3). **The limit:** two fresh
+  starts of one namespace whose clocks read within *N*/1024 ms of each other (*N* the ids the earlier one issued),
+  or a store recreated in-process within milliseconds after issuing more than 1 024 ids, can overlap, and *N* stores
+  created in one process put the last base about *N* ms ahead of the clock
+  ([the ledger row](../operations/what-is-proven.md#fresh-id-space-not-reissued)).
 - **Evidence:** the ledger rows
   [a composed effect is refused at the destination](../operations/what-is-proven.md#composed-effect-refused-at-destination)
   and [an acknowledgement names its rung](../operations/what-is-proven.md#ack-names-its-rung).

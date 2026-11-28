@@ -73,6 +73,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`membership_governor::governed_groups`), read fleet-wide by the gateway and per node by the watcher.
   *Check:* after a drain, `GET /gateway/kv/keys?prefix=gcap/{group}/` lists no key ending in the drained node.
 
+- **A restarted tuple space or blackboard no longer reissues ids** (engineering review ER3, R4-01). A space with no id
+  history — transient (`persist: false`, the default), or a WAL that is missing or empty — started its ids at 0, so after
+  a restart a `TupleConsumer` committed new work under an `operation_id` (`tuple/{ns}/{stage}/{id}`) the destination
+  already held: the same payload was `Replayed` and acknowledged with no write, a changed one `Conflict` and left in
+  flight. A surviving mirror refused the reused ids silently (and kept the old payload under a reused live id), and a
+  stale `tuple/inflight/{ns}/{id}` key was cleared by the new item's ack. Such a store now starts at the wall clock's
+  ms × 1024 (`fresh_id_base`, through `mycelium::sim_seam`), strictly increasing in-process; a WAL with history fences
+  at its highest id + 1 as before, so a redelivery is still `Replayed`. Ids stay below 2^53. **The assumption:** fresh
+  starts of one namespace whose clocks read within *N*/1024 ms of each other can overlap
+  (`what-is-proven.md#fresh-id-space-not-reissued`). Wire, RPC and WAL unchanged. *Behaviour change:* a fresh space's
+  ids are large and do not start at 0 (`deprecations.md` §131).
 - **A gateway sends an unanswered cancel-forward again** (unreleased code: I4's cancel-forward; identity-and-lifecycle
   §9 O13, the maintainer's decision of 2026-11-22; found on #824, where behind about 12 000 concurrent mints the
   provider's stop came about 25 s after the cancel in 4 runs of 9). The forward is a best-effort signal on the

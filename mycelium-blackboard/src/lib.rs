@@ -1131,4 +1131,33 @@ mod wal_role_tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// ER3 (R4-01), the board's mirror: `MirrorIndex::admit` refuses an id it saw acked or already
+    /// holds. A transient primary restarted in the same namespace reissued ids from 0, so the mirror
+    /// silently refused its new facts. With a fresh id base they land.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restarted_transient_primary_is_not_refused_by_a_mirror_that_saw_its_old_ids_acked() {
+        let bb = Blackboard::new(agent().await, mirror_cfg("restarted-primary", false, temp_wal("unused-restart")))
+            .await
+            .unwrap();
+        let with_id = |id: u64| Fact { id, ..fact(0) };
+        // The primary's first life: one fact acked, one still live when it stops.
+        let old = BoardStore::transient();
+        let acked = old.post(fact(0).attributes, Bytes::from("old acked")).unwrap();
+        let live = old.post(fact(0).attributes, Bytes::from("old live")).unwrap();
+        bb.apply_replicated(&rpc::enc_replicate_post(&with_id(acked)));
+        bb.apply_replicated(&rpc::enc_replicate_post(&with_id(live)));
+        bb.apply_replicated(&rpc::enc_replicate_ack(acked));
+        drop(old);
+        // Its second life, from a fresh transient store.
+        let new = BoardStore::transient();
+        let a = new.post(fact(0).attributes, Bytes::from("new a")).unwrap();
+        let b = new.post(fact(0).attributes, Bytes::from("new b")).unwrap();
+        bb.apply_replicated(&rpc::enc_replicate_post(&with_id(a)));
+        bb.apply_replicated(&rpc::enc_replicate_post(&with_id(b)));
+        let mut ids: Vec<u64> = bb.store().unwrap().read(&Predicate::new()).iter().map(|f| f.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![live, a, b], "the old live fact and both new facts are mirrored");
+        bb.shutdown().await;
+    }
+
 }
