@@ -447,25 +447,19 @@ pub(super) async fn gw_group_leave(
     Json(json!({ "ok": true, "group": q.group })).into_response()
 }
 
-/// Whether `group` is an electorate group (P2 — its electorate a consensus decision, governed for good), or
-/// under a live membership intent (`sys/govern/membership/{group}`, fresh within
-/// `MEMBERSHIP_INTENT_TTL_MS` — the governor's own reading, `emergent::detect_governed_group_conflicts`). Such a
+/// Whether `group` is governed — the one definition, `membership_governor::is_governed` (ER9, D9c): an electorate
+/// group (P2 — its electorate a consensus decision, governed for good), or a group a live membership intent names
+/// (fresh within `MEMBERSHIP_INTENT_TTL_MS`, its group read from the intent's body as the governor reads it). Such a
 /// group's population is governed: who belongs to it decides an election's roster and quorum, so changing it is a
-/// governance act, not a data-plane write. Fleet-wide: an intent `target`ed at one node still governs the group here —
-/// the electorate floor (`declared_electorate_min`) and the conflict detector read it the same way. "Live" lapses: an
-/// intent not re-published within the TTL leaves the group ungoverned (and a future-dated `written_at_ms` reads as
-/// fresh, as it does for the governor).
+/// governance act, not a data-plane write. Read **fleet-wide** (`GovernedFor::Fleet`): an intent `target`ed at one
+/// node still governs the group here, as the conflict detector (`emergent::detect_governed_group_conflicts`) reads it.
+/// The electorate floor (`declared_electorate_min`) also ignores `target`, but reads the intent by its key and under
+/// its own, shorter TTL (`ELECTORATE_INTENT_TTL_MS`), so it is not this definition. "Live" lapses: an intent not re-published within the TTL leaves the group ungoverned (and a
+/// future-dated `written_at_ms` reads as fresh, as it does for the governor).
 #[cfg(feature = "gateway")]
 pub(super) fn is_governed_group(ctx: &Arc<TaskCtx>, group: &str) -> bool {
-    use super::membership_governor::{MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
-    // An electorate group (P2) is governed for good: its membership is fixed at genesis.
-    if super::electorate::view(ctx, group).is_some() {
-        return true;
-    }
-    let key = format!("{MEMBERSHIP_PREFIX}{group}");
-    let Some(bytes) = ctx.kv_state.store.pin().get(key.as_str()).and_then(|e| e.data.clone()) else { return false };
-    let Ok(intent) = mycelium_core::serde_fixint::from_slice::<MembershipIntent>(&bytes) else { return false };
-    mycelium_core::sim_seam::wall_now_ms().saturating_sub(intent.written_at_ms) <= MEMBERSHIP_INTENT_TTL_MS
+    use super::membership_governor::{is_governed, GovernedFor};
+    is_governed(ctx, group, mycelium_core::sim_seam::wall_now_ms(), GovernedFor::Fleet)
 }
 
 /// `/gateway/mesh/group`'s refusal for a governed group: **403** `governed_group`, naming the route that moves a node

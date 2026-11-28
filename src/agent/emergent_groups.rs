@@ -3,11 +3,12 @@
 //!
 //! `define_capability_group` publishes a `CapabilityGroupDef` under
 //! `cap-group/{group}`; the agent-wide `watch_capability_group_definitions`
-//! background task subscribes to both `cap-group/` and `cap/{self}/` and
-//! reconciles whether this node should self-join each emergent group based
-//! on whether its own capabilities match the group's filter.
+//! background task subscribes to `cap-group/`, `cap/{self}/`, this node's own
+//! `grp/{group}/{self}` entries and the membership intents, and reconciles
+//! whether this node should self-join each emergent group based on whether its
+//! own capabilities match the group's filter, and which groups it projects.
 //!
-//! When the node joins, the watcher spawns one consolidated
+//! When the node projects a group, the watcher spawns one consolidated
 //! `run_group_membership_task` per group that internally:
 //! - re-asserts `gcap/{group}/{ns}/{name}/{self}` for every `provides`
 //!   capability on a `GCAP_REASSERT_INTERVAL` ticker — the group-level
@@ -21,12 +22,25 @@
 //! Pre-C3 each provide + each requirement was its own spawned tokio task.
 //! After C3 it is one task per group, regardless of provides/requires count.
 //!
-//! **Governed groups (WS-C elastic sizing).** A group that carries a live
-//! `sys/govern/membership/{group}` intent is owned by the
-//! [`MembershipGovernor`](super::membership_governor): this watcher **defers** to it (see
-//! `governor_owned_groups`) — it neither auto-joins the group on a cap match nor auto-leaves it —
-//! so the governor's `[min, max]` / `drain` can hold against the otherwise-unconditional cap-match
-//! auto-join. When the intent evaporates the group reverts to emergent (un-bounded) membership.
+//! **Governed groups (WS-C elastic sizing; ER9).** A group under a live
+//! `sys/govern/membership/{group}` intent, and every electorate group, is *governed*
+//! (`membership_governor::governed_groups`, the one definition). Its **membership** is not this
+//! watcher's: it neither joins the group on a cap match nor leaves it on a mismatch, so the
+//! [`MembershipGovernor`](super::membership_governor)'s `[min, max]` / `drain` can hold against the
+//! otherwise-unconditional cap-match auto-join (#56). Its **projection** is: the watcher runs the
+//! group's membership task exactly while `grp/{group}/{self}` is live in the store and the
+//! definition's filter matches one of this node's own capabilities — whoever wrote the membership
+//! (the governor, `/gateway/govern/group`, `join_group`, a peer) — and drops it when either stops,
+//! which tombstones the `gcap/` keys and clears the opacity keys. A membership is never stated as a
+//! capability the node does not hold (D9a). When an intent evaporates the group reverts to emergent
+//! membership, and a matching node that is not in `grp/` is written back into it once (`was_governed`).
+//!
+//! **A projection never outlives the membership**, emergent groups included: an emergent group
+//! this node is seen to leave while projecting it (`leave_group`, `DELETE /gateway/govern/group`,
+//! a peer's tombstone) stops being projected and is not rejoined (`left`) until the node is a
+//! member again or the filter or the definition goes, or the node restarts (the set is not
+//! persisted, so a restart rejoins a group left by hand, as before ER9 — and heals a node a
+//! forged tombstone kept out).
 
 use crate::capability::{CapEntry, Capability, CapFilter, CapabilityGroupDef, WiringStatus};
 use crate::node_id::NodeId;
@@ -70,31 +84,53 @@ struct GroupProjection {
     _cancel:  oneshot::Sender<()>,
 }
 
-/// Background task: watches `cap-group/` for emergent group definitions and
-/// keeps this node's `grp/` membership in sync with whether its own
-/// capabilities match each def's filter. See plan section
-/// "`watch_capability_group_definitions` Dual Subscription".
+/// The watcher's wake sources (ER9 item 5). All four feed the one debounce loop; none is a timer — every
+/// refresh of an own advertisement already wakes the watcher, which is what notices an evaporated intent.
+pub(crate) struct WatcherWakes {
+    /// `cap-group/` — a definition written, changed or tombstoned.
+    pub(crate) defs:    watch::Receiver<u64>,
+    /// `cap/{self}/` — this node's own capabilities.
+    pub(crate) own:     watch::Receiver<u64>,
+    /// `grp/` keys ending in `/{self}` — this node's memberships, whoever wrote them: a governed group's
+    /// projection follows them.
+    pub(crate) grp:     watch::Receiver<u64>,
+    /// `sys/govern/membership/` — an intent published, changed or tombstoned: a group becomes governed or not.
+    pub(crate) intents: watch::Receiver<u64>,
+}
+
+/// Background task: watches `cap-group/` for emergent group definitions and keeps this node's
+/// `grp/` membership in sync with whether its own capabilities match each def's filter — for
+/// emergent groups — and its `gcap/` projections in sync with its membership — for governed ones.
+/// See the module doc.
 pub(crate) async fn watch_capability_group_definitions(
     ctx:             Arc<TaskCtx>,
     own_node_id:     NodeId,
-    mut def_rx:      watch::Receiver<u64>,
-    mut own_rx:      watch::Receiver<u64>,
+    wakes:           WatcherWakes,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    // Tracks which emergent groups we are currently cap-joined to AND the
-    // `gcap/` projections we are persisting for each. Dropping a `GroupProjection`
-    // closes its cancel senders, which the persist tasks observe and exit
-    // gracefully via a tombstone.
+    let WatcherWakes { defs: mut def_rx, own: mut own_rx, grp: mut grp_rx, intents: mut intent_rx } = wakes;
+    // Tracks the groups we are projecting — `gcap/` and opacity — emergent and governed alike.
+    // Dropping a `GroupProjection` closes its cancel sender, which the membership task observes
+    // and exits gracefully via a tombstone.
     let mut joined: AHashMap<Arc<str>, GroupProjection> = AHashMap::new();
+    // The groups governed for this node at the last pass, task-local: what tells an intent's
+    // evaporation (governed → emergent) apart from an emergent group the application left by hand.
+    let mut was_governed: AHashSet<Arc<str>> = AHashSet::new();
+    // The emergent groups this node was seen to leave while projecting them (by hand, through a
+    // route, or by a peer's tombstone), task-local: not projected and not rejoined until the node
+    // is a member again, or the filter or the definition goes.
+    let mut left: AHashSet<Arc<str>> = AHashSet::new();
 
     // Initial reconciliation in case definitions or own caps already exist.
-    reconcile_emergent_groups(&ctx, &own_node_id, &shutdown_rx, &mut joined);
+    reconcile_emergent_groups(&ctx, &own_node_id, &shutdown_rx, &mut joined, &mut was_governed, &mut left);
 
     'outer: loop {
         tokio::select! { biased;
             _ = await_shutdown(&mut shutdown_rx) => break 'outer,
-            r = def_rx.changed() => { if r.is_err() { break 'outer; } }
-            r = own_rx.changed() => { if r.is_err() { break 'outer; } }
+            r = def_rx.changed()    => { if r.is_err() { break 'outer; } }
+            r = own_rx.changed()    => { if r.is_err() { break 'outer; } }
+            r = grp_rx.changed()    => { if r.is_err() { break 'outer; } }
+            r = intent_rx.changed() => { if r.is_err() { break 'outer; } }
         }
         // Coalesce burst writes (anti-entropy sync, bulk cap-group push)
         // into a single reconcile pass. See WATCHER_DEBOUNCE_WINDOW.
@@ -103,56 +139,44 @@ pub(crate) async fn watch_capability_group_definitions(
             tokio::select! { biased;
                 _ = await_shutdown(&mut shutdown_rx) => break 'outer,
                 _ = time::sleep_until(deadline) => break,
-                r = def_rx.changed() => { if r.is_err() { break 'outer; } }
-                r = own_rx.changed() => { if r.is_err() { break 'outer; } }
+                r = def_rx.changed()    => { if r.is_err() { break 'outer; } }
+                r = own_rx.changed()    => { if r.is_err() { break 'outer; } }
+                r = grp_rx.changed()    => { if r.is_err() { break 'outer; } }
+                r = intent_rx.changed() => { if r.is_err() { break 'outer; } }
             }
         }
-        reconcile_emergent_groups(&ctx, &own_node_id, &shutdown_rx, &mut joined);
+        reconcile_emergent_groups(&ctx, &own_node_id, &shutdown_rx, &mut joined, &mut was_governed, &mut left);
     }
 
-    // Best-effort: tombstone any memberships we hold so peers see us leave
-    // the emergent groups cleanly. Dropping `joined` also fires the persist
-    // task cancel senders, which tombstone the `gcap/` entries.
-    let exit_groups: Vec<Arc<str>> = joined.keys().cloned().collect();
+    // Best-effort: tombstone the emergent memberships we hold so peers see us leave
+    // the emergent groups cleanly. A governed group's membership is not ours to write
+    // (the governor's, a route's or the application's). "Governed" is read again here,
+    // not taken from the last pass, which can be a debounce window or an evaporation old;
+    // the wall reading goes through the seam and is taken only when there is a projection
+    // to decide on, so a recording with no group holds the reads it held before. Dropping
+    // `joined` also fires the membership tasks' cancel senders, which tombstone the
+    // `gcap/` entries.
+    let governed_now = if joined.is_empty() {
+        AHashSet::new()
+    } else {
+        super::membership_governor::governed_groups(
+            &ctx, now_ms(), super::membership_governor::GovernedFor::Node(&own_node_id),
+        )
+    };
+    let exit_groups: Vec<Arc<str>> = joined.keys().filter(|g| !governed_now.contains(g.as_ref())).cloned().collect();
     for g in exit_groups {
         emit_membership(&ctx, &own_node_id, &g, true);
     }
     drop(joined);
 }
 
-/// Groups that currently carry a fleet **membership intent** applicable to `own` (whole-fleet, or
-/// `target`-ed at this node) and still fresh. Their membership is owned by the
-/// [`MembershipGovernor`](super::membership_governor); the emergent watcher **defers** to it — it
-/// neither auto-joins nor auto-leaves a governed group — so the governor's `[min, max]` / `drain`
-/// can actually hold against the otherwise-unconditional cap-match auto-join. When the intent
-/// evaporates the group drops out of this set and reverts to emergent (un-bounded) membership.
-/// Electorate groups (P2) are in it for good: their membership moves only by a decided step.
-fn governor_owned_groups(ctx: &Arc<TaskCtx>, own: &NodeId, now: u64) -> AHashSet<Arc<str>> {
-    use super::membership_governor::{MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
-    let mut set = AHashSet::new();
-    for (_key, bytes) in scan_prefix_kv(&ctx.kv_state, MEMBERSHIP_PREFIX) {
-        let Ok(intent) = mycelium_core::serde_fixint::from_slice::<MembershipIntent>(&bytes) else {
-            continue;
-        };
-        if now.saturating_sub(intent.written_at_ms) > MEMBERSHIP_INTENT_TTL_MS {
-            continue; // evaporated — not governed
-        }
-        if intent.target.as_ref().is_some_and(|t| t != own) {
-            continue; // targeted at another node — not governed for me
-        }
-        set.insert(Arc::from(intent.group.as_str()));
-    }
-    // An electorate group (P2) is governed for good — it never lapses back to emergent membership, so the
-    // watcher never joins or leaves it on a capability match.
-    for d in super::electorate::all_views(ctx) {
-        set.insert(Arc::from(d.group.as_str()));
-    }
-    set
+/// Whether `grp/{group}/{own}` is live in the store — the LWW truth, read as the connection's
+/// boundary sync reads it (`mycelium-core/src/connection.rs`, `parse_own_grp_key`).
+fn is_live_member(ctx: &TaskCtx, own: &NodeId, group: &str) -> bool {
+    let key = crate::signal::grp_member_key(group, own);
+    ctx.kv_state.store.pin().get(key.as_str()).is_some_and(|e| e.data.is_some())
 }
 
-/// One reconciliation pass: snapshot own caps + every `cap-group/` def, decide
-/// which groups we should be in, and update both `grp/{group}/{self}`
-/// membership and `gcap/{group}/{ns}/{name}/{self}` projections accordingly.
 /// This node's own capabilities, for the group projection: those it has not stopped refreshing. A node
 /// restarted over persisted `cap/` entries it no longer advertises would otherwise join the groups they match and
 /// project a fresh `gcap/` that demand and wiring count (#734's review, finding 3).
@@ -160,11 +184,19 @@ fn own_capabilities(kv_state: &crate::store::KvState, own: &NodeId, now_ms: u64)
     super::capability_ops::own_live_caps_at(kv_state, own, now_ms)
 }
 
+/// One reconciliation pass: snapshot own caps + every `cap-group/` def, decide which groups we
+/// should project, and update `gcap/{group}/{ns}/{name}/{self}` projections accordingly — and,
+/// for **emergent** groups only, the `grp/{group}/{self}` membership too. "Am I a member" is split
+/// from "do I project" (ER9): an emergent group is joined and projected on a filter match; a
+/// governed group is projected while this node is a live member of it and matches the filter,
+/// and its membership is left to whoever governs it.
 fn reconcile_emergent_groups(
-    ctx:         &Arc<TaskCtx>,
-    own:         &NodeId,
-    shutdown_rx: &watch::Receiver<bool>,
-    joined:      &mut AHashMap<Arc<str>, GroupProjection>,
+    ctx:          &Arc<TaskCtx>,
+    own:          &NodeId,
+    shutdown_rx:  &watch::Receiver<bool>,
+    joined:       &mut AHashMap<Arc<str>, GroupProjection>,
+    was_governed: &mut AHashSet<Arc<str>>,
+    left:         &mut AHashSet<Arc<str>>,
 ) {
     // Own capabilities snapshot (used both for filter matching and for the
     // provides decision; we project everything the def specifies, regardless
@@ -190,34 +222,75 @@ fn reconcile_emergent_groups(
         defs.insert(Arc::from(group_name), def);
     }
 
-    // Compute want_joined: every group whose filter is satisfied by at least
-    // one of our own capabilities. One wall reading serves the pass — the own entries' staleness here and the
-    // intents' below — taken where the pass always took it, so a recording holds the reads it held before own
+    // One wall reading serves the pass — the own entries' staleness here and the intents' below —
+    // taken where the pass always took it, so a recording holds the reads it held before own
     // entries were judged (#734's confirm round: a second read in this event-driven pass diverged a replay).
     let now = now_ms();
     let own_caps = own_capabilities(&ctx.kv_state, own, now);
-    let mut want_joined: AHashSet<Arc<str>> = AHashSet::new();
+
+    // The groups whose membership is not this watcher's — the one definition, read for this node
+    // (an intent `target`ed at another node does not govern it here, as the governor reads it).
+    let governed = super::membership_governor::governed_groups(
+        ctx, now, super::membership_governor::GovernedFor::Node(own),
+    );
+
+    // want_projected: every group whose filter one of our own capabilities matches, **while this
+    // node is a member of it** — a projection is the node's statement that it is a member, so it
+    // never outlives the membership (ER9 review). Governed groups: only while `grp/{g}/{self}` is
+    // live (D9a: a join made for the node by an intent, a route or a peer does not make it state a
+    // capability it does not hold, and a member that stops matching stops projecting). Emergent
+    // groups: this watcher writes the membership when it first projects the group (`to_join`);
+    // once projected, a group seen not live — left by hand, through `DELETE /gateway/govern/group`,
+    // or tombstoned by a peer — drops its projection and goes into `left`, and is not rejoined
+    // until the node is a member again or the filter or the definition goes. The one exception is
+    // an evaporation: a group that has just stopped being governed, and this node is not in its
+    // roster (the governor drained it), is written back into it once (item 4) — unless the node
+    // had left it itself.
+    left.retain(|g| defs.get(g).is_some_and(|d| own_caps.iter().any(|c| d.filter.matches(c))));
+    let mut want_projected: AHashSet<Arc<str>> = AHashSet::new();
+    let mut to_join: Vec<Arc<str>> = Vec::new();
     for (group, def) in &defs {
-        if own_caps.iter().any(|c| def.filter.matches(c)) {
-            want_joined.insert(Arc::clone(group));
+        if !own_caps.iter().any(|c| def.filter.matches(c)) { continue; }
+        let member = is_live_member(ctx, own, group);
+        if member { left.remove(group.as_ref()); }
+        if governed.contains(group.as_ref()) {
+            if member { want_projected.insert(Arc::clone(group)); }
+            continue;
         }
+        if left.contains(group.as_ref()) { continue; }
+        let evaporated = was_governed.contains(group.as_ref()) && !member;
+        if !member && joined.contains_key(group.as_ref()) && !evaporated {
+            // Seen to leave: stop projecting, do not rejoin — unless it is a drain. `governed` was
+            // read at the top of the pass and the membership here, so an intent that arrived in
+            // between, and a governor that drained this node on it, would read as a hand leave and
+            // later lose the evaporation rejoin. The intents are read again for this group before it
+            // goes into `left`, under the pass's one wall reading (an intent that new is fresh by it;
+            // no second read, so a recording holds the reads it held before). Governed now: the
+            // projection is dropped and the next pass treats the group as governed. Not tested: the
+            // window lies between two reads of one pass and no test can place a write inside it
+            // deterministically.
+            if !super::membership_governor::is_governed(
+                ctx, group, now, super::membership_governor::GovernedFor::Node(own),
+            ) {
+                left.insert(Arc::clone(group));
+            }
+            continue;
+        }
+        if !member { to_join.push(Arc::clone(group)); }
+        want_projected.insert(Arc::clone(group));
+    }
+    for group in &to_join {
+        emit_membership(ctx, own, group, false);
     }
 
-    // Defer to the MembershipGovernor for any group under a live membership intent: drop it from
-    // want_joined (don't auto-join) — and below, exclude it from the leave sweep (don't auto-leave).
-    // The governor alone then drives that group's membership toward the intent's [min, max] / drain.
-    let governor_owned = governor_owned_groups(ctx, own, now);
-    want_joined.retain(|g| !governor_owned.contains(g.as_ref()));
-
-    // Join newly-matching groups; spawn one consolidated membership task per
+    // Project newly-wanted groups; spawn one consolidated membership task per
     // group (provides + requires handled internally).
-    for group in &want_joined {
+    for group in &want_projected {
         let def      = defs.get(group).expect("present, scanned above");
         let provides = def.provides.clone();
         let requires = def.requires.clone();
 
         if !joined.contains_key(group.as_ref()) {
-            emit_membership(ctx, own, group, false);
             let _cancel = spawn_group_membership(
                 ctx, own, group, &provides, &requires, shutdown_rx,
             );
@@ -226,7 +299,7 @@ fn reconcile_emergent_groups(
             });
             continue;
         }
-        // Already joined — rebuild the membership task only when the def
+        // Already projecting — rebuild the membership task only when the def
         // actually changed.
         let (current_provides, current_requires) = {
             let current = joined.get(group).expect("just checked");
@@ -244,20 +317,24 @@ fn reconcile_emergent_groups(
         });
     }
 
-    // Leave groups we were in but no longer match — either because the def
-    // disappeared or our caps changed. Dropping the `GroupProjection`
-    // tombstones the gcap entries; `emit_membership(leaving = true)` tombstones
-    // `grp/`.
-    // Exclude governor-owned groups: if we're already a member of a now-governed group, leaving is
-    // the governor's call (drain / over-max), not the emergent watcher's — don't tombstone it here.
-    let to_leave: Vec<Arc<str>> = joined.keys()
-        .filter(|g| !want_joined.contains(g.as_ref()) && !governor_owned.contains(g.as_ref()))
+    // Stop projecting groups we no longer want — the def disappeared, our caps stopped matching,
+    // or this node is no longer a member. Dropping the `GroupProjection` tombstones the gcap
+    // entries and clears the opacity keys: for a governed group, that is the tombstone on a
+    // drain. Only an emergent group's membership is tombstoned here
+    // (`emit_membership(leaving = true)`), and not one in `left` (already not a member); a
+    // governed group's is the governor's call (drain / over-max), a route's or the
+    // application's, never this watcher's.
+    let to_drop: Vec<Arc<str>> = joined.keys()
+        .filter(|g| !want_projected.contains(g.as_ref()))
         .cloned()
         .collect();
-    for g in to_leave {
-        emit_membership(ctx, own, &g, true);
+    for g in to_drop {
+        if !governed.contains(g.as_ref()) && !left.contains(g.as_ref()) {
+            emit_membership(ctx, own, &g, true);
+        }
         joined.remove(&g);
     }
+    *was_governed = governed;
 }
 
 /// Spawns the single consolidated membership task for `group` and returns its

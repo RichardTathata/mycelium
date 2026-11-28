@@ -212,7 +212,8 @@ onto the removal ledger (`sys/membership/removed/`, enforced by `NodeId` at the 
 first forecloses the restore). The fleet's default is set once, at genesis (a second refused by
 name, door and acceptor — `electorate::live_default`), and moves only by its holder's retirement to a successor
 (`Retirement::passes_default`, `src/agent/electorate.rs`, #606; `deprecations.md` §34). The governor
-and the emergent watcher leave an electorate group alone. An embedded `grp/` write, or a `POST /gateway/govern/group` move, is refused at the
+and the emergent watcher leave an electorate group's membership alone (the watcher still projects the group's `provides` for a
+member that matches its filter — ER9). An embedded `grp/` write, or a `POST /gateway/govern/group` move, is refused at the
 next proposal, not prevented. Live reconfiguration (versioned electorates with joint consensus) is a later plan.
 
 ## Individual-scope routing: forwarding stays unconditional

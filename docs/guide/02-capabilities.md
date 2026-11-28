@@ -365,7 +365,10 @@ if s.demand_pressure > 2.0 {
 Nodes that share a capability automatically form a named group via `define_capability_group`.
 The library projects their collective capability under `gcap/{group}/{ns}/{name}/{contributor}`
 and handles group-level requirement wiring. One consolidated task per group keeps task count
-O(groups), not O(groups × members).
+O(groups), not O(groups × members). Under a membership intent (or an electorate) the group is
+*governed*: nodes no longer self-join it on a match, but a node projects it exactly while it is a
+member (`grp/{group}/{self}`) **and** matches the filter, whoever made it a member — see
+[governed membership](../features/governed-membership.md).
 
 → The **Emergent GPU Pool** preset in the [Mesh Control UI](../../examples/mesh_control.html) shows a
 20-node worker pool that assembles dynamically and fans out render jobs to all members.

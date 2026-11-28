@@ -47,11 +47,26 @@ goes offline, and a member is killed; the governors self-elect and heal the coun
   `view_not_confident` (under an enforcing control profile), `settling` or `spacing`; otherwise `hold`.
 - **Held at the gateway:** a governed group's filter cannot be redefined through `units/declare`, nor its membership
   changed through `/gateway/mesh/group` (both 403 `governed_group`).
+- **A governed member projects what the group provides** (ER9): while `grp/{group}/{self}` is live and the node
+  matches the definition's filter, it writes `gcap/{group}/…/{self}` for each `provides` and tracks each `requires` as
+  opacity, as an emergent member does — whoever wrote the membership (the governor, `/gateway/govern/group`,
+  `join_group`, a peer). A drained member stops projecting and clears its opacity; a member that does not match the
+  filter does not project. The watcher never writes a governed group's `grp/` entry; when an intent evaporates it
+  writes a matching, drained node back into the roster once. An emergent member that leaves (by hand, through the
+  route, or by a peer's tombstone) stops projecting too, and is not rejoined until it is a member again, or the node
+  restarts (the set is not persisted).
+- **A governed member's group-requirement opacity reaches consensus only by opt-in:** under the default
+  `ConsensusConfig` its votes are unaffected; under `abstain_when_opaque` a member with an unwired `requires` abstains
+  on every ballot, an electorate group's included, up to `max_abstain_ballots`, and under `count_opaque_as_absent` it
+  is counted out of a non-electorate group's quorum.
 - **Not built:** the band is a target the governors reach, not an invariant at every instant — a count can sit
   outside it while moves settle; a group is self-joined by filter, so a node that matches and misbehaves is not kept
   out; in-process `join_group` and `leave_group`, and in-process or gossiped `grp/` writes (the HTTP KV routes refuse `grp/`, 403 `protected_key`), are not checked against governance. The
   governor's eligibility counts fresh `cap/` advertisements only (rule `membership.governed` revision 3), so a dead
   node stops being eligible three refresh intervals after its last refresh.
+- **Not built:** a reader does not check a `gcap/` contributor against `grp/` (ER9's second PR), so in a mixed fleet an
+  older drained node that still projects is still routed to; `grp/` is unsigned, so a peer's forged membership write
+  makes a matching node project, and a forged tombstone stops it ([owner-signed records](../wiki/dev/owner-signed-records.md)).
 - **Evidence:** the [what-is-proven](../operations/what-is-proven.md) ledger's
   [hysteresis row](../operations/what-is-proven.md#hysteresis-control-loops-load-bearing), within scenario C's bounded
   sense.

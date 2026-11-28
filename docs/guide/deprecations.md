@@ -81,6 +81,7 @@ the notice.
 | 126 | a `SystemStats`, `CoreCtx` or `WriterEntry` literal; a direct `run_peer_writer` call; `max_connections_per_source` at 1 per address for nodes running the control lane | unreleased (B1, PR 1) | add the new fields and arguments; a per-source cap of at least 2 per node, or `control_lane = false` | **Yes** for the literals and the call; **no** for the cap — a refused lane falls back to the shared path, counted ([§126](#126-a-control-lane-a-second-connection-per-peer-for-the-closed-set-of-control-kinds-behind-control_lane-on-by-default-max_connections_per_source-must-allow-two-per-node-behind-one-address-unreleased-b1-pr-1)) |
 | 128 | a live log consumer (`subscribe_log`, `GET /gateway/overlay/log/subscribe`, the SDKs' `subscribe_log` / `subscribeLog`) that assumes stamps only rise, or resumes from `entry.hlc + 1` | unreleased (engineering review ER8) | dedupe by what you handled, not by "stamp went up"; resume from `entry.hlc` inclusive | **No** — entries it used to miss now arrive, some with a lower stamp ([§128](#128-a-live-log-subscription-delivers-every-entry-once-a-late-entry-arrives-out-of-stamp-order-unreleased-engineering-review-er8)) |
 | 129 | code that parses `mailbox/` keys itself, or a receiver older than its senders | unreleased (engineering review ER1) | parse `{hlc:016x}` then an optional `/{sender}`; upgrade receivers before or with senders | **No** — an older receiver delivers a new writer's event with `hlc_ts == 0` ([§129](#129-a-mailbox-key-names-its-sender-mailboxtargetkindhlc016xsender-a-consumed-events-delete-is-handed-to-the-wal-unreleased-engineering-review-2026-11-26-er1)) |
+| 130 | code or dashboards that assume a governed or electorate group's members never project into `gcap/` or write group-requirement opacity, or that a node left by hand keeps projecting | unreleased (engineering review ER9) | read group providers from `gcap/` as members' own projections; under `abstain_when_opaque` or `count_opaque_as_absent`, expect such members' opacity to count | **No** — a behaviour change only ([§130](#130-a-governed-groups-member-projects-its-provides-and-tracks-its-requires-a-drained-member-stops-an-ineligible-member-does-not-project-unreleased-engineering-review-er9-r10-01)) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -5842,3 +5843,61 @@ remainder as one hex number must take the first segment.
 - **Code:** `src/agent/mailbox.rs` (`mailbox_prefix`, `mailbox_key`, `deliver_event_at`, `parse_suffix`,
   `drain_prefix`, `tombstone`). Tests: `src/agent/mailbox.rs` (the ER1 block),
   `src/agent/http/remainder_tests.rs` (`two_gateways_delivering_at_one_stamp_both_arrive`).
+## 130. A governed group's member projects its `provides` and tracks its `requires`; a drained member stops; an ineligible member does not project (unreleased, engineering-review ER9, R10-01)
+
+This applies to every group under a live membership intent (`sys/govern/membership/{group}`) and to every electorate
+group: what the emergent-group watcher writes for this node under `gcap/{group}/…/{self}` and
+`sys/load/{self}/group-req/{group}/{i}`.
+
+**Before.** The watcher took a governed group out of both its join and its leave (#56), and the projection went with
+them. A node joined by the governor, by `POST /gateway/govern/group`, by `join_group` or by a peer's write never
+projected the group's `provides` nor tracked its `requires` opacity — wiring answered `Unwired` and demand counted no
+group provider. A node drained from a group it had joined emergently kept projecting, and re-asserted the projection
+every 60 s, so dispatch chose a group with no members and reported `Emitted`; its requirement opacity was never
+cleared. An electorate group's members never projected. After an intent evaporated, a drained node kept projecting
+and was not written back into `grp/`.
+
+**Now.** For a governed group the watcher projects exactly while `grp/{group}/{self}` is live in the store and the
+definition's filter matches one of this node's own live capabilities; it drops the projection (tombstoning the
+`gcap/` keys and clearing the opacity keys) when either stops. It still never writes a governed group's `grp/` entry:
+the membership stays the governor's, the route's or the application's. A governed member that does not match the
+filter does not project (it stays a member). When an intent evaporates, a node that matches the filter and is not in
+`grp/` is written back into it once; an emergent group the application left by hand is not rejoined.
+
+**An emergent group's projection does not outlive the membership either.** Before, a node that left an emergent group
+it was projecting — by `leave_group`, by `DELETE /gateway/govern/group`, or because a peer tombstoned its `grp/`
+entry — kept projecting it (and re-asserted the projection every 60 s), so dispatch reported `Emitted` to a group it
+was not in. Now the watcher drops the projection when it sees the membership gone and does not rejoin the group until
+the node is a member again (a `join_group`, a route, a peer's write) or the filter or the definition goes, or the node
+restarts (the set is not persisted, so a restart rejoins a group left by hand, as before). This
+includes a group governed fleet-wide by an intent `target`ed at another node, which this node reads as emergent.
+
+At shutdown the watcher writes a departure only for the groups that are emergent for this node at that moment — it
+reads "governed" again then, not from its last pass (before, it also left a group it had joined emergently and that
+became governed later).
+
+**What the new opacity reaches.** A governed or electorate member now tracks the definition's `requires`, so one
+whose requirement is unwired writes `sys/load/{self}/group-req/{group}/{i}` and is opaque (`is_self_opaque` reads
+every `sys/load/{self}/…` key). Under the default `ConsensusConfig` nothing changes for its votes. Under the opt-in
+`abstain_when_opaque` it abstains on every ballot — in an electorate group too — up to `max_abstain_ballots`; under the
+opt-in `count_opaque_as_absent` it is counted out of a non-electorate group's quorum. Both are kept: the opacity is
+the node's own true statement about itself, and abstaining on it is the operator's choice.
+
+"Governed" now has one definition (`membership_governor::governed_groups` / `is_governed`): a fresh intent names its
+group **by its body** (the governor's reading), and an electorate group is governed for good. The watcher reads it
+for this node (an intent `target`ed at another node does not govern it here, as before); the gateway's
+`/gateway/mesh/group` and `units/declare` refusals (403 `governed_group`) and `/gateway/govern/group`'s `governed`
+response field read it fleet-wide (as before). The one change at the gateway: an intent whose key names one group and whose body names another governs the
+body's group, not the key's. `publish_membership_intent` and `POST /gateway/govern/membership` always write both the
+same.
+
+**Mixed fleets.** An older node keeps the old behaviour until it is upgraded: governed-joined, it does not project; drained, it keeps
+projecting. Upgrade every member of a governed group; until then a reader may still route to a drained older node.
+
+**Will the compiler tell me?** No — no API or key shape changed.
+
+- ***Check:*** after a drain, `GET /gateway/kv/keys?prefix=gcap/{group}/` lists no key ending in the drained node; after
+  a governed join, it lists one per `provides`.
+- **Code:** `src/agent/emergent_groups.rs` (`reconcile_emergent_groups`), `src/agent/membership_governor.rs`
+  (`governed_groups`, `is_governed`), `src/agent/lifecycle.rs` (`start_capability_group_watcher`). Tests:
+  `a_governed_groups_projection_follows_a_drain_and_a_join` and its siblings in `src/lib_tests.rs`.
