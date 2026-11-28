@@ -51,7 +51,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `mailbox/{target}/{kind}/{hlc:016x}/{sender}`; the old shape is still read. An entry under a mailbox's prefix that is
   neither shape (kind `a/b` under mailbox `a`) is left for its own mailbox (not delivered with `hlc_ts = 0`, not
   deleted). **Upgrade receivers before or with senders:** an older receiver delivers a salted
-  event with `hlc_ts == 0`. `deprecations.md` §TBD-ER1.
+  event with `hlc_ts == 0`. `deprecations.md` §129.
 - **A consumed mailbox event stays consumed after an abrupt exit** (ER1, with the reviewer's R7-03). The mailbox's
   delete was applied and gossiped but never handed to the WAL, so a node that exited without `shutdown()` replayed the
   insert and delivered the event again. The delete is now appended as the insert is: queued to the WAL writer, not

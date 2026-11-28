@@ -22,5 +22,5 @@ Durable knowledge:
 - **Mixed fleets:** an older receiver parses the whole remainder as hex and delivers a salted event with
   `hlc_ts == 0` — upgrade receivers before or with senders.
 
-Pages: `docs/features/mailbox.md`, `docs/guide/deprecations.md` §TBD-ER1, `CHANGELOG.md`, `src/lib.rs` (namespace
+Pages: `docs/features/mailbox.md`, `docs/guide/deprecations.md` §129, `CHANGELOG.md`, `src/lib.rs` (namespace
 table), `docs/wiki/dev/owner-signed-records.md` (the mailbox row's key).
