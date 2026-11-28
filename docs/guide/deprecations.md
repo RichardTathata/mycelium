@@ -5811,7 +5811,6 @@ that replicates after its position has passed it ([what is proven](../operations
 - **Code:** `mycelium-core/src/log_cursor.rs` (`LiveCursor`), `mycelium-core/src/kv_handle.rs` (`subscribe_log`),
   `src/agent/http/overlay.rs` (`gw_overlay_log_subscribe`). Tests: `src/agent/kv_handle_tests.rs`,
   `src/agent/http/remainder_tests.rs`, `src/lib_tests.rs` (`a_log_subscription_ends_at_shutdown`).
-## §TBD-ER1. A mailbox key names its sender: `mailbox/{target}/{kind}/{hlc:016x}/{sender}`; a consumed event's delete is handed to the WAL (unreleased, engineering review 2026-11-26, ER1)
 ## 129. A mailbox key names its sender: `mailbox/{target}/{kind}/{hlc:016x}/{sender}`; a consumed event's delete is handed to the WAL (unreleased, engineering review 2026-11-26, ER1)
 
 **What changes.** `deliver_event` (and `deliver_event_in`, and `POST /gateway/mailbox/deliver`) writes an event under
