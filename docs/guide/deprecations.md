@@ -5937,7 +5937,6 @@ are small, must read the first id instead.
 - **Code:** `fresh_id_base` in `mycelium-tuple-space/src/store.rs` and `mycelium-blackboard/src/store.rs`. Tests:
   `mycelium-effects/tests/tuple_restart.rs`; `fresh_id_spaces_do_not_overlap`, `a_wal_with_history_keeps_its_fence`,
   `ids_stay_below_two_to_the_53`, `a_fresh_store_starts_at_or_above_the_wall_clock`, `a_new_process_starts_above_the_old_stores_ids` in both stores; the mirror tests in both crates' `lib.rs`.
-## §TBD-ER7. Tuple space: items and workers under one correlation key queue in arrival order; `taken` counts each delivery once; keyed workers count in `waiters` (unreleased, engineering-review ER7 — R11-03, R11-10, R11-11)
 ## 134. Tuple space: items and workers under one correlation key queue in arrival order; `taken` counts each delivery once; keyed workers count in `waiters` (unreleased, engineering-review ER7 — R11-03, R11-10, R11-11)
 
 **What changes** (`mycelium-tuple-space`; no API, RPC, WAL, gateway or SDK change):
