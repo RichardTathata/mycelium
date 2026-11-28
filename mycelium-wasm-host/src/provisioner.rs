@@ -3401,6 +3401,15 @@ mod tests {
         let id = ArtifactId::of(&payload);
         let (reached, open) = (Arc::new(std::sync::atomic::AtomicBool::new(false)), Arc::new(std::sync::atomic::AtomicBool::new(false)));
         let source = GatedRanged { id, bytes: payload.clone().into(), reached: Arc::clone(&reached), open: Arc::clone(&open) };
+        // Opens the gate however the test ends: a panic before the explicit open below would otherwise leave the
+        // pull spinning on its blocking thread, and dropping the runtime would wait for it forever.
+        struct OpenOnDrop(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for OpenOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let _open_on_drop = OpenOnDrop(Arc::clone(&open));
         let mut catalog = InstallableCatalog::new();
         catalog.add(InstallableEntry::new(Capability::new("llm", "weights"), id).with_kind(ArtifactKind::Blob).with_cost(160, 1));
         let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
