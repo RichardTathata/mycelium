@@ -309,7 +309,10 @@ effect at a destination that deduplicates, when the content depends on the key a
 keeps `sched/{id}/last/{node}`; the fleet's last run is the highest under the same period and phase. One id is one
 schedule fleet-wide: candidates declaring another period or phase hold nowhere until they agree. **Changing a running
 schedule's period or phase stops it fleet-wide for the rollout** (every candidate sees a mismatch): roll a change
-under a new id and retire the old one once the new one runs, or stop the schedule everywhere and start it again. A
+under a new id and retire the old one once the new one runs, or stop the schedule everywhere and start it again —
+the first run under the new declaration records the slot it ran, since a node replaces its own `last` entry when no
+reader would count it (another period or phase, or more than 64 slots ahead). A run's key names its slot, not its
+period or phase, so after a phase change a slot number the old phase used is the same key at a destination. A
 recorded run more than 64 slots ahead of a holder's clock is ignored; the per-node `last` entries are kept for good
 and no route clears one. The capability
 namespace `schedule` is reserved for these advertisements. Rules `sched.run` and `sched.missed`

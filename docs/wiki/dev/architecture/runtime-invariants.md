@@ -797,3 +797,20 @@ until a scan comes back empty; an entry it will never consume, left in the scan,
 loop never end. The skip sits in the same pass as the in-flight filter, ahead of `if entries.is_empty() { break; }`
 — `a_suffix_that_is_neither_shape_is_left_alone_and_the_drain_ends` calls the drain directly under a timeout
 ([log](../.log/2026-11-27-er1-mailbox-sender.md)).
+## A writer must not keep what its reader refuses (2026-11-27, ER2)
+
+When a reader filters what it counts, the writer that feeds it must filter by **the same predicate, shared in code,
+not restated**. The schedule's writer of `sched/{id}/last/{node}` kept the larger of its own entry's slot and the slot
+it ran, whatever period and phase the entry was written under; the reader (`fleet_last`) counts only entries of its
+declaration, at most `MAX_AHEAD_SLOTS` ahead. After a period was lengthened the writer stamped a slot about 9e8 ahead
+with the new declaration, no reader counted it, and the slot ran again every check interval — a loop, not a cache. A
+phase change skipped a slot the same way. Now `counted` (`src/schedule.rs`) is the one rule both use, and `recorded`
+keeps an entry only when `counted` would.
+
+**What the rule cannot do:** override LWW. A node's own entry stamped past the receiver's drift bound holds its key
+against the node's later writes ([`what-is-proven.md#far-future-stamp-holds-its-key`](../../../operations/what-is-proven.md#far-future-stamp-holds-its-key));
+the writer then says `superseded` in its trace (it reads the local-application rung, `ops::kv_set_reporting`) and
+the slot keeps re-running until the clock passes the stamp. Within the drift bound a corrected clock makes the node
+silent instead (its own advertisements read as from the future) until it catches up. Pinned by
+`a_replacement_that_loses_to_a_newer_stamp_is_traced_superseded_not_replaced` and
+`a_clock_corrected_within_the_drift_bound_leaves_the_node_silent_until_it_catches_up` (`src/schedule_tests.rs`).

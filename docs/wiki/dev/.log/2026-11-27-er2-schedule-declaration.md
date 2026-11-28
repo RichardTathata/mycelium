@@ -7,19 +7,24 @@ declaration. The reader (`fleet_last`) counts only entries of the current period
 `MAX_AHEAD_SLOTS` ahead. Reader and writer now share `parse_last`, `counted` and `recorded`: the writer keeps its
 entry only when the reader would count it. The success arm reads the bound against `tick.slot` — no new seam draw.
 
-**The durable lesson.** *A writer that keeps a value its reader refuses to count is a loop, not a cache.* Three
-triggers had one root: a lengthened period (the entry ~9e8 slots ahead, the slot re-run every check interval), a
-phase change (the old slot one ahead under the new phase: a slot skipped), and an own entry left past the bound by a
-clock since corrected (out of the count and re-written after every run). The parent plan thought shortening and
-phase-only changes safe; only shortening is. When a reader filters, the writer that feeds it must filter the same way
-— share the predicate, do not restate it.
+**The durable lesson** (now on [runtime-invariants](../architecture/runtime-invariants.md), *A writer must not keep
+what its reader refuses*). *A writer that keeps a value its reader refuses to count is a loop, not a cache.* Two
+triggers had one root: a lengthened period (the entry ~9e8 slots ahead, the slot re-run every check interval) and a
+phase change (the old slot one ahead under the new phase: a slot skipped). A far-ahead value another member writes to
+the node's own key is the third, and the only form of the design's clock case ER2 fixes. The parent plan thought
+shortening and phase-only changes safe; only shortening is. A phase change is fixed for slot numbers only: the run's
+key `sched/{id}/{slot}` names no phase.
 
-**A clock stepped back in place does not reach the loop.** 64 slots is always more than three lease refreshes, so a
-node whose clock steps back that far reads its own candidacy as future-stamped (`CapEntry::is_fresh`'s symmetric
-window; the HLC keeps its stamps ahead) and holds nothing until the clock catches up — silent, not re-running. The
-re-run path is the entry outliving the clock: the node runs ahead, comes back corrected with a fresh HLC, and its
-entry returns from a peer or its store. The test `a_clock_stepped_back_past_the_bound_runs_each_slot_once` builds
-that path; the design's in-place step was not reachable.
+**The clock case is not fixed, and review round 1 showed why** (2026-11-28). The first version of the clock test
+seeded the entry with `kv().set`, which re-stamps it with the node's current HLC, so it tested a path no node takes. A
+node that ran with its clock ahead gets its entry back **with the original stamp** — from its store (`hlc.observe` of
+the replayed maximum, `src/agent/lifecycle.rs`) or from a peer. Within `max_clock_drift_ms` its clock is carried up to
+the stamp and its own advertisements read as from the future (`CapEntry::is_fresh`): silent until the clock catches
+up. Past the drift bound the entry holds its key under LWW (`what-is-proven.md#far-future-stamp-holds-its-key`) and the
+slot re-runs each check interval — a Layer I limit. **A test that seeds state through a path that rewrites its
+metadata (a stamp) tests a state no real path produces:** seed through the path the state really comes back by. The
+same round found the trace claiming a replacement after a write that lost LWW; the writer now reads its
+local-application rung (`ops::kv_set_reporting`) and says *superseded*.
 
 **R6-05 was a sentence.** A failed late or gap run is run again when no later run of its tick completes (nothing
 advanced the record); its trace said *not retried*. The trace and the module doc now say what happens. `sched.run` and

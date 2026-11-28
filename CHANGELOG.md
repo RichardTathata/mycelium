@@ -159,13 +159,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every reader left it out, and the slot due ran again every check interval, for as long as the node held. The reader
   and the writer now share one rule (`schedule::parse_last`, `counted`, `recorded`): **the writer never keeps an entry
   the reader would leave out** — another period or phase, or more than `MAX_AHEAD_SLOTS` ahead of the tick's slot — so
-  the first run under a new declaration records the slot it ran, and an entry already poisoned this way heals on the
-  node's next run, its trace saying what it replaced. The same rule fixes two cases the review's design found
-  (decision D14b): **a phase change** no longer skips the new phase's next slot, and **an entry left more than 64
-  slots ahead by a clock since stepped back** (a node that ran with its clock ahead and came back corrected, its entry
-  handed back by a peer or its store) no longer makes the slot due run every check interval until the clock catches
-  up. Under one declaration, within the bound, an entry is still never lowered. No new clock read: the replay
-  corpus's trace is unchanged, and its `decisions.jsonl` was re-recorded for the two revisions alone.
+  the first run under a new declaration records the slot it ran, and an entry already poisoned this way — by the old
+  writer, or by another member writing a far-ahead value to this node's key — heals on the node's next run, its trace
+  saying what it replaced. The same rule fixes **a phase change**, which skipped the new phase's next slot (decision
+  D14b) — for slot numbers: a run's key is `sched/{id}/{slot}`, with no period or phase, so after a phase change a
+  slot number the old phase used is the same key at a deduplicating destination. Under one declaration, within the
+  bound, an entry is still never lowered. The trace says what the write did: when the entry carries a newer stamp
+  and keeps its key under LWW, it says *superseded by a newer stamp; the entry stays uncounted*, not *replacing*
+  (new: `mycelium_core::ops::kv_set_reporting`, `kv_set` with its local-application rung). **Not fixed — a clock
+  since corrected** (the design's second trigger): a node that ran with its clock ahead and comes back corrected gets
+  its entry back with its original stamp, from its store or a peer. Within `max_clock_drift_ms` its clock is carried
+  up to that stamp, its advertisements read as from the future, and the schedule is silent on that node until the
+  clock catches up; past the bound the entry holds its key against the node's writes and the slot runs every check
+  interval until the clock passes the stamp — the general limit in `what-is-proven.md`
+  (`#far-future-stamp-holds-its-key`). No new clock read: the replay corpus's trace is unchanged, and its
+  `decisions.jsonl` was re-recorded for the two revisions alone.
   The trace of a failed late or gap run said *not retried*, which was not so when no later run of its tick completed:
   it now says *the runs after it go on; the slot is run again only if no later run of this tick completes* (R6-05, a
   sentence corrected, not the loop). `sched.run` and `sched.missed` are at revision 2. Upgrade notes:

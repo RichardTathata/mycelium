@@ -61,7 +61,8 @@ side holds once the holder's lease has left its view, never before),
 the gap decided as run once or skipped, the run naming the decision its parent) and
 `a_host_outside_the_holder_band_never_runs`; a declaration changed on one node —
 `stopping_and_restarting_with_a_longer_period_runs_each_slot_once`, `a_phase_change_does_not_skip_a_slot`,
-`a_clock_stepped_back_past_the_bound_runs_each_slot_once`; through the gateway, in
+`a_clock_corrected_within_the_drift_bound_leaves_the_node_silent_until_it_catches_up`,
+`a_replacement_that_loses_to_a_newer_stamp_is_traced_superseded_not_replaced`; through the gateway, in
 [`src/agent/http/schedule_run_tests.rs`](../../src/agent/http/schedule_run_tests.rs):
 `a_client_receives_its_schedules_runs_and_an_acknowledged_run_records_its_slot`,
 `a_run_never_acknowledged_is_traced_and_its_slot_is_not_recorded`,
@@ -81,9 +82,16 @@ the gap decided as run once or skipped, the run naming the decision its parent) 
   keeps its advertisements re-asserted by the node's persist task: such work belongs on a blocking thread.
 - The fleet's last run is the highest `sched/{id}/last/{node}` under the schedule's period and phase, never lowered
   within one declaration; a node replaces its own entry when no reader would count it (another period or phase, or
-  more than 64 slots ahead), so a stop and a restart with another period or phase, or an entry left ahead by a clock
-  since corrected, runs each slot once; a run recorded ahead of a holder's clock (a fast clock elsewhere) is said once (`last_ahead`) and nothing runs
-  until the clock reaches it. A schedule with no recorded run starts at the slot due. Holders whose clocks disagree
+  more than 64 slots ahead), so a stop and a restart with another period or phase, or a far-ahead value another
+  member wrote to this node's key, runs each slot once. A phase change is fixed for slot numbers only: a run's key
+  `sched/{id}/{slot}` names no period or phase, so a slot number the old phase used is the same key at a destination
+  that deduplicates. A run recorded ahead of a holder's clock (a fast clock elsewhere) is said once (`last_ahead`) and
+  nothing runs until the clock reaches it. **A node whose wall clock steps back runs nothing for the length of the
+  step:** its HLC keeps its stamps ahead, so its own advertisements read as from the future until its clock catches
+  up — also when it restarts corrected over an entry it wrote while ahead (from its store or a peer, within
+  `max_clock_drift_ms`); past that bound such an entry holds its key against the node's writes, the trace says
+  `superseded by a newer stamp`, and the slot runs each check interval until the clock passes the stamp
+  ([the far-future-stamp limit](../operations/what-is-proven.md#far-future-stamp-holds-its-key)). A schedule with no recorded run starts at the slot due. Holders whose clocks disagree
   across a slot boundary compute two slots — two keys.
 - One id is one schedule: candidates that declare another period or phase hold nowhere (`declaration_mismatch`) —
   so changing a running schedule's period or phase stops it fleet-wide for the rollout; roll a change under a new id,

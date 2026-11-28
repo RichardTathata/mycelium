@@ -6178,18 +6178,32 @@ This applies to every `[[schedule]]` run by `GossipAgent::run_schedule` or throu
 and its entry's slot, **whatever period and phase the entry was written under**, then stamped the result with the
 current period and phase. The reader (`fleet_last`) counts only entries under the schedule's own period and phase and
 leaves out any more than `MAX_AHEAD_SLOTS` (64) ahead of its slot. So after a period was lengthened, a phase moved,
-or a node came back with its clock corrected to find its own entry more than 64 slots ahead (written while its clock
-was ahead, handed back by a peer or its store), the writer kept a slot the reader refused: the slot due ran again
-every check interval (lengthening, the corrected clock), or the next slot was skipped (a phase change).
+or another member wrote a far-ahead value to the node's own key, the writer kept a slot the reader refused: the slot
+due ran again every check interval (lengthening, a far-ahead value), or the next slot was skipped (a phase change).
 
 **Now.** The reader and the writer share one rule (`schedule::counted`): the writer keeps its entry's slot only when
 the reader would count it — same period and phase, at most 64 slots ahead of the tick's slot — and otherwise records
 the slot it ran. **An entry is never lowered within one declaration; an entry no reader counts is replaced.** An entry
-already poisoned by the old writer (its slot far ahead under the current declaration) is replaced by the node's next
-successful run; the run's trace effect says what it replaced and why. A node replaces only its own entry; another
-node's poisoned entry stays left out by every reader, as before.
+already poisoned — by the old writer, or by another member writing a far-ahead value to this node's key — is
+replaced by the node's next successful run; the run's trace effect says what it replaced and why. A node replaces
+only its own entry; another node's poisoned entry stays left out by every reader, as before. **A phase change is
+fixed for slot numbers only:** a run's key is `sched/{id}/{slot}`, which names no period or phase, so after a phase
+change a slot number the old phase already used is the same key, and a deduplicating destination reads that run as a
+repeat of the old phase's.
 
-**What did not change.** No wire, key or value format; no public API. A same-declaration entry within the bound —
+**Not fixed: a clock since corrected.** A node that ran with its clock ahead and comes back with it corrected gets its
+entry back **with its original stamp** — from its store (replay, then the HLC observes the highest stamp) or from a
+peer. Within `max_clock_drift_ms` (five minutes by default) its clock is carried up to that stamp, so its own
+advertisements read as from the future and the schedule is **silent on that node** until the clock catches up; the
+entry is then counted as any entry of its declaration. Past the drift bound the entry holds its key under LWW
+against the node's writes, and the slot runs every check interval until the wall clock passes the stamp — the
+general limit [`what-is-proven.md#far-future-stamp-holds-its-key`](../operations/what-is-proven.md#far-future-stamp-holds-its-key),
+which needs a Layer I change. The run's trace then says *superseded by a newer stamp; the entry stays uncounted*:
+the writer reads its write's local-application rung (new: `mycelium_core::ops::kv_set_reporting`) and claims no
+replacement it did not make.
+
+**What did not change.** No wire, key or value format; one new public function, `mycelium_core::ops::kv_set_reporting`
+(`kv_set`, also answering `Option<LocalApplication>`). A same-declaration entry within the bound —
 a clock ahead by up to 64 slots — is still kept, and still makes a slower holder say `last_ahead`. In a mixed fleet a
 node on an older release still writes the old way, and its entry is left out by new readers as before.
 
@@ -6204,6 +6218,7 @@ revision 1 of either rule, updates.
 - **Code:** `src/schedule.rs` (`parse_last`, `counted`, `recorded`, `fleet_last`, `Runner::tick`). Tests:
   `src/schedule_tests.rs` (`recorded_*`, `lengthening_a_period_runs_each_slot_once`,
   `a_poisoned_entry_is_replaced_by_the_next_run`, `stopping_and_restarting_with_a_longer_period_runs_each_slot_once`,
-  `a_phase_change_does_not_skip_a_slot`, `a_clock_stepped_back_past_the_bound_runs_each_slot_once`,
+  `a_phase_change_does_not_skip_a_slot`, `a_replacement_that_loses_to_a_newer_stamp_is_traced_superseded_not_replaced`,
+  `a_clock_corrected_within_the_drift_bound_leaves_the_node_silent_until_it_catches_up`,
   `a_failed_late_run_is_run_again_when_nothing_after_it_completes_and_the_trace_says_so`),
   `src/agent/http/schedule_run_tests.rs` (`a_clients_schedule_over_a_poisoned_entry_is_handed_one_run_per_slot`).
