@@ -38,8 +38,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A prefix subscription opened while its watcher is evicted is notified** (engineering review ER8's review; the
   plan's §14 question, pre-existing and made reachable by ER8, whose subscriptions now drop their receivers at
   disconnect). `subscribe_prefix` read the registered sender, then subscribed to it; if the last other receiver
-  dropped and a write evicted the closed sender in between, the new receiver sat on an orphan no write notifies,
-  so a reconnecting log subscriber on a busy stream went silent. After subscribing it now re-inserts the same
+  dropped and a write evicted the closed sender in between, the new receiver sat on an orphan no write notifies.
+  Once papaya reclaimed the removed entry its sender dropped and `changed()` returned `Err`, so a reconnecting
+  log subscriber on a busy stream was ended spuriously (`recv()` returned `None`, the SSE stream closed); a
+  caller that only `borrow()`s the receiver instead went stale. After subscribing it now re-inserts the same
   sender in a `compute`, which papaya's CAS serialises against the evictor's conditional remove, and loops if it
   lost. The three copies (`KvHandle::subscribe_prefix`, `ops::kv_subscribe_prefix`, the gateway's
   `subscribe_prefix_on_kv`) are one function, `mycelium_core::store::subscribe_prefix_watch`.
