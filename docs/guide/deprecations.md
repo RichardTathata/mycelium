@@ -83,6 +83,7 @@ the notice.
 | 129 | code that parses `mailbox/` keys itself, or a receiver older than its senders | unreleased (engineering review ER1) | parse `{hlc:016x}` then an optional `/{sender}`; upgrade receivers before or with senders | **No** — an older receiver delivers a new writer's event with `hlc_ts == 0` ([§129](#129-a-mailbox-key-names-its-sender-mailboxtargetkindhlc016xsender-a-consumed-events-delete-is-handed-to-the-wal-unreleased-engineering-review-2026-11-26-er1)) |
 | 130 | code or dashboards that assume a governed or electorate group's members never project into `gcap/` or write group-requirement opacity, or that a node left by hand keeps projecting | unreleased (engineering review ER9) | read group providers from `gcap/` as members' own projections; under `abstain_when_opaque` or `count_opaque_as_absent`, expect such members' opacity to count | **No** — a behaviour change only ([§130](#130-a-governed-groups-member-projects-its-provides-and-tracks-its-requires-a-drained-member-stops-an-ineligible-member-does-not-project-unreleased-engineering-review-er9-r10-01)) |
 | 131 | code, tests or dashboards that expect a fresh tuple space or blackboard's ids to start at 0, or to be small | unreleased (engineering review ER3) | treat ids as opaque `u64`s (they stay below 2^53); assert relative to the first id | **No** — a behaviour change only ([§131](#131-a-fresh-tuple-space-or-blackboard-does-not-start-its-ids-at-0-unreleased-engineering-review-er3-r4-01)) |
+| 134 | code or dashboards that expect a second `put_keyed` / `complete_keyed` under one key to replace the first, `taken <= admitted`, or `waiters` to exclude `take_by_key` workers | unreleased (engineering review ER7) | expect a FIFO queue per key; read `taken` as deliveries (redeliveries included); `waiters` now counts keyed waiters | **No** — a behaviour change only ([§134](#134-tuple-space-items-and-workers-under-one-correlation-key-queue-in-arrival-order-taken-counts-each-delivery-once-keyed-workers-count-in-waiters-unreleased-engineering-review-er7--r11-03-r11-10-r11-11)) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -5937,6 +5938,7 @@ are small, must read the first id instead.
   `mycelium-effects/tests/tuple_restart.rs`; `fresh_id_spaces_do_not_overlap`, `a_wal_with_history_keeps_its_fence`,
   `ids_stay_below_two_to_the_53`, `a_fresh_store_starts_at_or_above_the_wall_clock`, `a_new_process_starts_above_the_old_stores_ids` in both stores; the mirror tests in both crates' `lib.rs`.
 ## §TBD-ER7. Tuple space: items and workers under one correlation key queue in arrival order; `taken` counts each delivery once; keyed workers count in `waiters` (unreleased, engineering-review ER7 — R11-03, R11-10, R11-11)
+## 134. Tuple space: items and workers under one correlation key queue in arrival order; `taken` counts each delivery once; keyed workers count in `waiters` (unreleased, engineering-review ER7 — R11-03, R11-10, R11-11)
 
 **What changes** (`mycelium-tuple-space`; no API, RPC, WAL, gateway or SDK change):
 

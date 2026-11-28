@@ -24,4 +24,4 @@ Durable knowledge from the build:
 
 Pages: `docs/wiki/dev/companions/tuple-space.md`, `docs/features/tuple-space.md`, `docs/operations/admission-control.md`,
 `docs/plans/v2-wsg-coordination.md` (G1a's waiter line), `docs/plans/mycelium-tuple-space.md` (`take_total`),
-`docs/guide/deprecations.md` §TBD-ER7, `CHANGELOG.md`.
+`docs/guide/deprecations.md` §134, `CHANGELOG.md`.

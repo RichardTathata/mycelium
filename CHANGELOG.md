@@ -91,7 +91,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   first. Items and workers under one key are now FIFO queues (an expired item re-queued at the back). A hand-off to a
   parked worker is counted once in `taken`/`take_total`, not twice; `waiters` includes workers parked on
   `take_by_key`; a timed-out take closes its receiver before its last drain, so an item handed to it in that instant
-  stays queued. `deprecations.md` §TBD-ER7.
+  stays queued. `deprecations.md` §134.
 - **A gateway sends an unanswered cancel-forward again** (unreleased code: I4's cancel-forward; identity-and-lifecycle
   §9 O13, the maintainer's decision of 2026-11-22; found on #824, where behind about 12 000 concurrent mints the
   provider's stop came about 25 s after the cancel in 4 runs of 9). The forward is a best-effort signal on the
