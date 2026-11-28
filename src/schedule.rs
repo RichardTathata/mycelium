@@ -71,6 +71,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mycelium_core::decision::{DecisionRecord, InputSnapshot, OutcomeKind, Provenance, ViewStatus};
+use mycelium_core::receipt::LocalApplication;
 
 use crate::capability::{CapFilter, Capability};
 use crate::capability_config::{MissedRunPolicy, NodeCapabilityConfig, ScheduleDecl};
@@ -736,15 +737,30 @@ impl Runner {
                     // recording replays draw for draw.
                     let mine = self.kv.get(&format!("{}{}", last_prefix(&s.id), self.me)).and_then(|b| parse_last(&b));
                     let written = recorded(&s, mine, slot, tick.slot);
-                    let _ = self.kv.set(format!("{}{}", last_prefix(&s.id), self.me), format!("{written} {} {}", s.period_ms, s.phase_ms));
+                    // The local-application rung of the write, so the trace says what it did: an entry stamped
+                    // ahead of this node's clock (past the drift bound) keeps its key under LWW, and then nothing
+                    // was replaced.
+                    let (_, applied) = mycelium_core::ops::kv_set_reporting(
+                        &self.ctx.core,
+                        Arc::from(format!("{}{}", last_prefix(&s.id), self.me).as_str()),
+                        bytes::Bytes::from(format!("{written} {} {}", s.period_ms, s.phase_ms)),
+                    );
                     self.runs.fetch_add(1, Ordering::Relaxed);
-                    let replaced = match mine {
-                        Some(e @ (m, p, ph)) if counted(&s, e, tick.slot).is_none() => format!(
-                            " (replacing \"{m} {p} {ph}\", which no reader counts: another period or phase, or more than {MAX_AHEAD_SLOTS} slots ahead)"
+                    let uncounted = mine.filter(|&e| counted(&s, e, tick.slot).is_none());
+                    let entry = match (applied, uncounted) {
+                        (Some(a), Some((m, p, ph))) if a.is_current() => format!(
+                            "this node's sched/{}/last = {written} (replacing \"{m} {p} {ph}\", which no reader counts: another period or phase, or more than {MAX_AHEAD_SLOTS} slots ahead)", s.id
                         ),
-                        _ => String::new(),
+                        (Some(a), None) if a.is_current() => format!("this node's sched/{}/last = {written}", s.id),
+                        (Some(LocalApplication::Superseded), Some((m, p, ph))) => format!(
+                            "this node's sched/{}/last was not written ({written}): superseded by a newer stamp; the entry stays uncounted (\"{m} {p} {ph}\")", s.id
+                        ),
+                        (Some(LocalApplication::Superseded), None) => format!(
+                            "this node's sched/{}/last was not written ({written}): superseded by a newer stamp", s.id
+                        ),
+                        (_, _) => format!("this node's sched/{}/last was not written ({written}): refused by the store", s.id),
                     };
-                    self.record(rec.effect(format!("work done under {key}; this node's sched/{}/last = {written}{replaced}", s.id)));
+                    self.record(rec.effect(format!("work done under {key}; {entry}")));
                 }
                 Some(Err(RunFailure::Failed(e))) => {
                     self.failures.fetch_add(1, Ordering::Relaxed);

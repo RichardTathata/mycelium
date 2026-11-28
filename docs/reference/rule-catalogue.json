@@ -1953,7 +1953,8 @@
         "a_poisoned_entry_is_replaced_by_the_next_run",
         "stopping_and_restarting_with_a_longer_period_runs_each_slot_once",
         "a_phase_change_does_not_skip_a_slot",
-        "a_clock_stepped_back_past_the_bound_runs_each_slot_once",
+        "a_clock_corrected_within_the_drift_bound_leaves_the_node_silent_until_it_catches_up",
+        "a_replacement_that_loses_to_a_newer_stamp_is_traced_superseded_not_replaced",
         "a_clients_schedule_over_a_poisoned_entry_is_handed_one_run_per_slot"
       ],
       "trace": {

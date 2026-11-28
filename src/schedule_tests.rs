@@ -666,23 +666,36 @@ async fn a_phase_change_does_not_skip_a_slot() {
     a.shutdown().await;
 }
 
-/// The design's §1, second trigger: a wall clock stepped back past the reader's bound puts this node's own entry out
-/// of its reader's count. Kept, the writer would re-write it after every run, and the slot due would run every check
-/// interval until the clock caught up.
-///
-/// **How the step reaches the loop.** A node whose clock steps back in place by more than three lease refreshes — and
-/// 64 slots always is — reads its own candidacy as stamped in the future (`CapEntry::is_fresh`'s symmetric window; the
-/// HLC keeps its stamps ahead), so it holds nothing until the clock catches up: the loop never meets the entry. The
-/// entry meets the loop when it outlives the node's clock: here the node runs with its clock 128 slots ahead and
-/// records a slot, is stopped, and comes back on the same address with the clock corrected — a fresh HLC — and its
-/// entry, which a peer's anti-entropy would hand back, in its store.
+/// The design's §1, second trigger, as it reaches a node: **not fixed by ER2, and pinned as it is.** A node that ran
+/// with its clock ahead has its entry stamped ahead too; it comes back with its clock corrected, and the entry comes
+/// back **with its original stamp** — here from its own store (`[persistence]`: replay, then `hlc.observe` of the
+/// highest stamp, `src/agent/lifecycle.rs`); from a peer it would come by anti-entropy, observed the same way. Within
+/// `max_clock_drift_ms` (five minutes by default) the node's clock is carried up to the entry's stamp, so every
+/// advertisement it writes is stamped ahead of its wall clock and read as from the future (`CapEntry::is_fresh`): the
+/// node runs nothing until its clock catches up — silent for the length of the step — and then the entry is counted
+/// as any entry of its declaration. Past the drift bound the entry holds its key against the node's own writes (the
+/// ledger row `what-is-proven.md#far-future-stamp-holds-its-key`), pinned by
+/// `a_replacement_that_loses_to_a_newer_stamp_is_traced_superseded_not_replaced`.
 #[cfg(not(feature = "sim"))]
 #[tokio::test]
-async fn a_clock_stepped_back_past_the_bound_runs_each_slot_once() {
+async fn a_clock_corrected_within_the_drift_bound_leaves_the_node_silent_until_it_catches_up() {
+    use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
     let ahead_ms = (2 * MAX_AHEAD_SLOTS as i64) * 1_000;
     let port = alloc_port();
+    let data = std::env::temp_dir().join(format!("mycelium-schedule-clock-{}-{port}", std::process::id()));
+    assert!(data.starts_with(std::env::temp_dir()) && data.file_name().is_some());
+    let _ = std::fs::remove_dir_all(&data);
+    let persisted = || {
+        let mut cfg = GossipConfig::auto();
+        cfg.bind_port = port;
+        cfg.persistence = Some(PersistenceConfig { base_path: data.clone(), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
+        GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg)
+    };
+
     mycelium_core::sim_seam::step_wall_clock_for_test(ahead_ms);
-    let (a, _sink, band) = banded(vec![], port).await;
+    let a = persisted();
+    a.start().await.unwrap();
+    let band = a.capabilities().advertise_capability(Capability::new("ledger", "closer"), Duration::from_secs(1));
     let first: Arc<Mutex<Vec<ScheduledRun>>> = Arc::default();
     let h = a.run_schedule(&decl("close", 1, MissedRunPolicy::Skip), recording(&first)).unwrap();
     let ran_ahead = poll_until(|| h.runs() >= 1, 15_000).await;
@@ -690,22 +703,56 @@ async fn a_clock_stepped_back_past_the_bound_runs_each_slot_once() {
     let entry = a.kv().get(&format!("{}{}", last_prefix("close"), a.node_id()));
     drop(band);
     a.shutdown().await;
+    drop(a);
     mycelium_core::sim_seam::step_wall_clock_for_test(0);
     assert!(ran_ahead, "the node ran a slot with its clock ahead");
     let entry = entry.expect("the slot it ran is recorded");
 
-    let (b, _sink, _band) = banded(vec![], port).await;
-    seed_own(&b, "close", String::from_utf8(entry.to_vec()).unwrap());
+    let b = persisted();
+    b.start().await.unwrap();
+    let _band = b.capabilities().advertise_capability(Capability::new("ledger", "closer"), Duration::from_secs(1));
+    assert_eq!(b.kv().get(&format!("{}{}", last_prefix("close"), b.node_id())).as_deref(), Some(&entry[..]), "the entry is back from the store");
     let now_slot = sched(1, 0).slot_at(mycelium_core::sim_seam::wall_now_ms()).unwrap();
     assert!(parse_last(&entry).unwrap().0 > now_slot + MAX_AHEAD_SLOTS, "the entry is past the reader's bound");
     let seen: Arc<Mutex<Vec<ScheduledRun>>> = Arc::default();
     let h = b.run_schedule(&decl("close", 1, MissedRunPolicy::Skip), recording(&seen)).unwrap();
-    assert!(poll_until(|| h.runs() >= 3, 15_000).await, "three runs: {:?}", slots(&seen));
+    // Past the warm-up (three one-second refreshes) and three periods more.
+    tokio::time::sleep(Duration::from_millis(warm_up_ms(1_000) + 3_000)).await;
+    let runs = h.runs();
     drop(h);
-    let ran = slots(&seen);
-    assert_unique(&ran);
-    assert_eq!(own_entry(&b, "close").map(|e| e.0), ran.iter().max().copied(), "the entry is the corrected clock's");
+    let still = b.kv().get(&format!("{}{}", last_prefix("close"), b.node_id()));
     b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&data);
+    assert_eq!(runs, 0, "silent until the clock catches up: {:?}", slots(&seen));
+    assert_eq!(still.as_deref(), Some(&entry[..]), "the entry is untouched");
+}
+
+/// The trace says what the write did (the ack names its rung). An entry of this declaration far past the reader's
+/// bound **and stamped past the drift bound** — a peer whose clock was an hour ahead — holds its key against this
+/// node's write (LWW: the ledger row `what-is-proven.md#far-future-stamp-holds-its-key`). The run's trace says the
+/// write was superseded and the entry stays uncounted, not that it was replaced; the entry holds, and the slot is run
+/// again each check interval until the clock passes the stamp — the general far-future-stamp limit, not fixed here.
+#[tokio::test]
+async fn a_replacement_that_loses_to_a_newer_stamp_is_traced_superseded_not_replaced() {
+    let (a, sink, _band) = banded(vec![], alloc_port()).await;
+    let now_ms = mycelium_core::sim_seam::wall_now_ms();
+    let now_slot = sched(2, 0).slot_at(now_ms).unwrap();
+    let key = format!("{}{}", last_prefix("close"), a.node_id());
+    let poisoned = format!("{} 2000 0", now_slot * 2);
+    let update = mycelium_core::framing::make_gossip_update_stamped(
+        a.node_id(), 3, Arc::from(key.as_str()), bytes::Bytes::from(poisoned.clone()), false,
+        mycelium_core::hlc::pack(now_ms + 3_600_000, 0),
+    );
+    crate::store::apply_and_notify(&a.task_ctx.kv_state, &update);
+    let h = a.run_schedule(&decl("close", 2, MissedRunPolicy::Skip), |_| async { Ok(()) }).unwrap();
+    let ran = || sink.snapshot().into_iter().filter(|r| r.rule == RUN_RULE && r.reason == "ran").filter_map(|r| r.effect).collect::<Vec<_>>();
+    assert!(poll_until(|| !ran().is_empty(), 15_000).await, "the slot runs");
+    drop(h);
+    let effect = ran()[0].clone();
+    assert!(effect.contains("superseded by a newer stamp; the entry stays uncounted"), "{effect}");
+    assert!(!effect.contains("replacing"), "no replacement is claimed: {effect}");
+    assert_eq!(a.kv().get(&key).as_deref(), Some(poisoned.as_bytes()), "the newer-stamped entry holds its key");
+    a.shutdown().await;
 }
 
 /// A control: shortening a period records fresh slots — the new declaration's slots are about twice the old entry's,
