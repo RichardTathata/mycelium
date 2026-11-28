@@ -37,5 +37,5 @@ Not built here: ER9's second PR, the readers' membership check (`wiring_snapshot
 
 Pages: `docs/wiki/dev/owner-signed-records.md` (rows `grp/` and `cap-group/`·`gcap/`: the new forged-write
 consequences, statuses unchanged), `docs/wiki/dev/architecture/runtime-invariants.md`, `docs/features/governed-membership.md`,
-`docs/guide/02-capabilities.md`, `docs/guide/deprecations.md` §TBD-ER9, `docs/design/consensus-electorate.md`,
+`docs/guide/02-capabilities.md`, `docs/guide/deprecations.md` §130, `docs/design/consensus-electorate.md`,
 `src/lib.rs` (prefix table), `CHANGELOG.md`.

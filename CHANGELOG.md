@@ -57,6 +57,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   insert and delivered the event again. The delete is now appended as the insert is: queued to the WAL writer, not
   synced, so a consumed event can still return after a crash before the delete reaches disk.
 - **A governed group's `gcap/` projection follows its membership** (ER9, R10-01; `deprecations.md` §TBD-ER9). The
+- **A governed group's `gcap/` projection follows its membership** (ER9, R10-01; `deprecations.md` §130). The
   emergent-group watcher took governed groups out of its join and its leave so that a membership intent's `max` and
   `drain` could hold (#56), and the projection, fused to those two branches, went with them: a node drained from a
   group kept projecting its `provides` (dispatch reported a send to an empty group), and a node the governor joined
