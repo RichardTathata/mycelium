@@ -11,8 +11,8 @@ Durable knowledge:
   `{hlc:016x}` grant request id (`state_machine.rs`), not determined by reading.
 - **A drain that skips entries must filter before its emptiness check.** `drain_prefix` loops until its scan is
   empty; an entry it will never consume (a suffix that is neither shape, e.g. kind `a/b`'s under mailbox `a`) must
-  leave the scan in the same `retain` as the in-flight filter, or the loop never ends.
-- **A prefix scan of `{kind}/` sees every kind that extends it with `/`.** The strict suffix parse (sixteen hex digits,
+  leave the scan in the same `filter_map` pass as the in-flight filter, or the loop never ends.
+- **A prefix scan of `{kind}/` sees every kind that extends it with `/`.** The strict suffix parse (sixteen lowercase hex digits,
   then nothing or one segment that parses as a node id) is what keeps mailbox `a` out of kind `a/b`. Refusing `/` in a kind at
   deliver is a follow-up (decision D9′).
 - **The mailbox's tombstone is now handed to the WAL**, as its insert was (this is not yet true of every

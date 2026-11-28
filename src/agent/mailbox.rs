@@ -206,8 +206,9 @@ pub(crate) fn mailbox_key(target: &NodeId, kind: &str, hlc: u64, sender: &NodeId
 /// or `{hlc:016x}/{sender}` — exactly sixteen **lowercase** hex digits (what every writer writes), then
 /// nothing or one segment that parses as a [`NodeId`] (a socket address, so it holds no `/` and is never
 /// sixteen hex digits). `None` is neither shape: another kind's entry — `a/b`'s under mailbox `a`, or a 2.40
-/// writer's `a/0123456789abcdef/{hlc}` — not this mailbox's to deliver or delete. Still ambiguous: a kind
-/// whose last segment is a socket address (`a/127.0.0.1:9000`); refusing `/` in a kind at deliver closes it.
+/// writer's `a/0123456789abcdef/{hlc}` — not this mailbox's to deliver or delete. No key the library writes for
+/// another kind matches either shape (its first remainder segment is never sixteen hex digits followed by
+/// nothing or a socket address); only a raw KV write can. Refusing `/` in a kind at deliver is cleanliness.
 fn parse_suffix(suffix: &str) -> Option<u64> {
     let (hex, sender) = match suffix.split_once('/') {
         Some((hex, sender)) => (hex, Some(sender)),
