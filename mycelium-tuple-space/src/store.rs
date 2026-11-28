@@ -690,8 +690,10 @@ impl TupleStore {
     /// record a compaction keeps for the high-water mark, the lone `Take` a state chunk ends with —
     /// not only a `Put`'s, so a promoted mirror never reissues an id the primary acked. When the
     /// fence moves on a WAL-backed store it is persisted as a lone `Take { n - 1 }`: set, then logged;
-    /// replay folds it into the high-water mark and a `Take` never terminates an item. `n` at or
-    /// below the current next id changes nothing and logs nothing.
+    /// replay folds it into the high-water mark and a `Take` never terminates an item. If it lands
+    /// after its own item's `Put` (a replicated `Put` racing the fence), a restart replays that item
+    /// as taken-and-abandoned and requeues it once — at-least-once, as for any take (review N4).
+    /// `n` at or below the current next id changes nothing and logs nothing.
     pub(crate) fn fence_past(&self, n: u64) -> Result<bool, TupleError> {
         let prev = self.next_id.fetch_max(n, Ordering::Relaxed);
         if prev >= n {
@@ -972,7 +974,9 @@ impl TupleStore {
         // `Put`s alone fence a mirror only past the highest *live* id. A `Take`, not the `Ack` the
         // design named: an `Ack` for that id would remove it from a mirror when it is live (in this
         // chunk) and make the mirror refuse its replicated `Put` when it is put after the scan; a
-        // `Take` changes no item's liveness, and a mirror older than ER6-T ignores it.
+        // `Take` changes no liveness in `apply_records`, and a mirror older than ER6-T ignores it.
+        // (A mirror that persists the fence after the item's own `Put` may requeue that item once
+        // on a restart — at-least-once; review N4.)
         if let Some(last) = issued_next.checked_sub(1) {
             Record::Take { id: last, taken_at_ms: 0 }.encode(&mut raw);
         }

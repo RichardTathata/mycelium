@@ -255,6 +255,7 @@ impl BoardStore {
             if g.tombstones.contains(id) {
                 drop(g);
                 self.refused_acked.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(id, "blackboard: refused a replicated fact under an id this board remembers acked");
                 return Ok(());
             }
             if g.available.contains_key(&id) || g.inflight.contains_key(&id) {
@@ -1440,6 +1441,32 @@ mod tests {
         }
         assert_eq!(std::fs::metadata(&path).unwrap().len(), len);
         assert_eq!(store.stats().acked, 0, "no fact was removed");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Review N7: a compaction keeps exactly the newest `COMPACTION_TOMBSTONES` and forgets the
+    /// older ones at the reopen.
+    #[test]
+    fn compaction_keeps_exactly_the_newest_tombstones() {
+        use crate::wal::COMPACTION_TOMBSTONES;
+        let path = temp_wal("newest-tombstones");
+        let extra = 10u64;
+        let first = {
+            let store = BoardStore::persistent(&path, 100_000).unwrap();
+            let first = store.post(surplus("1", "1.0"), Bytes::new()).unwrap() + 1;
+            for id in first..first + COMPACTION_TOMBSTONES as u64 + extra {
+                store.discard(id).unwrap();
+            }
+            store.compact().unwrap();
+            first
+        };
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        assert_eq!(store.acked_memory_len(), COMPACTION_TOMBSTONES);
+        for id in first..first + extra {
+            assert!(!store.remembers_acked(id), "{id}: older than the kept tombstones");
+        }
+        assert!(store.remembers_acked(first + extra));
+        assert!(store.remembers_acked(first + COMPACTION_TOMBSTONES as u64 + extra - 1));
         let _ = std::fs::remove_file(&path);
     }
 }

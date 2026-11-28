@@ -1971,7 +1971,7 @@ mod wal_role_tests {
 
     /// ER6-T, the fence half, a transient primary: its state chunk is live `Put`s only, so a mirror
     /// fenced past the highest *live* id. The chunk now ends with a lone `Take` naming the primary's
-    /// last issued id — a record every mirror decodes, and one that changes no item's liveness.
+    /// last issued id — a record every mirror decodes, and one that changes no liveness in `apply_records`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_mirror_fences_past_a_transient_primarys_last_issued_id() {
         let ts = TupleSpace::new(agent().await, mirror_cfg("fence-state", false, temp_wal("unused-fence2"))).await.unwrap();
