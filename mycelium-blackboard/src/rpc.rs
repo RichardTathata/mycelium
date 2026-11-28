@@ -187,6 +187,40 @@ fn dec_facts_at(resp: &Bytes) -> Result<(Vec<Fact>, usize), crate::BlackboardErr
 
 /// The snapshot trailer's extension tag (ER6): `[u8 1][u64 next_id][u32 n] n × ([u64 start][u32 len])`.
 const SNAP_EXT_FENCE: u8 = 1;
+/// The digest extension (ER6 PR B), after the trailer of a digest-only answer:
+/// `[u8 2][u64 replication sequence][u64 live count][u64 xor of the live ids' mixes]`.
+const SNAP_EXT_DIGEST: u8 = 2;
+/// A `snapshot` request body asking for the digest only (ER6 PR B). A primary older than PR B
+/// ignores the body and answers a full snapshot, which the mirror applies — still correct.
+pub(crate) const SNAP_REQ_DIGEST: u8 = 1;
+
+/// A primary's live-set digest (ER6 PR B), with the replication sequence it was read at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SnapshotDigest {
+    pub(crate) seq: u64,
+    pub(crate) count: u64,
+    pub(crate) mix: u64,
+}
+
+/// A decoded `snapshot` response: the facts, the trailer from an ER6 primary, the digest from a
+/// digest-only answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DecodedSnapshot {
+    pub(crate) facts: Vec<Fact>,
+    pub(crate) trailer: Option<SnapshotTrailer>,
+    pub(crate) digest: Option<SnapshotDigest>,
+}
+
+/// The digest-only answer: no facts, the trailer with no acked runs (`next_id` refreshes the
+/// mirror's fence on every probe), then the digest.
+pub(crate) fn digest_to_bytes(next_id: u64, digest: SnapshotDigest) -> Vec<u8> {
+    let mut buf = snapshot_to_bytes(&crate::store::MirrorSnapshot { facts: Vec::new(), next_id, acked: Vec::new() });
+    buf.push(SNAP_EXT_DIGEST);
+    buf.extend_from_slice(&digest.seq.to_le_bytes());
+    buf.extend_from_slice(&digest.count.to_le_bytes());
+    buf.extend_from_slice(&digest.mix.to_le_bytes());
+    buf
+}
 
 /// What a primary's snapshot says beyond its live facts (ER6): the id it issues next, and the acked
 /// ids it remembers, as sorted runs. `None` from a primary older than ER6.
@@ -220,10 +254,10 @@ pub(crate) fn snapshot_to_bytes(snap: &crate::store::MirrorSnapshot) -> Vec<u8> 
 /// Decode a `snapshot` response: the facts, and the trailer when the primary sent one. No bytes
 /// after the facts (a primary older than ER6), or an extension this build does not know, is `None`
 /// — the mirror then adds facts as it always did. A trailer that starts and is cut short is an error.
-pub(crate) fn dec_snapshot_resp(resp: &Bytes) -> Result<(Vec<Fact>, Option<SnapshotTrailer>), crate::BlackboardError> {
+pub(crate) fn dec_snapshot_resp(resp: &Bytes) -> Result<DecodedSnapshot, crate::BlackboardError> {
     let (facts, mut off) = dec_facts_at(resp)?;
     if resp.get(off) != Some(&SNAP_EXT_FENCE) {
-        return Ok((facts, None));
+        return Ok(DecodedSnapshot { facts, trailer: None, digest: None });
     }
     off += 1;
     let bad = || crate::BlackboardError::Rpc("malformed snapshot trailer".into());
@@ -240,7 +274,17 @@ pub(crate) fn dec_snapshot_resp(resp: &Bytes) -> Result<(Vec<Fact>, Option<Snaps
         acked.push((u64_at(off).ok_or_else(bad)?, u32_at(off + 8).ok_or_else(bad)?));
         off += 12;
     }
-    Ok((facts, Some(SnapshotTrailer { next_id, acked })))
+    let trailer = Some(SnapshotTrailer { next_id, acked });
+    if resp.get(off) != Some(&SNAP_EXT_DIGEST) {
+        return Ok(DecodedSnapshot { facts, trailer, digest: None });
+    }
+    off += 1;
+    let digest = SnapshotDigest {
+        seq: u64_at(off).ok_or_else(bad)?,
+        count: u64_at(off + 8).ok_or_else(bad)?,
+        mix: u64_at(off + 16).ok_or_else(bad)?,
+    };
+    Ok(DecodedSnapshot { facts, trailer, digest: Some(digest) })
 }
 /// `[ST_OK][u8 present][fact?]` → `Option<Fact>`.
 pub(crate) fn dec_opt_fact_resp(resp: &Bytes) -> Result<Option<Fact>, crate::BlackboardError> {
@@ -365,8 +409,15 @@ pub(crate) fn spawn_primary_handlers(bb: &Arc<Blackboard>) -> Vec<tokio::task::J
         }
     });
 
-    handler!("snapshot", req, |me: &Arc<Blackboard>, _req: &mycelium::RpcRequest| {
+    handler!("snapshot", req, |me: &Arc<Blackboard>, req: &mycelium::RpcRequest| {
         match me.store() {
+            // A digest probe (ER6 PR B): the sequence is read before the live set, so a digest never
+            // claims a sequence newer than the set it covers.
+            Some(store) if req.payload().as_ref() == [SNAP_REQ_DIGEST] => {
+                let seq = me.replication_seq();
+                let (count, mix) = store.live_digest(&std::collections::HashSet::new());
+                digest_to_bytes(store.mirror_snapshot_next_id(), SnapshotDigest { seq, count, mix })
+            }
             Some(store) => snapshot_to_bytes(&store.mirror_snapshot()),
             None => vec![ST_ERR],
         }
@@ -483,9 +534,10 @@ mod snapshot_trailer_tests {
         let snap = MirrorSnapshot { facts: facts(), next_id: 99, acked: vec![(8, 3)] };
         let bytes = Bytes::from(snapshot_to_bytes(&snap));
         assert_eq!(dec_facts_resp(&bytes).unwrap(), facts());
-        let (got, trailer) = dec_snapshot_resp(&bytes).unwrap();
-        assert_eq!(got, facts());
-        let trailer = trailer.expect("the trailer");
+        let got = dec_snapshot_resp(&bytes).unwrap();
+        assert_eq!(got.facts, facts());
+        assert_eq!(got.digest, None);
+        let trailer = got.trailer.expect("the trailer");
         assert_eq!(trailer.next_id, 99);
         assert_eq!(trailer.acked_ids().collect::<Vec<_>>(), vec![8, 9, 10]);
     }
@@ -496,13 +548,27 @@ mod snapshot_trailer_tests {
     #[test]
     fn an_old_snapshot_without_a_trailer_still_applies() {
         let old = Bytes::from(facts_to_bytes(&facts()));
-        assert_eq!(dec_snapshot_resp(&old).unwrap(), (facts(), None));
+        let plain = DecodedSnapshot { facts: facts(), trailer: None, digest: None };
+        assert_eq!(dec_snapshot_resp(&old).unwrap(), plain);
         let mut unknown = facts_to_bytes(&facts());
         unknown.extend_from_slice(&[9, 1, 2, 3]);
-        assert_eq!(dec_snapshot_resp(&Bytes::from(unknown)).unwrap(), (facts(), None));
+        assert_eq!(dec_snapshot_resp(&Bytes::from(unknown)).unwrap(), plain);
         let mut cut = snapshot_to_bytes(&MirrorSnapshot { facts: facts(), next_id: 99, acked: vec![(8, 3)] });
         cut.truncate(cut.len() - 1);
         assert!(dec_snapshot_resp(&Bytes::from(cut)).is_err());
+    }
+
+    /// ER6 PR B: the digest-only answer round-trips — no facts, the fence, the digest — and a
+    /// pre-ER6 mirror reading it sees an empty facts list (it never asks for one).
+    #[test]
+    fn a_digest_answer_round_trips() {
+        let d = SnapshotDigest { seq: 4, count: 2, mix: 0xdead_beef };
+        let bytes = Bytes::from(digest_to_bytes(123, d));
+        let got = dec_snapshot_resp(&bytes).unwrap();
+        assert!(got.facts.is_empty());
+        assert_eq!(got.trailer, Some(SnapshotTrailer { next_id: 123, acked: Vec::new() }));
+        assert_eq!(got.digest, Some(d));
+        assert!(dec_facts_resp(&bytes).unwrap().is_empty());
     }
 }
 

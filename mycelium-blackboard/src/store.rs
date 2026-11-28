@@ -66,6 +66,15 @@ fn fresh_id_base_after(last: &AtomicU64) -> u64 {
     }
 }
 
+/// One id's contribution to the live-set digest (ER6 PR B): the splitmix64 finaliser, so the xor of
+/// a set's mixes changes when any one id does.
+pub(crate) fn digest_mix(id: u64) -> u64 {
+    let mut z = id.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 /// An in-flight (claimed-but-not-terminal) fact and when it was claimed (for the deadline sweep).
 struct Inflight {
     fact: Fact,
@@ -291,6 +300,11 @@ impl BoardStore {
         Ok(true)
     }
 
+    /// The id this board issues next (ER6 PR B: the fence a digest answer carries).
+    pub(crate) fn mirror_snapshot_next_id(&self) -> u64 {
+        self.next_id.load(Ordering::Relaxed)
+    }
+
     /// Whether this board remembers `id` as acked (ER6).
     pub fn remembers_acked(&self, id: u64) -> bool {
         self.inner.lock().tombstones.contains(id)
@@ -450,6 +464,27 @@ impl BoardStore {
         let acked = g.tombstones.ranges();
         drop(g);
         MirrorSnapshot { facts, next_id: self.next_id.load(Ordering::Relaxed), acked }
+    }
+
+    /// The live-set digest (ER6 PR B): how many live facts, and the xor of each id's
+    /// [`digest_mix`], skipping `exclude` (a mirror's unvouched facts).
+    pub(crate) fn live_digest(&self, exclude: &std::collections::HashSet<u64>) -> (u64, u64) {
+        let g = self.inner.lock();
+        let mut count = 0u64;
+        let mut mix = 0u64;
+        for id in g.available.keys().chain(g.inflight.keys()) {
+            if !exclude.contains(id) {
+                count += 1;
+                mix ^= digest_mix(*id);
+            }
+        }
+        (count, mix)
+    }
+
+    /// Every live fact id (claimable + in-flight).
+    pub(crate) fn live_ids(&self) -> Vec<u64> {
+        let g = self.inner.lock();
+        g.available.keys().chain(g.inflight.keys()).copied().collect()
     }
 
     /// Snapshot of every live fact (claimable + in-flight).
