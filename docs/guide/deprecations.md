@@ -5816,10 +5816,12 @@ that replicates after its position has passed it ([what is proven](../operations
 `mailbox/{target}/{kind}/{hlc:016x}/{sender}`, the log route's shape; before, the key was `…/{hlc:016x}` and two nodes
 whose clocks handed out one stamp in one millisecond wrote one key, so last-writer-wins kept one of the two events while
 both calls returned `true` (R7-01). The reader accepts both shapes, with no removal date for the old one: sixteen hex
-digits, then nothing or one `/{sender}` segment. Events are delivered in `(hlc, key)` order; at one stamp an old-shape
+lowercase hex digits, then nothing or one `/{sender}` segment that parses as a node id (a socket address). Events are delivered in `(hlc, key)` order; at one stamp an old-shape
 entry comes before a salted one. An entry under a mailbox's prefix whose remainder is **neither** shape — a kind
-containing `/`, such as kind `a/b`'s entries under mailbox `a` — is no longer delivered to that mailbox with
-`hlc_ts = 0` and deleted: it is left alone, for its own mailbox. Refusing a `/` in a kind at `deliver` is a follow-up.
+containing `/`, such as kind `a/b`'s entries under mailbox `a` — is left alone for its own mailbox: not delivered,
+not deleted, traced at `debug`. This holds while kinds hold no `/` followed by exactly one socket-address segment;
+a kind such as `a/127.0.0.1:9000` read by mailbox `a` is still ambiguous, and only refusing `/` at `deliver` (a
+follow-up) closes it. Refusing a `/` in a kind at `deliver` is a follow-up.
 `MeshEvent` is unchanged: `hlc_ts` is the key's first segment, `sender` still comes from the value.
 
 **The delete (R7-03).** A consumed event's tombstone is now handed to the WAL after it is applied, as the insert is, so

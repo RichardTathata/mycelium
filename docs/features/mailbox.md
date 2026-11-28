@@ -5,7 +5,8 @@
 A [mailbox](../guide/00-concepts.md#mailbox) delivers events to one node in order, through the gossip KV. Any node that
 knows a target's id writes an event under `mailbox/{target}/{kind}/{hlc}/{sender}`; it spreads like any other key, so a target
 that was down receives its pending events when it reconnects. The target's watcher hands events over in HLC order and
-then deletes each one, gossiping the tombstone so it is not delivered again after a restart. Where the delete happens
+then deletes each one, gossiping the tombstone and queueing it to the WAL (not synced), so it is not delivered again
+after a restart once the delete reaches disk — at-least-once: a crash before then can bring it back. Where the delete happens
 differs by consumer: the in-process mailbox deletes an event when it enters the receiver's channel, the gateway's
 stream only once it has handed the event to the HTTP connection.
 

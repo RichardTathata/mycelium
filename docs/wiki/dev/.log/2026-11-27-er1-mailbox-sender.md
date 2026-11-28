@@ -13,9 +13,10 @@ Durable knowledge:
   empty; an entry it will never consume (a suffix that is neither shape, e.g. kind `a/b`'s under mailbox `a`) must
   leave the scan in the same `retain` as the in-flight filter, or the loop never ends.
 - **A prefix scan of `{kind}/` sees every kind that extends it with `/`.** The strict suffix parse (sixteen hex digits,
-  then nothing or one segment with no `/`) is what keeps mailbox `a` out of kind `a/b`. Refusing `/` in a kind at
+  then nothing or one segment that parses as a node id) is what keeps mailbox `a` out of kind `a/b`. Refusing `/` in a kind at
   deliver is a follow-up (decision D9′).
-- **Every tombstone a node writes for durable state is handed to the WAL**, as its insert was: the mailbox's
+- **The mailbox's tombstone is now handed to the WAL**, as its insert was (this is not yet true of every
+  tombstone: ER11 enumerates about forty sites, e.g. `state_machine.rs`, `mcp.rs`). The mailbox's
   `tombstone` applied and gossiped but never appended, so a node that exited without `shutdown()` replayed the insert
   and redelivered a consumed event. The rung is *queued*, not synced (`append_try`).
 - **Mixed fleets:** an older receiver parses the whole remainder as hex and delivers a salted event with

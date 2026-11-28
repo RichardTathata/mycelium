@@ -49,8 +49,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to one target and kind in one millisecond with one logical count wrote one key, `mailbox/{target}/{kind}/{hlc}`, and
   last-writer-wins kept one of the two events while both calls returned `true`. The key is now
   `mailbox/{target}/{kind}/{hlc:016x}/{sender}`; the old shape is still read. An entry under a mailbox's prefix that is
-  neither shape (kind `a/b` under mailbox `a`) is no longer delivered to the wrong mailbox with `hlc_ts = 0` and
-  deleted: it is left for its own. **Upgrade receivers before or with senders:** an older receiver delivers a salted
+  neither shape (kind `a/b` under mailbox `a`) is left for its own mailbox (not delivered with `hlc_ts = 0`, not
+  deleted). **Upgrade receivers before or with senders:** an older receiver delivers a salted
   event with `hlc_ts == 0`. `deprecations.md` §TBD-ER1.
 - **A consumed mailbox event stays consumed after an abrupt exit** (ER1, with the reviewer's R7-03). The mailbox's
   delete was applied and gossiped but never handed to the WAL, so a node that exited without `shutdown()` replayed the

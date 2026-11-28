@@ -5,7 +5,8 @@
 //! that knows the target's [`NodeId`] can deliver; the event propagates
 //! via the normal gossip KV path. The target's [`open_mailbox`] watcher
 //! picks up new entries in causal order, delivers them to a channel, and
-//! tombstones each entry so it is not redelivered after restart.
+//! tombstones each entry — gossiped, and queued to the WAL (not synced) — so it
+//! is not redelivered after a restart once the delete is on disk (at-least-once).
 //!
 //! ## Delivery guarantees
 //!
@@ -202,16 +203,18 @@ pub(crate) fn mailbox_key(target: &NodeId, kind: &str, hlc: u64, sender: &NodeId
 }
 
 /// The stamp of an entry from its key's remainder after [`mailbox_prefix`]: `{hlc:016x}` (2.40 and earlier)
-/// or `{hlc:016x}/{sender}` — exactly sixteen hex digits, then nothing or one non-empty segment with no
-/// further `/`. `None` is neither shape: another kind's entry (`a/b`'s under mailbox `a`), not this
-/// mailbox's to deliver or delete.
+/// or `{hlc:016x}/{sender}` — exactly sixteen **lowercase** hex digits (what every writer writes), then
+/// nothing or one segment that parses as a [`NodeId`] (a socket address, so it holds no `/` and is never
+/// sixteen hex digits). `None` is neither shape: another kind's entry — `a/b`'s under mailbox `a`, or a 2.40
+/// writer's `a/0123456789abcdef/{hlc}` — not this mailbox's to deliver or delete. Still ambiguous: a kind
+/// whose last segment is a socket address (`a/127.0.0.1:9000`); refusing `/` in a kind at deliver closes it.
 fn parse_suffix(suffix: &str) -> Option<u64> {
     let (hex, sender) = match suffix.split_once('/') {
         Some((hex, sender)) => (hex, Some(sender)),
         None => (suffix, None),
     };
-    if hex.len() != 16 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
-    if sender.is_some_and(|s| s.is_empty() || s.contains('/')) { return None; }
+    if hex.len() != 16 || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) { return None; }
+    if sender.is_some_and(|s| s.parse::<NodeId>().is_err()) { return None; }
     u64::from_str_radix(hex, 16).ok()
 }
 
@@ -268,7 +271,12 @@ async fn drain_prefix(
                 .into_iter()
                 .filter(|(key, _)| in_flight.as_ref().is_none_or(|p| !p.contains_key(key)))
                 .filter_map(|(key, value)| {
-                    let hlc = parse_suffix(key.strip_prefix(prefix.as_ref())?)?;
+                    let Some(hlc) = key.strip_prefix(prefix.as_ref()).and_then(parse_suffix) else {
+                        // Left alone; traced, not counted (no mailbox counter reaches `/stats`). Seen on every
+                        // drain of this mailbox while the entry stays, hence `debug`.
+                        tracing::debug!(mailbox = %prefix, key = %key, "mailbox drain: an entry that is neither mailbox key shape is skipped");
+                        return None;
+                    };
                     Some((hlc, key, value))
                 })
                 .collect()
@@ -821,13 +829,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// The review of ER1, nit 1: a 2.40 writer's event of kind `a/0123456789abcdef` sits at
+    /// `mailbox/{t}/a/0123456789abcdef/{hlc}`, whose remainder under mailbox `a` is sixteen hex digits and one
+    /// more segment — the salted shape, unless the segment must be a sender. It must: a `NodeId` is a socket
+    /// address, never sixteen hex digits, so mailbox `a` leaves the entry for its own mailbox.
+    #[tokio::test]
+    async fn an_old_shape_entry_of_a_hex_named_subkind_is_left_alone() {
+        let agent = solo_agent().await;
+        let id = agent.node_id().clone();
+        let ctx = Arc::clone(&agent.task_ctx);
+        let ts = ctx.hlc.tick();
+        let foreign_prefix = format!("mailbox/{id}/a/0123456789abcdef/");
+        put_raw(&ctx, format!("{foreign_prefix}{ts:016x}"), &id, b"for a/0123456789abcdef");
+
+        let prefix: Arc<str> = Arc::from(mailbox_prefix(&id, "a").as_str());
+        let (tx, mut rx) = mpsc::channel(8);
+        tokio::time::timeout(Duration::from_secs(2), drain_prefix(&ctx, &prefix, &Arc::from("a"), &Sink::Immediate(tx)))
+            .await.expect("the drain ends");
+        assert!(rx.try_recv().is_err(), "kind a/0123456789abcdef's event was delivered to mailbox a");
+        assert_eq!(agent.kv().scan_prefix(&foreign_prefix).len(), 1, "and was tombstoned by mailbox a");
+
+        let (handle, mut own) = agent.service().open_mailbox("a/0123456789abcdef", 8);
+        let got = recv_up_to(&mut own, 1).await;
+        assert_eq!(got.len(), 1, "its own mailbox delivers it");
+        assert_eq!(got[0].hlc_ts, ts);
+        drop(handle);
+        agent.shutdown().await;
+    }
+
     /// The strict suffix parse: the two shapes and nothing else.
     #[test]
     fn the_suffix_parse_accepts_exactly_the_two_shapes() {
         assert_eq!(parse_suffix("00000000000000ff"), Some(0xff));
         assert_eq!(parse_suffix("00000000000000ff/127.0.0.1:9000"), Some(0xff));
         for neither in ["", "ff", "00000000000000ff/", "00000000000000ff/a/b", "b/00000000000000ff",
-                        "b/00000000000000ff/127.0.0.1:9000", "0000000000000000ff", "00000000000000fg"] {
+                        "b/00000000000000ff/127.0.0.1:9000", "0000000000000000ff", "00000000000000fg",
+                        // Not a sender (review nit 1): a 2.40 key of kind `{k}/{16 hex}`; any non-address.
+                        "0123456789abcdef/00000000000000ff", "00000000000000ff/not-a-node",
+                        // Upper case (review nit 4): no writer writes it.
+                        "00000000000000FF", "00000000000000FF/127.0.0.1:9000"] {
             assert_eq!(parse_suffix(neither), None, "{neither:?}");
         }
         let (t, s) = (NodeId::new("127.0.0.1", 1).unwrap(), NodeId::new("127.0.0.1", 2).unwrap());
