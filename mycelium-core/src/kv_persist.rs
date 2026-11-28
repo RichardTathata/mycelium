@@ -146,8 +146,11 @@ impl<V> Registrations<V> {
         let mut inner = self.lock();
         let list = inner.held.get_mut(key)?;
         let pos = list.iter().position(|(i, _)| *i == id)?;
-        list[pos].1 = value;
-        (pos + 1 == list.len()).then(|| then(&list[pos].1))
+        let old = std::mem::replace(&mut list[pos].1, value);
+        let r = (pos + 1 == list.len()).then(|| then(&list[pos].1));
+        drop(inner);
+        drop(old); // A value's own `Drop` runs outside the lock.
+        r
     }
 
     /// Whether registration `id` holds `key` — it is the newest registered. A snapshot: another registration may
@@ -168,15 +171,20 @@ impl<V> Registrations<V> {
         let Some(list) = inner.held.get_mut(key) else { return then(Withdrawal::NotHolder) };
         let Some(pos) = list.iter().position(|(i, _)| *i == id) else { return then(Withdrawal::NotHolder) };
         let held = pos + 1 == list.len();
-        list.remove(pos);
-        if !held {
-            return then(Withdrawal::NotHolder);
-        }
-        if list.is_empty() {
+        // Kept until the lock is released: the withdrawn value's own `Drop` (the last `Arc` of a prompt skill's
+        // backend, say) must not run under the table's lock (review round 1).
+        let removed = list.remove(pos);
+        let r = if !held {
+            then(Withdrawal::NotHolder)
+        } else if list.is_empty() {
             inner.held.remove(key);
-            return then(Withdrawal::Last);
-        }
-        then(Withdrawal::Successor(&list[list.len() - 1].1))
+            then(Withdrawal::Last)
+        } else {
+            then(Withdrawal::Successor(&list[list.len() - 1].1))
+        };
+        drop(inner);
+        drop(removed);
+        r
     }
 }
 
@@ -204,28 +212,28 @@ impl HeldKey {
 
     /// Register `value` under `key` and write it now — a key written once, as an MCP tool's schema is: applied,
     /// handed to the WAL (try-send) and gossiped (try-send), as [`ops::kv_set`](crate::ops::kv_set) writes. A value
-    /// too large for one gossip frame is refused as `kv_set` refuses it — logged, nothing written — and the
-    /// registration still holds the key, with nothing to hand back.
+    /// too large for one gossip frame is refused as `kv_set` refuses it — logged, nothing written — and **nothing is
+    /// registered** either (ER10 review round 1): the returned registration never holds the key and withdraws
+    /// nothing, so an older registration keeps the key, its value and the name. Registering it anyway made the
+    /// newest registration one whose value no key carried, and its loop the only one serving the name.
     pub fn register_written(ctx: &Arc<CoreCtx>, key: Arc<str>, value: Bytes) -> Self {
-        let fits = key.len() + value.len() <= crate::framing::MAX_KV_WRITE_BYTES;
-        if !fits {
+        if key.len() + value.len() > crate::framing::MAX_KV_WRITE_BYTES {
             tracing::warn!(key = %key, size = key.len() + value.len(), limit = crate::framing::MAX_KV_WRITE_BYTES,
-                "kv write rejected: key + value cannot fit a gossip frame; the registration writes nothing");
+                "kv write rejected: key + value cannot fit a gossip frame; nothing is registered for this name");
+            return Self { ctx: Arc::clone(ctx), key, id: 0, withdrawn: true };
         }
-        let stored = fits.then(|| value.clone());
-        let (id, update) = ctx.soft_state_holders.register(&key, stored, |v| v.as_ref().map(|v| {
-            crate::framing::make_gossip_update(&ctx.node_id, ctx.default_ttl, Arc::clone(&key), v.clone(), false, &ctx.hlc)
-        }));
-        if let Some(update) = update {
-            apply_and_notify(&ctx.kv_state, &update);
-            if let Some(wal) = ctx.wal.get() {
-                wal.append_try(crate::framing::sync_entry_from(&update));
-            }
-            dispatch_gossip_try_send(
-                &ctx.gossip_txs, crate::framing::local_kv_wire_msg(ctx, update),
-                ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
-            );
+        let (id, update) = ctx.soft_state_holders.register(&key, Some(value), |v| {
+            let v = v.clone().unwrap_or_default();
+            crate::framing::make_gossip_update(&ctx.node_id, ctx.default_ttl, Arc::clone(&key), v, false, &ctx.hlc)
+        });
+        apply_and_notify(&ctx.kv_state, &update);
+        if let Some(wal) = ctx.wal.get() {
+            wal.append_try(crate::framing::sync_entry_from(&update));
         }
+        dispatch_gossip_try_send(
+            &ctx.gossip_txs, crate::framing::local_kv_wire_msg(ctx, update),
+            ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
+        );
         Self { ctx: Arc::clone(ctx), key, id, withdrawn: false }
     }
 
@@ -237,7 +245,8 @@ impl HeldKey {
     /// Whether this registration holds its key — it is the newest — so its value is the one the key carries, and
     /// the one a caller of the name is served by. A snapshot (see [`Registrations::holds`]).
     pub fn holds(&self) -> bool {
-        self.ctx.soft_state_holders.holds(&self.key, self.id)
+        // Ids start at 1; 0 is a registration refused at `register_written`, which never holds its key.
+        self.id != 0 && self.ctx.soft_state_holders.holds(&self.key, self.id)
     }
 
     /// Record `value` as this registration's newest, and, if it holds the key, the update that writes it (stamped

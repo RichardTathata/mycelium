@@ -88,6 +88,7 @@ the notice.
 | 135 | a node, or code driving `Provisioner::provision_round`, that ran two builds of one capability name side by side (two catalogue lines for one `{ns}/{name}`, each a different artifact); a decision-trace reader matching `already_started_this_round` | unreleased (engineering review ER4, R12-01) | one line per name, or expect the second line to wait — it installs once the first build's entry leaves the map (a withdraw, a shed, a probe failure, a failed install, a stop); read `capability_already_held` | **No** — behaviour and trace reasons ([§135](#135-one-capability-name-runs-one-build-per-provisioner-a-second-catalogue-line-for-the-name-waits-unreleased-er4-r12-01)) |
 | 136 | code that calls `BoardStore::discard` or `post_with_id` directly and relies on an absent id being forgotten, on a re-post of a held id being logged again, or on a post of an acked id being applied | unreleased (engineering review ER6) | read `remembers_acked` / `refused_acked`; a board that must take an id again needs a new id, which is the rule | **No** — a behaviour change only ([§136](#136-a-blackboard-remembers-the-ids-it-acked-and-a-mirror-acts-on-them-unreleased-engineering-review-er6-r11-01-r11-04)) |
 | TBD-ER10 | code that registered one name twice on one node — two `declare_requirement`s of one filter, a replacement `advertise_capability`, `register_prompt_skill` or `register_mcp_tool` before dropping the old handle — and relied on the first drop withdrawing the name; a stem or `units/declare` given a unit with two `[[requirement]]`s of one name and different filters; a `CoreCtx` literal | unreleased (engineering review ER10; R6-06, R10-03, R21, R22) | drop every handle of the name to withdraw it; one filter per name in a unit file; add `soft_state_holders` to the literal | **No** — behaviour, and a refusal by name at the declaring doors; **yes** for the literal ([§TBD-ER10](#tbd-er10-a-handle-withdraws-only-its-own-registration-of-a-name-the-last-one-tombstones-it-unreleased-er10)) |
+| TBD-ER10 | code that registered one name twice on one node — two `declare_requirement`s of one filter, a replacement `advertise_capability`, `register_prompt_skill` or `register_mcp_tool` before dropping the old handle — and relied on the first drop withdrawing the name; a stem or `units/declare` given a unit with two `[[requirement]]`s of one name and different filters; a `CoreCtx` literal | unreleased (engineering review ER10; R6-06, R10-03, R21, R22) | drop every handle of the name to withdraw it; one filter per name in a unit file; add `soft_state_holders` to the literal; build `run_kv_persist_task`'s future where you spawn it | **No** — behaviour, and a refusal by name at the declaring doors; **yes** for the literal ([§TBD-ER10](#tbd-er10-a-handle-withdraws-only-its-own-registration-of-a-name-the-last-one-tombstones-it-unreleased-er10)) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -6142,10 +6143,21 @@ other went unreported (R21).
   `NodeCapabilityConfig::requirement_filters_conflict`). The loader still loads it: `wire-check` reads such a file
   as shapes and checks each filter. The same filter twice is one requirement.
 
-**What did not change.** No KV key, value, wire or public API change; `CoreCtx` gains a field. Node-local and above
-Layer I: `apply_and_notify` accepts what it accepted, and another member's write to the key is neither refused nor
-looked at (detection, not prevention). Two different filters for one name declared in code still publish one
-record — the newest's. A call that arrives at the instant a replacement is registered or dropped may be served by the
+**What changed for an adopter of the API.** No KV key, value or wire change. `CoreCtx` gains a field
+(`soft_state_holders`). `Registrations`, `HeldKey` and `Withdrawal` are new public items of
+`mycelium_core::kv_persist`. **`run_kv_persist_task` is now a plain `fn` that registers when it is called** and
+returns the future: code that builds the future and spawns it later has, from the call on, a registration that
+holds the key (an older writer of the key stops refreshing it) — build it where you spawn it.
+
+**What did not change.** Node-local and above Layer I: `apply_and_notify` accepts what it accepted, and another
+member's write to the key is neither refused nor looked at (detection, not prevention). **Across nodes nothing
+changes**: `cap-group/{group}` is not node-scoped, so two nodes defining one group still withdraw each other's
+definition. Two different filters for one name declared in code still publish one record — the newest's — and the
+requirement's opacity now follows that same filter (review round 1). Two `[[capability]]`s or two `[[group]]`s of one
+name with different values are not refused: the key now steadily carries the newest one's value, where before the
+two refreshers alternated. A gateway client with `cap:write` that advertises a name the node already advertises in
+process (or a librarian and a stem's cache on one node) now replaces the node's own value until the client's handle
+drops — newest wins; authority is still checked where the work runs. A call that arrives at the instant a replacement is registered or dropped may be served by the
 outgoing registration, or by neither. `tools/` keys are still written once and not refreshed.
 
 ***Check:*** a node that runs two workflows needing one model keeps its demand visible until the last releases it;

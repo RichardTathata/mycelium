@@ -205,6 +205,14 @@ impl ModelReg {
     /// runtime detail, not a contract, so this method makes it explicit: the retraction
     /// is *observed* (a bounded structural poll on `resolve`) before the new ad is
     /// advertised. Cost: one scheduler hop. Returns `true` when the ad was replaced.
+    ///
+    /// **Since ER10 the hazard is closed in the substrate** (`mycelium_core::kv_persist::Registrations`):
+    /// a node keeps its live registrations of each key, newest last, and a dropped handle
+    /// writes nothing while a newer registration holds the key, so the old task's
+    /// tombstone can no longer land over the new ad. The wait is kept — it is bounded and
+    /// harmless — but it is no longer what makes this correct; advertising the new ad
+    /// before dropping the old would now also be safe, and would avoid the moment between
+    /// the two in which `llm-meta/{model}` reads absent.
     pub async fn refresh_meta(&mut self, agent: &Arc<GossipAgent>, profile: &ModelProfile) -> bool {
         let next = profile.meta_capability();
         if next == self.advertised {

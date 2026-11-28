@@ -420,25 +420,44 @@ pub(super) async fn run_consolidated_opacity_watcher(
     let mut local: Vec<LocalEntry> = Vec::new();
     let mut cap_rx = subscribe_prefix_on_kv(&ctx.kv_state, Arc::<str>::from("cap/"));
 
-    // Initial pass: pick up any entries registered before the task started.
-    {
-        let guard = registry.entries.lock().unwrap_or_else(|e| e.into_inner());
-        for reg in guard.iter() {
-            let satisfied = !resolve_filter_against_kv(&ctx.kv_state, &reg.filter).is_empty();
-            let opaque_written = if !satisfied {
-                write_opacity_key(&ctx, &reg.opacity_key);
-                true
-            } else {
-                false
-            };
-            local.push(LocalEntry {
-                opacity_key:    Arc::clone(&reg.opacity_key),
-                filter:         Arc::clone(&reg.filter),
-                cancelled:      Arc::clone(&reg.cancelled),
-                opaque_written,
-            });
+    // Track, for each opacity key, its **newest live registration** — the one whose filter the `req/` record
+    // carries (ER10; review round 1: the merge used to skip a key already tracked, and the first pass did not
+    // dedupe, so two filters of one name were judged by the oldest while the record carried the newest). A cancelled
+    // registration is kept in the registry only while it is the one tracked here, for the scan below to clear or
+    // hand over; any other is dropped, so none lingers.
+    fn adopt_newest(ctx: &TaskCtx, registry: &FilterOpacityRegistry, local: &mut Vec<LocalEntry>) {
+        let newest: Vec<(Arc<str>, Arc<CapFilter>, Arc<AtomicBool>)> = {
+            let mut entries = registry.entries.lock().unwrap_or_else(|e| e.into_inner());
+            entries.retain(|e| !e.cancelled.load(Ordering::Acquire) || local.iter().any(|l| Arc::ptr_eq(&l.cancelled, &e.cancelled)));
+            let mut newest: Vec<(Arc<str>, Arc<CapFilter>, Arc<AtomicBool>)> = Vec::new();
+            for e in entries.iter().rev() {
+                if e.cancelled.load(Ordering::Acquire) || newest.iter().any(|(k, _, _)| *k == e.opacity_key) {
+                    continue;
+                }
+                newest.push((Arc::clone(&e.opacity_key), Arc::clone(&e.filter), Arc::clone(&e.cancelled)));
+            }
+            newest
+        };
+        for (opacity_key, filter, cancelled) in newest {
+            match local.iter_mut().find(|l| l.opacity_key == opacity_key) {
+                // The scan re-judges the key under the newest filter, writing or clearing it.
+                Some(l) => if !Arc::ptr_eq(&l.cancelled, &cancelled) {
+                    l.filter = filter;
+                    l.cancelled = cancelled;
+                },
+                None => {
+                    let satisfied = !resolve_filter_against_kv(&ctx.kv_state, &filter).is_empty();
+                    if !satisfied {
+                        write_opacity_key(ctx, &opacity_key);
+                    }
+                    local.push(LocalEntry { opacity_key, filter, cancelled, opaque_written: !satisfied });
+                }
+            }
         }
     }
+
+    // Initial pass: pick up any entries registered before the task started.
+    adopt_newest(&ctx, &registry, &mut local);
 
     loop {
         tokio::select! { biased;
@@ -448,27 +467,7 @@ pub(super) async fn run_consolidated_opacity_watcher(
         }
 
         // Merge entries added since last wake.
-        {
-            let guard = registry.entries.lock().unwrap_or_else(|e| e.into_inner());
-            for reg in guard.iter() {
-                if local.iter().any(|e| e.opacity_key == reg.opacity_key) {
-                    continue;
-                }
-                let satisfied = !resolve_filter_against_kv(&ctx.kv_state, &reg.filter).is_empty();
-                let opaque_written = if !satisfied {
-                    write_opacity_key(&ctx, &reg.opacity_key);
-                    true
-                } else {
-                    false
-                };
-                local.push(LocalEntry {
-                    opacity_key:    Arc::clone(&reg.opacity_key),
-                    filter:         Arc::clone(&reg.filter),
-                    cancelled:      Arc::clone(&reg.cancelled),
-                    opaque_written,
-                });
-            }
-        }
+        adopt_newest(&ctx, &registry, &mut local);
 
         // Scan all live entries; remove cancelled ones after clearing their key.
         let mut i = 0;

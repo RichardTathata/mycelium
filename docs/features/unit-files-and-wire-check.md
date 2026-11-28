@@ -67,6 +67,9 @@ runs it, and the [sixth tutorial](../guide/tutorials/06-declared-versus-observed
   declares as a plain `[[capability]]`, and a `blob`-provided capability, are read that way too
   ([row](../operations/what-is-proven.md#wire-check-does-not-know-a-declared-capability-is-hosted)). A provider that
   decides on the calling unit's principal is not built (identity-and-lifecycle §9, O9).
+- **A file the check reads that a node refuses to declare** (ER10, R21; [§TBD-ER10](../guide/deprecations.md)): two
+  `[[requirement]]`s of one `ns/name` with different filters. The check reads each filter on its own; a stem and
+  `units/declare` refuse the unit by name, since a node publishes one requirement record per name.
 - **Not known to the check, by design:** placement — `[hosts]` describes eligibility and the check never says which
   host installs, nor which node a `node:` rule's caller is; an observed binding — the answer is *would bind* and
   *could admit*.

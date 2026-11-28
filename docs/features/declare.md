@@ -67,6 +67,9 @@ in [`tests/cli_json.rs`](../../tests/cli_json.rs), beside `a_retraction_the_gate
   the window between the two is a reader's moment of absence. The order was forced by one KV key per `ns/name`, whose
   old handle's drop tombstoned the new advert; since ER10 a node keeps the newer registration in either order
   ([§TBD-ER10](../guide/deprecations.md)), so declaring first would close the window — not done yet.
+- A unit with two `[[requirement]]`s of one name and different filters is refused (`422`, `requirement declared
+  twice`). The check is per request: two unit files, or a stem's unit and a gateway declare, can still give one name
+  two filters on one node, and its record carries the newest declaration's.
 - A removed unit file is retracted; a removed skill file's template is deleted. A retraction the gateway does not
   confirm is said — in the tick's warnings, or at Ctrl-C as `failed` with exit 1 — never counted retracted; it lapses
   with its lease.

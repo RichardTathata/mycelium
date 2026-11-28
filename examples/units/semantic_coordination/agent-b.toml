@@ -1,4 +1,9 @@
 # agent-b: the render GPU (schema acme-render/v1) — and the requirer of every versioned shape the example resolves.
+#
+# A statement of shapes for `wire-check`, not a unit to declare on one node: it requires `compute/gpu` under three
+# filters, and a node publishes one requirement record per name (`req/{node}/compute/gpu`), so a stem refuses to start
+# with it and `POST /gateway/units/declare` answers 422 (ER10, R21; docs/guide/deprecations.md §TBD-ER10). The example
+# binary declares the three shapes in code, where the record carries the newest one's filter.
 principal = "agent-b"
 
 [[capability]]

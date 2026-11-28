@@ -52,7 +52,12 @@ CI compiles it and checks its declaration, and does not run it. That a retired a
   handle withdraws only its own registration — nothing while a newer one is live, the older one's value at once when
   it held the key, a tombstone only as the last (`registration_tests`, in
   [`src/agent/registration_tests.rs`](../../src/agent/registration_tests.rs)). Node-local; another member's write to
-  the key is not refused (detection, not prevention).
+  the key is not refused (detection, not prevention). Two advertisements of one name with different values are not
+  refused either: the key carries the newest. So a gateway client with `cap:write` that advertises a name this node
+  already advertises in process — or a librarian and a stem's cache on one node — replaces the node's own value until
+  its handle drops, and the node's value returns at once. Each is the newer promise of the same node; what a caller
+  may run is still decided where the work runs ([provider enforcement](provider-enforcement.md)). Across nodes
+  nothing changes: `cap-group/{group}` is not node-scoped, so two nodes defining one group still withdraw each other.
 - **Not built:** an advertisement is a claim, not proof the provider serves it or is authorised to — authority is
   checked where the work runs ([provider enforcement](provider-enforcement.md)); resolution is per node and can
   differ between nodes while gossip settles, and a crashed provider stays resolvable for up to three refresh

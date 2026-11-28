@@ -322,3 +322,61 @@ async fn dropping_the_newest_prompt_registration_restores_the_older_backend() {
         "a distinct name sharing the backend is untouched");
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
+
+// ── Review round 1 ───────────────────────────────────────────────────────────────────────────────────────────
+
+/// **Opacity follows the filter the record carries** (ER10 review round 1, from the reviewer's
+/// `rev_opacity_follows_the_filter_the_record_carries`). Two filters for one name declared in code: the `req/`
+/// record carries the newest's (v2, unserved), so the node must be opaque for it — the watcher used to keep tracking
+/// the first registration of the key (v1, served). The watcher is started first by an unrelated requirement, so
+/// both registrations reach it through the merge pass. Seen failing first: "the record says v2 (unserved) but the
+/// node is not opaque".
+#[tokio::test]
+async fn opacity_follows_the_filter_the_record_carries() {
+    let agent = node().await;
+    let _cap = agent.capabilities().advertise_capability(Capability::new("library", "hours").with_schema_id("v1"), LONG);
+    let v1 = CapFilter::new("library", "hours").with_schema("v1");
+    let v2 = CapFilter::new("library", "hours").with_schema("v2");
+    assert!(until(|| !agent.capabilities().resolve(&v1).is_empty(), Duration::from_secs(5)).await, "v1 is served");
+    assert!(agent.capabilities().resolve(&v2).is_empty(), "v2 is not");
+    let key = format!("req/{}/library/hours", agent.node_id());
+    let opacity = format!("sys/load/{}/req/library/hours", agent.node_id());
+    let _spawn_watcher = agent.capabilities().declare_requirement(CapFilter::new("other", "thing"), LONG);
+    tokio::time::sleep(SETTLE).await;
+    let old = agent.capabilities().declare_requirement(v1.clone(), LONG);
+    let new = agent.capabilities().declare_requirement(v2.clone(), LONG);
+    let filter_held = |a: &GossipAgent| a.kv().get(&key).and_then(|b| ReqEntry::decode(&b)).map(|e| e.filter);
+    assert!(until(|| filter_held(&agent) == Some(v2.clone()), Duration::from_secs(5)).await, "the record carries v2");
+    assert!(until(|| live(&agent, &opacity), SETTLE).await,
+        "the record says v2 (unserved) but the node is not opaque: the watcher tracks the oldest filter (v1)");
+    // Dropping the newest hands both the record and the opacity back to v1, which is served.
+    drop(new);
+    assert!(until(|| filter_held(&agent) == Some(v1.clone()) && !live(&agent, &opacity), Duration::from_secs(5)).await,
+        "dropping v2 left the node opaque for the served v1");
+    drop(old);
+    assert!(until(|| !live(&agent, &key) && !live(&agent, &opacity), Duration::from_secs(5)).await);
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// **An unwritable replacement does not take the name** (ER10 review round 1, from the reviewer's
+/// `rev_an_unwritable_replacement_does_not_take_the_name`). A replacement tool whose schema is too large for one
+/// gossip frame is refused its write; it must not register either, or the older tool — whose schema the key still
+/// carries — would stop serving while the replacement, advertised nowhere, answered. Seen failing first: the call
+/// was answered by "new".
+#[tokio::test]
+async fn an_unwritable_replacement_does_not_take_the_name() {
+    let agent = node().await;
+    let key = format!("tools/big/{}", agent.node_id());
+    let _old = register(&agent, "big", schema("small"), "old");
+    let huge = serde_json::json!({"type": "object", "description": "x".repeat(crate::framing::MAX_KV_WRITE_BYTES + 10)});
+    let new = register(&agent, "big", huge, "new");
+    let held = agent.kv().get(&key).and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    assert_eq!(held, Some(schema("small")), "the key carries the old schema");
+    let r = call_tool(&agent, "big").await;
+    assert!(r.contains("old"), "the advertised (old) tool must serve its name, got: {r}");
+    drop(new);
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(agent.kv().get(&key).and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()), Some(schema("small")),
+        "the refused registration's drop withdrew nothing");
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+}

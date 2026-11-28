@@ -42,3 +42,11 @@ outgoing registration or by neither.
 Pages: `architecture/runtime-invariants.md` (new section), `concurrency/lock-order.md` (row 83; row 21's note).
 Outside the wiki: `docs/features/capability-discovery.md`, `mcp-tools.md`, `llm-prompt-skills.md`, `declare.md`, `stem.md`,
 `docs/guide/deprecations.md` §TBD-ER10, `CHANGELOG.md`.
+
+**Review round 1 (2026-11-28).** The opacity watcher now tracks each key's newest live registration (it kept the
+oldest, so two filters of one name were judged by the one the record did not carry) and drops cancelled entries it
+does not track; `register_written` registers nothing when its write is refused (an unwritable replacement had taken
+the name from the tool whose schema the key carried); withdrawn and replaced values drop after the lock (row 83, also
+taken under row 22); deprecations §TBD-ER10 names the API changes (`run_kv_persist_task` registers when called; new
+public items) and the cross-node `cap-group/` limit; `unit-file.md`, `unit-files-and-wire-check.md`, `declare.md`,
+`capability-discovery.md`, the `agent-b.toml` example and `mycelium-reason`'s `refresh_meta` doc updated.
