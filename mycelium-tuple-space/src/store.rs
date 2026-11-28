@@ -287,7 +287,9 @@ impl TupleStore {
         state.put_total.fetch_add(1, Ordering::Relaxed);
         let hot = self.dispatch(&state, Arc::from(stage), id, payload)?;
         if hot {
-            state.hot_total.fetch_add(1, Ordering::Relaxed);
+            // Release: the dispatch's `take_total` increment for this hand-off precedes this one in
+            // program order, so a snapshot that Acquire-loads `hot_total` first sees it.
+            state.hot_total.fetch_add(1, Ordering::Release);
         }
         Ok(id)
     }
@@ -309,10 +311,11 @@ impl TupleStore {
         loop {
             match g.waiters.pop_front() {
                 None => {
-                    // After an undone hand-off, at the front: the lock was released for the send, and
-                    // anything queued since arrived after this item (an item is queued only while no
-                    // waiter is parked, and this one had found a waiter) — so the front keeps arrival
-                    // order. Its queue wait is measured from here, not from its put.
+                    // After an undone hand-off (a failed send), at the front: an item queued while the
+                    // lock was released for the send is usually newer, so a single undo keeps arrival
+                    // order. **Limit:** two producers undoing at once each push to the front, so
+                    // concurrent undone hand-offs may come back reversed relative to each other.
+                    // Its queue wait is measured from here, not from its put.
                     let item = (id, payload, std::time::Instant::now());
                     if undone { g.entries.push_front(item) } else { g.entries.push_back(item) }
                     state.depth.fetch_add(1, Ordering::Relaxed);
@@ -431,7 +434,9 @@ impl TupleStore {
         state.put_total.fetch_add(1, Ordering::Relaxed);
         let hot = self.dispatch_keyed(&state, Arc::from(stage), key, id, payload)?;
         if hot {
-            state.hot_total.fetch_add(1, Ordering::Relaxed);
+            // Release: the dispatch's `take_total` increment for this hand-off precedes this one in
+            // program order, so a snapshot that Acquire-loads `hot_total` first sees it.
+            state.hot_total.fetch_add(1, Ordering::Release);
         }
         Ok(id)
     }
@@ -464,7 +469,8 @@ impl TupleStore {
             };
             match next {
                 None => {
-                    // After an undone hand-off, at the front of the key's queue, as in `dispatch`.
+                    // After an undone hand-off, at the front of the key's queue — with `dispatch`'s
+                    // limit: concurrent undone hand-offs may come back reversed relative to each other.
                     let item = (id, payload, std::time::Instant::now());
                     let q = g.keyed_entries.entry(key).or_default();
                     if undone { q.push_front(item) } else { q.push_back(item) }
@@ -637,7 +643,9 @@ impl TupleStore {
         state.put_total.fetch_add(1, Ordering::Relaxed);
         let hot = self.dispatch(&state, Arc::from(next_stage), new_id, payload)?;
         if hot {
-            state.hot_total.fetch_add(1, Ordering::Relaxed);
+            // Release: the dispatch's `take_total` increment for this hand-off precedes this one in
+            // program order, so a snapshot that Acquire-loads `hot_total` first sees it.
+            state.hot_total.fetch_add(1, Ordering::Release);
         }
         Ok(new_id)
     }
@@ -670,7 +678,9 @@ impl TupleStore {
         state.put_total.fetch_add(1, Ordering::Relaxed);
         let hot = self.dispatch_keyed(&state, Arc::from(next_stage), key, new_id, payload)?;
         if hot {
-            state.hot_total.fetch_add(1, Ordering::Relaxed);
+            // Release: the dispatch's `take_total` increment for this hand-off precedes this one in
+            // program order, so a snapshot that Acquire-loads `hot_total` first sees it.
+            state.hot_total.fetch_add(1, Ordering::Release);
         }
         Ok(new_id)
     }
@@ -704,7 +714,9 @@ impl TupleStore {
             None => self.dispatch(&state, Arc::from(stage), id, payload)?,
         };
         if hot {
-            state.hot_total.fetch_add(1, Ordering::Relaxed);
+            // Release: the dispatch's `take_total` increment for this hand-off precedes this one in
+            // program order, so a snapshot that Acquire-loads `hot_total` first sees it.
+            state.hot_total.fetch_add(1, Ordering::Release);
         }
         Ok(())
     }
@@ -808,9 +820,12 @@ impl TupleStore {
                 depth: state.depth.load(Ordering::Relaxed),
                 waiters: state.waiters_count.load(Ordering::Relaxed),
                 put_total: state.put_total.load(Ordering::Relaxed),
-                // `hot_total` first: each hot hand-off bumps `take_total` before `hot_total`, so this
-                // order keeps `hot_total <= take_total` in every snapshot.
-                hot_total: state.hot_total.load(Ordering::Relaxed),
+                // `hot_total` first, with Acquire: every `hot_total` increment (put, put_keyed,
+                // complete, complete_keyed, put_with_id — checked at each site) is a Release that
+                // follows, in program order, the dispatch's `take_total` increment for the same
+                // hand-off, so the later `take_total` load sees at least as many: `hot_total <=
+                // take_total` in every snapshot, on weak memory models too.
+                hot_total: state.hot_total.load(Ordering::Acquire),
                 take_total: state.take_total.load(Ordering::Relaxed),
                 rejected_total: state.rejected_total.load(Ordering::Relaxed),
                 queue_p99_us: state.queue_p99_us(),

@@ -10,7 +10,9 @@ same capability-freshness election any provider uses, with no coordinator. An it
 re-queued after a timeout, so delivery is at least once. Keyed puts and takes add joins on a key: a key need not be
 unique — items under one key are claimed in arrival order (a re-queued one at the back, on the primary that re-queued
 it: a requeue is not logged, so after a restart or a failover a key's items are in id order), and workers parked on one
-key are served in arrival order and counted in the stage's `waiters`.
+key are served in arrival order and counted in the stage's `waiters`. One limit, in a lane or under a key: an item whose
+hand-off to a worker failed (the worker had just timed out) is re-queued at the front, so two such hand-offs at once may
+come back reversed relative to each other.
 
 ## When to use it, and when not
 

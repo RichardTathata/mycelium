@@ -17,12 +17,13 @@ Design: `docs/plans/mycelium-tuple-space.md`. Key facts:
   mirror apply, requeue, WAL replay) pushes, a take pops, an empty entry is removed; a
   keyed take that times out or is **dropped** (a cancelled task, a gateway client gone) has its
   registration pruned under the stage lock by the `KeyedWait` drop guard (a cold per-job key
-  leaves nothing). Keyed waiters count in `waiters`. An undone hand-off re-queues at the
-  **front** (everything queued meanwhile is newer). The per-key order is the live primary's: a
+  leaves nothing). Keyed waiters count in `waiters`. An undone hand-off (a failed send)
+  re-queues at the **front**; order is arrival order except that concurrent undone hand-offs may
+  come back reversed relative to each other (no sequence number, by choice). The per-key order is the live primary's: a
   requeue is not logged, so replay and `state_chunk` give id order. `take_total` is counted once,
   where an item enters in flight (`dispatch`/`dispatch_keyed` on a successful send, and the
   buffered pops after their `Take` is logged) — never by the woken taker; `metrics_snapshot`
-  loads `hot_total` before `take_total`. Template matching stays the
+  loads `hot_total` (Acquire, against Release increments) before `take_total`. Template matching stays the
   blackboard's territory.
 - **Roles** (`TupleRole`): `Primary` serves; `Secondary` mirrors (replicate RPCs +
   heartbeat) and promotes when the primary's capability evaporates — the ring *is* the

@@ -5946,7 +5946,9 @@ are small, must read the first id instead.
   given back (so the stage refused puts early, at a watermark it did not hold), and it came back only after a WAL
   reopen. A WAL holding two live same-key records now recovers both, in id order. A requeued keyed item goes to the
   back of its key's queue on the primary that re-queued it; a requeue writes no WAL record, so after a restart or a
-  failover (replay, a mirror's backfill) a key's items are in id order.
+  failover (replay, a mirror's backfill) a key's items are in id order. One limit, keyed or not: an item whose hand-off
+  failed (its worker had just timed out) is re-queued at the front, so concurrent undone hand-offs may come back
+  reversed relative to each other.
 - **A second worker parked on a key no longer evicts the first**, whose take used to return `Timeout` at once; same-key
   workers are served in arrival order. A timed-out keyed take removes only its own (closed) registration.
 - **`taken` (`TupleSpace::admission`) and `take_total` (`sys/tuple/…/take_total`, `metrics_snapshot`) fall to the true
