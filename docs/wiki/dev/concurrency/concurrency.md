@@ -9,7 +9,8 @@ recurring bug family — four ledger entries and counting, all reducible to one 
 - **[lock-order.md](lock-order.md)** — every `Mutex`/`RwLock` site, the flat-acquisition
   invariant, and the keep-it-honest rule.
 - **[lock-free-and-atomics.md](lock-free-and-atomics.md)** — the papaya mutation rules, the
-  single-flight waiter rule (a waiter accepts a run another thread makes for it; 2026-11-21) and
+  single-flight waiter rule (a waiter accepts a run another thread makes for it, 2026-11-21; a waiter that holds
+  the run hands it on once answered, 2026-11-28) and
   the memory-ordering policy for atomics.
 
 The `AgentStateMachine` commit discipline (validate-and-swap with budget reserve under the

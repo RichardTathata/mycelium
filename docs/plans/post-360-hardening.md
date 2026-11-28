@@ -2310,7 +2310,10 @@ waiter. The only retrying waiters were the two in `change_roots` and the test's 
 **#822's review found three more of the family, fixed in the PR.** (A) Nothing tested that a fold cut short by a
 change of roots answers no ticket: `a_fold_cut_short_by_a_change_of_roots_answers_no_ticket` (a narrowing planted in
 the first fold's merge) and `tickets_are_answered_under_a_busy_fold_and_changing_roots` (six waiters, 150 tickets
-each, a continuous folder, the roots re-activated every 15 ms), which catches a fold that reads its ticket late.
+each, a continuous folder, the roots re-activated every 15 ms), which catches a fold that reads its ticket late. *(Note,
+2026-11-28: from #822 that test hung about one CI run in eleven. A waiter that held the fold kept folding for the
+continuous folder and never returned to its answered ticket; a ticketed holder now hands the run on once answered,
+`SingleFlight::run_for`, wiki `lock-free-and-atomics`.)*
 (B) A lost request, released in 2.40.0, in both folds: a call tried `running` and then set `again`; between the two
 the holder could release `running`, find `again` clear and return, and the request waited for the next trigger (60 s
 or more). Both folds now share `src/agent/single_flight.rs`: ask first, then try `running`; release `running`, then

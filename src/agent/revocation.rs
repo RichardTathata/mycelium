@@ -1493,8 +1493,12 @@ pub(crate) fn fold_ticket(ctx: &TaskCtx) -> u64 {
 /// ran itself: while another thread's fold ran, each of its retries set `again`, so that fold re-ran for ever and the
 /// waiter never ran one — a livelock that hung `an_often_rotated_peer_does_not_exhaust_the_kept_anchor_budget` (and
 /// CI) for six hours whenever the identity watcher's fold had started first.
+///
+/// A caller that finds no fold running runs it, and leaves once a fold has answered its ticket: it hands the run to the
+/// next caller that asks while it holds it ([`super::single_flight::SingleFlight::run_for`]). Until 2026-11-28 it kept
+/// folding while anyone asked, and a thread asking every few µs held it there for ever (the mirror of the livelock).
 pub(crate) fn refresh_answers(ctx: &TaskCtx, ticket: u64) -> bool {
-    refresh(ctx);
+    ctx.identity_ledger.fold.run_for(ticket, || refresh_once(ctx));
     ctx.identity_ledger.fold.answered(ticket)
 }
 
@@ -2133,6 +2137,84 @@ mod tests {
         }
         ctx.identity_ledger.fold_plant.store(None);
         assert!(folds.load(Ordering::SeqCst) <= 4, "the running fold re-ran for the waiter a bounded number of times, not for ever ({} folds)", folds.load(Ordering::SeqCst));
+    }
+
+    /// **A waiter that runs the fold itself leaves once its ticket is answered, while another thread asks without
+    /// pause** (the mirror of the test above; the `tickets_are_answered_under_a_busy_fold_and_changing_roots` hang,
+    /// 2026-11-28). The waiter finds no fold running and runs one; its first fold starts a thread that calls
+    /// [`refresh`] in a loop and waits until that thread has asked. Each fold is slowed to 2 ms, so a request is
+    /// always waiting when one ends. The waiter returns within 10 s, having run at most three folds itself, and the
+    /// asking thread's requests are still folded after the waiter left (by that thread, which took the run over).
+    /// Seen failing first on `01bb75b2`: the waiter, holding the run, re-ran it for every request and never returned
+    /// to its own answered ticket ("the waiter did not return in 10 s", hundreds of folds on the waiter's thread).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_waiter_holding_the_fold_leaves_when_answered_while_another_thread_asks() {
+        use std::sync::atomic::AtomicBool;
+        let agent = crate::GossipAgent::new(NodeId::new("127.0.0.1", crate::test_util::alloc_port()).unwrap(), crate::config::GossipConfig::default());
+        let ctx = Arc::clone(agent.task_ctx_for_tests());
+        let waiter_folds = Arc::new(AtomicU64::new(0));
+        let other_folds = Arc::new(AtomicU64::new(0));
+        let asks = Arc::new(AtomicU64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let waiter_thread: Arc<std::sync::OnceLock<std::thread::ThreadId>> = Arc::new(std::sync::OnceLock::new());
+        let asker: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(std::sync::Mutex::new(None));
+        let (wt, wf, of, a, st, ak, c) =
+            (Arc::clone(&waiter_thread), Arc::clone(&waiter_folds), Arc::clone(&other_folds), Arc::clone(&asks), Arc::clone(&stop), Arc::clone(&asker), Arc::downgrade(&ctx));
+        ctx.identity_ledger.fold_plant.store(Some(Arc::new(Box::new(move || {
+            if Some(&std::thread::current().id()) != wt.get() {
+                of.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                return;
+            }
+            if wf.fetch_add(1, Ordering::SeqCst) == 0 && let Some(c) = c.upgrade() {
+                // The waiter holds the fold: start a thread that asks without pause, and wait until it has asked.
+                let (a2, st2) = (Arc::clone(&a), Arc::clone(&st));
+                *ak.lock().unwrap() = Some(std::thread::spawn(move || {
+                    while !st2.load(Ordering::SeqCst) {
+                        refresh(&c);
+                        a2.fetch_add(1, Ordering::SeqCst);
+                        std::thread::yield_now();
+                    }
+                }));
+                let t = std::time::Instant::now();
+                while a.load(Ordering::SeqCst) == 0 && t.elapsed() < std::time::Duration::from_secs(10) {
+                    std::thread::yield_now();
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }))));
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let (c2, wt2) = (Arc::clone(&ctx), Arc::clone(&waiter_thread));
+        let waiter = std::thread::spawn(move || {
+            let _ = wt2.set(std::thread::current().id());
+            let ticket = fold_ticket(&c2);
+            while !refresh_answers(&c2, ticket) {
+                std::thread::yield_now();
+            }
+            let _ = done_tx.send(());
+        });
+        let returned = done_rx.recv_timeout(std::time::Duration::from_secs(10));
+        let (by_waiter, asked) = (waiter_folds.load(Ordering::SeqCst), asks.load(Ordering::SeqCst));
+        let other_before = other_folds.load(Ordering::SeqCst);
+        if returned.is_ok() {
+            // The asking thread's requests are folded after the waiter left: by that thread, now the run's holder.
+            let t = std::time::Instant::now();
+            while other_folds.load(Ordering::SeqCst) <= other_before && t.elapsed() < std::time::Duration::from_secs(10) {
+                std::thread::yield_now();
+            }
+        }
+        let other_after = other_folds.load(Ordering::SeqCst);
+        stop.store(true, Ordering::SeqCst);
+        let handle = asker.lock().unwrap().take();
+        if let Some(h) = handle {
+            h.join().unwrap();
+        }
+        waiter.join().unwrap();
+        ctx.identity_ledger.fold_plant.store(None);
+        assert!(returned.is_ok(), "the waiter did not return in 10 s: it held the fold for every other request ({by_waiter} folds on its thread, {asked} asks)");
+        assert!(asked > 0, "the asking thread asked while the waiter held the fold");
+        assert!(by_waiter <= 3, "the waiter left within two folds of the one that answered it ({by_waiter} folds on its thread)");
+        assert!(other_after > other_before, "the requests made after the waiter left were folded ({other_before} → {other_after} folds on other threads)");
     }
 
     /// **#805's confirm round N3, under the decision of 2026-11-17: a node keeping more than the budget at once is still
