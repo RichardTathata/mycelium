@@ -939,6 +939,19 @@ impl TupleSpace {
     pub(crate) fn apply_records(&self, records: &[Record]) {
         let Some(store) = self.store() else { return };
         for rec in records {
+            // Every id a record names fences this store (ER6-T): a compacted primary's log can name
+            // its highest id only in an `Ack`, a state chunk only in its closing `Take`. A `Put`'s id
+            // (and a `Complete`'s new one) is fenced, and logged, by `put_with_id` itself.
+            let named = match rec {
+                Record::Take { id, .. } | Record::Ack { id } => Some(*id),
+                Record::Complete { old_id, .. } => Some(*old_id),
+                Record::Put { .. } => None,
+            };
+            if let Some(named) = named
+                && let Err(e) = store.fence_past(named.saturating_add(1))
+            {
+                tracing::error!(id = named, error = %e, "tuple-space: the mirror's id fence was set but not logged");
+            }
             match rec {
                 Record::Put { id, stage, payload, key } => {
                     let fresh = self.mirror_stages.lock().admit(*id, stage);
@@ -1924,6 +1937,67 @@ mod wal_role_tests {
         second.ack(new_id).await.unwrap();
         assert!(agent.kv().get(&stale).is_some(), "the new item ({new_id}) cleared the old one's key ({old_id})");
         second.shutdown().await;
+    }
+
+
+    /// ER6-T, the fence half: a mirror's id fence followed only `Put`s. A primary that issued X, Y, Z,
+    /// acked Y and Z and compacted serves `[Put X, Ack Z]`; a mirror whose store is older than the
+    /// primary's (ER3 masks this only when the mirror's is the younger) fenced at X + 1 and, promoted,
+    /// reissued Y. Every record id fences now.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mirror_fences_past_every_id_a_compacted_primary_names() {
+        // The mirror first: its fresh base is below the primary's.
+        let ts = TupleSpace::new(agent().await, mirror_cfg("fence-wal", false, temp_wal("unused-fence"))).await.unwrap();
+        let ppath = temp_wal("fence-wal-primary");
+        let primary = store::TupleStore::persistent(&ppath, 1, 500).unwrap();
+        let x = primary.put("s", Bytes::from("x")).unwrap();
+        let y = primary.put("s", Bytes::from("y")).unwrap();
+        let z = primary.put("s", Bytes::from("z")).unwrap();
+        for want in [x, y, z] {
+            let (got, _) = primary.take("s", Duration::from_millis(50)).await.unwrap();
+            assert_eq!(got, want);
+        }
+        primary.ack(y).unwrap();
+        primary.ack(z).unwrap();
+        primary.compact_now().unwrap();
+        let chunk = primary.wal_read_chunk(primary.wal_position().0, 0, 100, 1 << 20).unwrap().unwrap();
+        ts.apply_records(&store::decode_records(&chunk.raw));
+        let next = ts.store().unwrap().put("s", Bytes::from("new")).unwrap();
+        assert!(next > z, "the mirror issued {next}, at or below {z}, an id the primary acked (x = {x}, y = {y})");
+        ts.shutdown().await;
+        drop(primary);
+        let _ = std::fs::remove_file(&ppath);
+    }
+
+    /// ER6-T, the fence half, a transient primary: its state chunk is live `Put`s only, so a mirror
+    /// fenced past the highest *live* id. The chunk now ends with a lone `Take` naming the primary's
+    /// last issued id — a record every mirror decodes, and one that changes no item's liveness.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mirror_fences_past_a_transient_primarys_last_issued_id() {
+        let ts = TupleSpace::new(agent().await, mirror_cfg("fence-state", false, temp_wal("unused-fence2"))).await.unwrap();
+        let primary = store::TupleStore::transient(500);
+        let x = primary.put("s", Bytes::from("x")).unwrap();
+        let y = primary.put("s", Bytes::from("y")).unwrap();
+        let z = primary.put("s", Bytes::from("z")).unwrap();
+        for want in [x, y, z] {
+            let (got, _) = primary.take("s", Duration::from_millis(50)).await.unwrap();
+            assert_eq!(got, want);
+        }
+        primary.ack(y).unwrap();
+        primary.ack(z).unwrap();
+        let (raw, _, done) = primary.state_chunk(0, usize::MAX, usize::MAX);
+        assert!(done);
+        ts.apply_records(&store::decode_records(&raw));
+        let mirror = ts.store().unwrap();
+        let next = mirror.put("s", Bytes::from("new")).unwrap();
+        assert!(next > z, "the mirror issued {next}, at or below {z}, an id the primary acked");
+        // The fence record changes no liveness: the in-flight X is still mirrored, once.
+        let mut held = Vec::new();
+        while let Ok((id, _)) = mirror.take("s", Duration::from_millis(20)).await {
+            held.push(id);
+        }
+        assert_eq!(held, vec![x, next]);
+        ts.shutdown().await;
     }
 
 }

@@ -43,10 +43,10 @@
 
 #![deny(unsafe_code)]
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -260,42 +260,6 @@ impl Default for BoardConfig {
     }
 }
 
-/// How many acked fact ids a mirror remembers (oldest forgotten first): enough to cover the window
-/// in which a snapshot taken before an ack can arrive after it.
-const MIRROR_ACKED_MEMORY: usize = 100_000;
-
-/// The mirror's id bookkeeping, under the one `mirrored` lock.
-#[derive(Default)]
-pub(crate) struct MirrorIndex {
-    /// Fact ids applied to this mirror.
-    seen: HashSet<u64>,
-    /// Ids this mirror saw acked (bounded by `MIRROR_ACKED_MEMORY`), in arrival order.
-    acked: HashSet<u64>,
-    acked_order: std::collections::VecDeque<u64>,
-}
-
-impl MirrorIndex {
-    fn admit(&mut self, id: u64) -> bool {
-        !self.acked.contains(&id) && self.seen.insert(id)
-    }
-
-    fn ack(&mut self, id: u64) {
-        if self.acked.insert(id) {
-            self.acked_order.push_back(id);
-            if self.acked_order.len() > MIRROR_ACKED_MEMORY
-                && let Some(oldest) = self.acked_order.pop_front()
-            {
-                self.acked.remove(&oldest);
-            }
-        }
-        self.seen.remove(&id);
-    }
-
-    fn forget(&mut self, id: u64) {
-        self.seen.remove(&id);
-    }
-}
-
 /// An agent-backed board: posting/reading/claiming over a coordinator-free primary discovered on the
 /// capability ring, with emergent secondary failover. Construct after `agent.start()`.
 pub struct Blackboard {
@@ -306,8 +270,6 @@ pub struct Blackboard {
     is_secondary: AtomicBool,
     primary_reg: parking_lot::Mutex<Option<CapabilityReg>>,
     role_reg: parking_lot::Mutex<Option<CapabilityReg>>,
-    /// Mirror dedup: fact ids already applied (a replicated Post may arrive twice).
-    mirrored: parking_lot::Mutex<MirrorIndex>,
     /// The primary this mirror last heard from (a replicate, a snapshot), for the promotion-time sync
     /// when a refused fact is pending.
     last_primary: parking_lot::Mutex<Option<NodeId>>,
@@ -317,6 +279,8 @@ pub struct Blackboard {
     /// Set when a mirrored fact could not be applied (its WAL append was refused): the mirror re-syncs
     /// from the primary, so the fact is re-delivered once the WAL is repaired.
     mirror_gap: AtomicBool,
+    /// Mirrored facts a primary's snapshot named acked and this mirror then discarded (ER6).
+    mirror_retired: AtomicU64,
     tasks: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
@@ -331,10 +295,10 @@ impl Blackboard {
             is_secondary: AtomicBool::new(false),
             primary_reg: parking_lot::Mutex::new(None),
             role_reg: parking_lot::Mutex::new(None),
-            mirrored: parking_lot::Mutex::new(MirrorIndex::default()),
             last_primary: parking_lot::Mutex::new(None),
             shutting_down: AtomicBool::new(false),
             mirror_gap: AtomicBool::new(false),
+            mirror_retired: AtomicU64::new(0),
             tasks: parking_lot::Mutex::new(Vec::new()),
         });
         match bb.cfg.role {
@@ -417,15 +381,16 @@ impl Blackboard {
     fn store_expect(&self) -> Arc<BoardStore> {
         self.store().expect("serving role requires a store")
     }
-    /// Whether a mirrored `Post` for `id` should be applied: not already applied, and never seen
-    /// acked — a re-sync's snapshot racing a live `Ack` must not resurrect the fact (#597 re-review).
-    pub(crate) fn mark_mirrored(&self, id: u64) -> bool {
-        self.mirrored.lock().admit(id)
+    /// Mirrored facts this node discarded because a primary's snapshot named them acked (ER6):
+    /// facts completed while this mirror was away, or whose replicated `Ack` was lost.
+    pub fn mirror_retired(&self) -> u64 {
+        self.mirror_retired.load(Ordering::Relaxed)
     }
 
-    /// A mirrored `Ack` for `id`: remembered, so a later `Post` for it is not applied.
-    pub(crate) fn note_mirror_ack(&self, id: u64) {
-        self.mirrored.lock().ack(id);
+    /// Replicated facts this node's store refused because their id is one it remembers acked
+    /// (ER6) — a stale re-delivery, or another primary reusing an id. Counted, never re-synced.
+    pub fn mirror_refused_acked(&self) -> u64 {
+        self.store().map_or(0, |s| s.refused_acked())
     }
 
     /// Whether the mirror should re-sync from the primary now.
@@ -453,11 +418,10 @@ impl Blackboard {
         *self.last_primary.lock() = Some(node.clone());
     }
 
-    /// A mirrored fact's WAL append was refused: forget it was seen, so a re-delivery applies it,
-    /// and ask the mirror to re-sync from the primary.
+    /// A mirrored fact's WAL append was refused (it was not applied, so a re-delivery applies it):
+    /// ask the mirror to re-sync from the primary.
     pub(crate) fn note_mirror_gap(&self, id: u64, e: &BlackboardError) {
         tracing::error!(id, error = %e, "blackboard: mirror fact refused; it is re-fetched once the WAL is repaired");
-        self.mirrored.lock().forget(id);
         self.mirror_gap.store(true, Ordering::Release);
     }
 
@@ -681,16 +645,45 @@ impl Blackboard {
         else {
             return false;
         };
-        let (Ok(facts), Some(store)) = (rpc::dec_facts_resp(&resp), self.store()) else {
+        self.apply_snapshot(&resp)
+    }
+
+    /// Apply a primary's snapshot response into this mirror (ER6, D6a). **Positive evidence, never
+    /// absence:** a fact the snapshot lacks is kept unless the primary names its id acked — a mirror
+    /// that holds a fact the primary never did (a promoted mirror's, an unvouched one) keeps it. In
+    /// order: each id the trailer names acked is discarded (and remembered, so the facts below cannot
+    /// bring it back); the facts are added; the id fence moves past the primary's next id. A snapshot
+    /// with no trailer (a primary older than ER6) only adds, as before. `true` iff it applied.
+    pub(crate) fn apply_snapshot(&self, resp: &Bytes) -> bool {
+        let (Ok((facts, trailer)), Some(store)) = (rpc::dec_snapshot_resp(resp), self.store()) else {
             return false;
         };
-        for f in facts {
-            if self.mark_mirrored(f.id) {
-                let id = f.id;
-                if let Err(e) = store.post_with_id(id, f.attributes, f.payload) {
-                    self.note_mirror_gap(id, &e);
+        if let Some(t) = &trailer {
+            let mut retired = 0u64;
+            for id in t.acked_ids() {
+                match store.discard(id) {
+                    Ok(true) => retired += 1,
+                    Ok(false) => {}
+                    // The fact stays live in the log (at-least-once); the memory holds the id, so
+                    // it is not served again before a restart.
+                    Err(e) => tracing::error!(id, error = %e, "blackboard: a retired mirror fact's ack not logged"),
                 }
             }
+            if retired > 0 {
+                self.mirror_retired.fetch_add(retired, Ordering::Relaxed);
+                tracing::info!(ns = %self.cfg.namespace, retired, "blackboard: retired mirrored facts the primary reports acked");
+            }
+        }
+        for f in facts {
+            let id = f.id;
+            if let Err(e) = store.post_with_id(id, f.attributes, f.payload) {
+                self.note_mirror_gap(id, &e);
+            }
+        }
+        if let Some(t) = &trailer
+            && let Err(e) = store.fence_past(t.next_id)
+        {
+            tracing::error!(next_id = t.next_id, error = %e, "blackboard: the mirror's id fence was set but not logged");
         }
         true // a full snapshot (possibly empty) was applied — the mirror is now complete
     }
@@ -1131,8 +1124,8 @@ mod wal_role_tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// ER3 (R4-01), the board's mirror: `MirrorIndex::admit` refuses an id it saw acked or already
-    /// holds. A transient primary restarted in the same namespace reissued ids from 0, so the mirror
+    /// ER3 (R4-01), the board's mirror: the mirror refuses an id it saw acked (the index's `admit`
+    /// before ER6, the store's acked-id memory since). A transient primary restarted in the same namespace reissued ids from 0, so the mirror
     /// silently refused its new facts. With a fresh id base they land.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_restarted_transient_primary_is_not_refused_by_a_mirror_that_saw_its_old_ids_acked() {
@@ -1160,4 +1153,68 @@ mod wal_role_tests {
         bb.shutdown().await;
     }
 
+
+    fn snapshot_of(store: &BoardStore) -> Bytes {
+        Bytes::from(rpc::snapshot_to_bytes(&store.mirror_snapshot()))
+    }
+
+    /// ER6 (D6a): a fact the primary names acked is retired from the mirror, counted, and the id
+    /// fence moves past the primary's next id.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_snapshot_retires_what_the_primary_names_acked() {
+        let bb = Blackboard::new(agent().await, mirror_cfg("retire", false, temp_wal("unused-retire"))).await.unwrap();
+        let primary = BoardStore::transient();
+        let done = primary.post(fact(0).attributes, Bytes::from("done")).unwrap();
+        bb.apply_replicated(&rpc::enc_replicate_post(&Fact { id: done, ..fact(0) }));
+        primary.claim(&Predicate::new()).unwrap();
+        primary.ack(done).unwrap(); // the replicated Ack is lost
+        let later = primary.post(fact(0).attributes, Bytes::from("later")).unwrap();
+        primary.claim(&Predicate::new()).unwrap();
+        primary.ack(later).unwrap(); // acked before the mirror ever heard of it
+        assert!(bb.apply_snapshot(&snapshot_of(&primary)));
+        let store = bb.store().unwrap();
+        assert!(store.read(&Predicate::new()).is_empty(), "the acked fact is retired");
+        assert_eq!(bb.mirror_retired(), 1);
+        let next = store.post(fact(0).attributes, Bytes::new()).unwrap();
+        assert!(next > later, "the mirror issued {next}, at or below {later}");
+        bb.shutdown().await;
+    }
+
+    /// ER6, the control for the rule: a snapshot taken before a post, applied after the post was
+    /// replicated, lacks the fact — and does not discard it (absence is not an ack).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_snapshot_racing_a_post_never_discards_it() {
+        let bb = Blackboard::new(agent().await, mirror_cfg("race", false, temp_wal("unused-race"))).await.unwrap();
+        let primary = BoardStore::transient();
+        primary.post(fact(0).attributes, Bytes::from("a")).unwrap();
+        let stale = snapshot_of(&primary);
+        let b = primary.post(fact(0).attributes, Bytes::from("b")).unwrap();
+        bb.apply_replicated(&rpc::enc_replicate_post(&Fact { id: b, ..fact(0) }));
+        assert!(bb.apply_snapshot(&stale));
+        let ids: Vec<u64> = bb.store().unwrap().read(&Predicate::new()).iter().map(|f| f.id).collect();
+        assert!(ids.contains(&b), "the post the snapshot did not see survives: {ids:?}");
+        assert_eq!(ids.len(), 2);
+        bb.shutdown().await;
+    }
+
+    /// ER6 (D6c), the guard against the absence rule: a mirror holds a fact this primary never held
+    /// (a fact from an earlier primary that this one, restarted empty, never saw acked). The snapshot
+    /// lacks it and names it nowhere: it is kept.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unacked_fact_the_primary_never_held_is_not_discarded() {
+        let bb = Blackboard::new(agent().await, mirror_cfg("never-held", false, temp_wal("unused-never"))).await.unwrap();
+        let earlier = BoardStore::transient();
+        let only_copy = earlier.post(fact(0).attributes, Bytes::from("only copy")).unwrap();
+        bb.apply_replicated(&rpc::enc_replicate_post(&Fact { id: only_copy, ..fact(0) }));
+        drop(earlier);
+        let restarted = BoardStore::transient();
+        let x = restarted.post(fact(0).attributes, Bytes::from("x")).unwrap();
+        restarted.claim(&Predicate::new()).unwrap();
+        restarted.ack(x).unwrap();
+        assert!(bb.apply_snapshot(&snapshot_of(&restarted)));
+        let ids: Vec<u64> = bb.store().unwrap().read(&Predicate::new()).iter().map(|f| f.id).collect();
+        assert_eq!(ids, vec![only_copy], "the mirror's only copy is kept");
+        assert_eq!(bb.mirror_retired(), 0);
+        bb.shutdown().await;
+    }
 }

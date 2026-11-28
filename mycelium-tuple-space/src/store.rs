@@ -685,6 +685,24 @@ impl TupleStore {
         Ok(new_id)
     }
 
+    /// Fence `next_id` at `n` or above (ER6-T, the fence half): a mirror fences past **every** id a
+    /// replicated or replayed record names — an `Ack`, a `Take`, a `Complete`'s old id, the lone
+    /// record a compaction keeps for the high-water mark, the lone `Take` a state chunk ends with —
+    /// not only a `Put`'s, so a promoted mirror never reissues an id the primary acked. When the
+    /// fence moves on a WAL-backed store it is persisted as a lone `Take { n - 1 }`: set, then logged;
+    /// replay folds it into the high-water mark and a `Take` never terminates an item. `n` at or
+    /// below the current next id changes nothing and logs nothing.
+    pub(crate) fn fence_past(&self, n: u64) -> Result<bool, TupleError> {
+        let prev = self.next_id.fetch_max(n, Ordering::Relaxed);
+        if prev >= n {
+            return Ok(false);
+        }
+        if let Some(wal) = &self.wal {
+            wal.append(&Record::Take { id: n - 1, taken_at_ms: 0 })?;
+        }
+        Ok(true)
+    }
+
     /// Applies a replicated or replayed item under its ORIGINAL id: enqueue
     /// bypassing the watermark (replication must not drop), and fence
     /// `next_id` past it so a promoted secondary never re-issues an id that
@@ -939,6 +957,8 @@ impl TupleStore {
             }
         }
         items.sort_unstable_by_key(|(id, ..)| *id);
+        // Read after the scan, so it is past every id the chunk names (ER6-T).
+        let issued_next = self.next_id.load(Ordering::Relaxed);
         let mut raw = Vec::new();
         let mut next = from_id;
         for (n, (id, stage, payload, key)) in items.into_iter().enumerate() {
@@ -947,6 +967,14 @@ impl TupleStore {
             }
             Record::Put { id, stage, payload, key }.encode(&mut raw);
             next = id + 1;
+        }
+        // The last chunk ends with a lone `Take` naming the last id this store issued (ER6-T): live
+        // `Put`s alone fence a mirror only past the highest *live* id. A `Take`, not the `Ack` the
+        // design named: an `Ack` for that id would remove it from a mirror when it is live (in this
+        // chunk) and make the mirror refuse its replicated `Put` when it is put after the scan; a
+        // `Take` changes no item's liveness, and a mirror older than ER6-T ignores it.
+        if let Some(last) = issued_next.checked_sub(1) {
+            Record::Take { id: last, taken_at_ms: 0 }.encode(&mut raw);
         }
         (raw, next, true)
     }
@@ -2517,6 +2545,35 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// ER6-T, the fence half: `fence_past` below the store's own base (ER3) changes nothing and logs
+    /// nothing; above it, the fence is persisted as a lone `Take` that survives a compaction and a
+    /// reopen and changes no item's liveness.
+    #[tokio::test]
+    async fn fence_past_persists_without_touching_liveness() {
+        let path = temp_wal("fence-past");
+        let fence = {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            let first = store.put("s", b("x")).unwrap();
+            let len = std::fs::metadata(&path).unwrap().len();
+            assert!(!store.fence_past(1).unwrap(), "below the store's own base: no move");
+            assert!(!store.fence_past(first).unwrap());
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), len, "and nothing logged");
+            let fence = first + 50;
+            assert!(store.fence_past(fence).unwrap());
+            fence
+        };
+        for round in ["reopen", "compaction"] {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            assert_eq!(store.depth(Some("s")).first().map_or(0, |d| d.depth), 1, "{round}: the item stays");
+            store.compact_now().unwrap();
+        }
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        let next = store.put("s", b("y")).unwrap();
+        assert!(next >= fence, "the reopened store issued {next}, below its fence {fence}");
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[tokio::test]
     async fn put_with_id_fences_next_id() {
         let store = TupleStore::transient(500);
@@ -3457,9 +3514,10 @@ mod tests {
         assert_eq!(live.len(), 8, "acked items must drop out of the state chunk");
         assert!(!live.contains(&a) && !live.contains(&b2), "acked ids resurrected");
 
-        // Exhausted cursor → empty + done.
+        // Exhausted cursor → no item + done; the last chunk ends with the id fence (ER6-T).
         let (raw, _, done) = store.state_chunk(u64::MAX, 10, usize::MAX);
-        assert!(done && decode_records(&raw).is_empty());
+        let recs = decode_records(&raw);
+        assert!(done && matches!(recs.as_slice(), [Record::Take { .. }]), "{recs:?}");
     }
 
     /// Run-42 falsification probe (semantic correctness): the documented lane invariant —

@@ -164,6 +164,12 @@ pub(crate) fn dec_unit_resp(resp: &Bytes) -> Result<(), crate::BlackboardError> 
     }
 }
 pub(crate) fn dec_facts_resp(resp: &Bytes) -> Result<Vec<Fact>, crate::BlackboardError> {
+    dec_facts_at(resp).map(|(facts, _)| facts)
+}
+
+/// The facts of a facts response and the offset after them. Bytes after the facts are not read
+/// here — a pre-ER6 decoder stopped at the same place, which is why the snapshot trailer is safe.
+fn dec_facts_at(resp: &Bytes) -> Result<(Vec<Fact>, usize), crate::BlackboardError> {
     if resp.first() != Some(&ST_OK) {
         return Err(status_err(resp));
     }
@@ -176,7 +182,65 @@ pub(crate) fn dec_facts_resp(resp: &Bytes) -> Result<Vec<Fact>, crate::Blackboar
     for _ in 0..n {
         out.push(get_fact(resp, &mut off).ok_or_else(|| crate::BlackboardError::Rpc("malformed fact".into()))?);
     }
-    Ok(out)
+    Ok((out, off))
+}
+
+/// The snapshot trailer's extension tag (ER6): `[u8 1][u64 next_id][u32 n] n × ([u64 start][u32 len])`.
+const SNAP_EXT_FENCE: u8 = 1;
+
+/// What a primary's snapshot says beyond its live facts (ER6): the id it issues next, and the acked
+/// ids it remembers, as sorted runs. `None` from a primary older than ER6.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SnapshotTrailer {
+    pub(crate) next_id: u64,
+    pub(crate) acked: Vec<(u64, u32)>,
+}
+
+impl SnapshotTrailer {
+    /// Every acked id the runs name.
+    pub(crate) fn acked_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.acked.iter().flat_map(|(start, len)| (0..u64::from(*len)).filter_map(move |i| start.checked_add(i)))
+    }
+}
+
+/// The `snapshot` response: the facts as `read` answers them, then the trailer — on the snapshot
+/// only; `read` shares `facts_to_bytes` and stays as it was.
+pub(crate) fn snapshot_to_bytes(snap: &crate::store::MirrorSnapshot) -> Vec<u8> {
+    let mut buf = facts_to_bytes(&snap.facts);
+    buf.push(SNAP_EXT_FENCE);
+    buf.extend_from_slice(&snap.next_id.to_le_bytes());
+    buf.extend_from_slice(&(snap.acked.len() as u32).to_le_bytes());
+    for (start, len) in &snap.acked {
+        buf.extend_from_slice(&start.to_le_bytes());
+        buf.extend_from_slice(&len.to_le_bytes());
+    }
+    buf
+}
+
+/// Decode a `snapshot` response: the facts, and the trailer when the primary sent one. No bytes
+/// after the facts (a primary older than ER6), or an extension this build does not know, is `None`
+/// — the mirror then adds facts as it always did. A trailer that starts and is cut short is an error.
+pub(crate) fn dec_snapshot_resp(resp: &Bytes) -> Result<(Vec<Fact>, Option<SnapshotTrailer>), crate::BlackboardError> {
+    let (facts, mut off) = dec_facts_at(resp)?;
+    if resp.get(off) != Some(&SNAP_EXT_FENCE) {
+        return Ok((facts, None));
+    }
+    off += 1;
+    let bad = || crate::BlackboardError::Rpc("malformed snapshot trailer".into());
+    let u64_at = |at: usize| resp.get(at..at + 8).and_then(|s| s.try_into().ok()).map(u64::from_le_bytes);
+    let u32_at = |at: usize| resp.get(at..at + 4).and_then(|s| s.try_into().ok()).map(u32::from_le_bytes);
+    let next_id = u64_at(off).ok_or_else(bad)?;
+    let n = u32_at(off + 8).ok_or_else(bad)? as usize;
+    off += 12;
+    if resp.len() < off.saturating_add(n.saturating_mul(12)) {
+        return Err(bad());
+    }
+    let mut acked = Vec::with_capacity(n);
+    for _ in 0..n {
+        acked.push((u64_at(off).ok_or_else(bad)?, u32_at(off + 8).ok_or_else(bad)?));
+        off += 12;
+    }
+    Ok((facts, Some(SnapshotTrailer { next_id, acked })))
 }
 /// `[ST_OK][u8 present][fact?]` → `Option<Fact>`.
 pub(crate) fn dec_opt_fact_resp(resp: &Bytes) -> Result<Option<Fact>, crate::BlackboardError> {
@@ -303,7 +367,7 @@ pub(crate) fn spawn_primary_handlers(bb: &Arc<Blackboard>) -> Vec<tokio::task::J
 
     handler!("snapshot", req, |me: &Arc<Blackboard>, _req: &mycelium::RpcRequest| {
         match me.store() {
-            Some(store) => facts_to_bytes(&store.snapshot_live()),
+            Some(store) => snapshot_to_bytes(&store.mirror_snapshot()),
             None => vec![ST_ERR],
         }
     });
@@ -357,9 +421,8 @@ impl Blackboard {
         match p.first() {
             Some(&REP_POST) => {
                 let mut off = 1;
-                if let Some(f) = get_fact(p, &mut off)
-                    && self.mark_mirrored(f.id)
-                {
+                // The store dedupes a re-delivery and refuses a remembered acked id (ER6).
+                if let Some(f) = get_fact(p, &mut off) {
                     let id = f.id;
                     if let Err(e) = store.post_with_id(id, f.attributes, f.payload) {
                         self.note_mirror_gap(id, &e);
@@ -369,9 +432,9 @@ impl Blackboard {
             Some(&REP_ACK) => {
                 if let Some(b) = p.get(1..9).and_then(|s| <[u8; 8]>::try_from(s).ok()) {
                     let id = u64::from_le_bytes(b);
-                    self.note_mirror_ack(id);
-                    // A refused `Ack` record leaves the fact live in the log (not counted): a restart
-                    // re-queues it — at-least-once, never a loss.
+                    // Remembered as acked whether or not the fact is here, so a `Post` arriving after
+                    // it is refused (ER6). A refused `Ack` record leaves the fact live in the log (not
+                    // counted): a restart re-queues it — at-least-once, never a loss.
                     if let Err(e) = store.discard(id) {
                         tracing::error!(id, error = %e, "blackboard: mirror ack not logged");
                     }
@@ -401,6 +464,45 @@ mod admission_tests {
         }
         b.truncate(9);
         assert!(matches!(dec_id_resp(&Bytes::from(b)), Err(crate::BlackboardError::Rpc(_))), "truncated is malformed");
+    }
+}
+
+#[cfg(test)]
+mod snapshot_trailer_tests {
+    use super::*;
+    use crate::store::MirrorSnapshot;
+
+    fn facts() -> Vec<Fact> {
+        vec![Fact { id: 7, attributes: BTreeMap::from([("k".to_string(), "v".to_string())]), payload: Bytes::from("p") }]
+    }
+
+    /// ER6, a mixed pair: a pre-ER6 mirror decodes a new primary's snapshot with `dec_facts_resp`,
+    /// which stops after the facts — the trailer is ignored, the facts are the same.
+    #[test]
+    fn an_old_mirror_ignores_the_trailer() {
+        let snap = MirrorSnapshot { facts: facts(), next_id: 99, acked: vec![(8, 3)] };
+        let bytes = Bytes::from(snapshot_to_bytes(&snap));
+        assert_eq!(dec_facts_resp(&bytes).unwrap(), facts());
+        let (got, trailer) = dec_snapshot_resp(&bytes).unwrap();
+        assert_eq!(got, facts());
+        let trailer = trailer.expect("the trailer");
+        assert_eq!(trailer.next_id, 99);
+        assert_eq!(trailer.acked_ids().collect::<Vec<_>>(), vec![8, 9, 10]);
+    }
+
+    /// ER6, the other direction: a pre-ER6 primary's snapshot has no trailer; the new mirror reads
+    /// the facts and no trailer (it then only adds, as before). An unknown extension is ignored; a
+    /// trailer cut short is malformed, never a short memory.
+    #[test]
+    fn an_old_snapshot_without_a_trailer_still_applies() {
+        let old = Bytes::from(facts_to_bytes(&facts()));
+        assert_eq!(dec_snapshot_resp(&old).unwrap(), (facts(), None));
+        let mut unknown = facts_to_bytes(&facts());
+        unknown.extend_from_slice(&[9, 1, 2, 3]);
+        assert_eq!(dec_snapshot_resp(&Bytes::from(unknown)).unwrap(), (facts(), None));
+        let mut cut = snapshot_to_bytes(&MirrorSnapshot { facts: facts(), next_id: 99, acked: vec![(8, 3)] });
+        cut.truncate(cut.len() - 1);
+        assert!(dec_snapshot_resp(&Bytes::from(cut)).is_err());
     }
 }
 

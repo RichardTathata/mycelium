@@ -13,7 +13,7 @@
 //! claimed-but-unacked fact (the claimer crashed) re-queues to claimable — at-least-once, exactly
 //! the tuple space's "taken-but-unacked re-queues as abandoned" rule. `Ack` is the only terminal.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -29,6 +29,77 @@ const WAL_HEADER_LEN: u64 = 8; // magic(6) + u16 LE version
 
 /// The back-off ceiling for a failing compaction, in maintenance ticks: 10 × 1 s.
 const MAX_COMPACTION_SKIP: u32 = 10;
+
+/// How many acked fact ids a board remembers in memory (oldest forgotten first) — the mirror's
+/// bound before ER6, now the store's: enough to cover the window in which a snapshot taken before an
+/// ack arrives after it, and a mirror's absence of up to this many acks.
+pub(crate) const TOMBSTONE_MEMORY: usize = 100_000;
+
+/// How many of the newest tombstones a compaction keeps as lone `Ack` records (ER6, D6b): a reopened
+/// board, or a mirror that returns after the compaction, still knows them. An ack older than this
+/// is forgotten at the next compaction and reopen (`docs/features/blackboard.md`, *Not built*).
+pub(crate) const COMPACTION_TOMBSTONES: usize = 16_384;
+
+/// The acked fact ids a board remembers (ER6, R11-01): a bounded set in arrival order. A sparse
+/// set, never a dense range or bitmap — ids across lives jump by about elapsed ms × 1024 (ER3).
+#[derive(Default)]
+pub(crate) struct Tombstones {
+    set: HashSet<u64>,
+    order: VecDeque<u64>,
+}
+
+impl Tombstones {
+    /// Remember `id` as acked; `true` when it is new to the memory.
+    pub(crate) fn insert(&mut self, id: u64) -> bool {
+        if !self.set.insert(id) {
+            return false;
+        }
+        self.order.push_back(id);
+        while self.order.len() > TOMBSTONE_MEMORY {
+            if let Some(oldest) = self.order.pop_front() {
+                self.set.remove(&oldest);
+            }
+        }
+        true
+    }
+
+    pub(crate) fn contains(&self, id: u64) -> bool {
+        self.set.contains(&id)
+    }
+
+    /// Forget `id` (a WAL an older build wrote that re-posts it after its `Ack`: replay holds it live,
+    /// so it is not a tombstone). Linear in the memory, and only on that rare replay.
+    fn remove(&mut self, id: u64) {
+        if self.set.remove(&id) {
+            self.order.retain(|x| *x != id);
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.set.len()
+    }
+
+    /// The newest `k` ids, oldest first.
+    fn newest(&self, k: usize) -> Vec<u64> {
+        let mut v: Vec<u64> = self.order.iter().rev().take(k).copied().collect();
+        v.reverse();
+        v
+    }
+
+    /// The ids as sorted runs `(start, len)` — the snapshot trailer's shape.
+    pub(crate) fn ranges(&self) -> Vec<(u64, u32)> {
+        let mut ids: Vec<u64> = self.set.iter().copied().collect();
+        ids.sort_unstable();
+        let mut out: Vec<(u64, u32)> = Vec::new();
+        for id in ids {
+            match out.last_mut() {
+                Some((start, len)) if *len < u32::MAX && start.checked_add(u64::from(*len)) == Some(id) => *len += 1,
+                _ => out.push((id, 1)),
+            }
+        }
+        out
+    }
+}
 
 const REC_POST: u8 = 1;
 const REC_CLAIM: u8 = 2;
@@ -177,10 +248,17 @@ fn fs_trace(_op: &'static str) {
 /// A live fact recovered from the WAL: `(id, attributes, payload)`.
 pub(crate) type LiveFact = (u64, BTreeMap<String, String>, Bytes);
 
+/// What an open replays: the live facts in id order, the highest id any record names (for the
+/// `next_id` fence) and the acked ids the log remembers, lone `Ack`s included (ER6).
+pub(crate) struct Replayed {
+    pub(crate) live: Vec<LiveFact>,
+    pub(crate) max_id: Option<u64>,
+    pub(crate) tombstones: Tombstones,
+}
+
 impl WalWriter {
-    /// Open (or create) + replay. Returns the writer, the live (claimable) facts in id order, and
-    /// the highest id seen (for the `next_id` fence).
-    pub(crate) fn open(path: &Path, checkpoint_every: u64) -> io::Result<(Self, Vec<LiveFact>, Option<u64>)> {
+    /// Open (or create) + replay. Returns the writer and what the log replays to ([`Replayed`]).
+    pub(crate) fn open(path: &Path, checkpoint_every: u64) -> io::Result<(Self, Replayed)> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -225,7 +303,7 @@ impl WalWriter {
         // inside the sync.
         mycelium::sync_parent_dir_observed(path, &mut |d| fs_dir("open.parent.sync", d))?;
 
-        let Folded { facts, total, acked, end: offset, high_water } = fold_wal(&data).map_err(|offset| {
+        let Folded { facts, total, acked, end: offset, high_water, tombstones } = fold_wal(&data).map_err(|offset| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -268,8 +346,7 @@ impl WalWriter {
                 #[cfg(test)]
                 post_rename_fault: std::sync::atomic::AtomicBool::new(false),
             },
-            live,
-            max_id,
+            Replayed { live, max_id, tombstones },
         ))
     }
 
@@ -379,22 +456,31 @@ impl WalWriter {
                 ),
             )
         })?;
-        let mut live: Vec<WalRecord> = folded
-            .facts
-            .into_iter()
-            .filter(|(_, f)| !f.acked)
-            .map(|(id, f)| WalRecord::Post { id, attributes: f.attributes, payload: f.payload })
-            .collect();
-        let posts = live.len() as u64;
+        // The newest tombstones first, as lone `Ack`s (ER6, D6b): written *before* the `Post`s, so
+        // replay — which reads a `Post` after an `Ack` as live — can never kill a live fact with one;
+        // and an id live at the fold is not a tombstone (the fold forgets it), so none is written.
+        let kept = folded.tombstones.newest(COMPACTION_TOMBSTONES);
+        let mut live: Vec<WalRecord> = kept.iter().map(|id| WalRecord::Ack { id: *id }).collect();
+        let posts_from = live.len();
+        live.extend(
+            folded
+                .facts
+                .into_iter()
+                .filter(|(_, f)| !f.acked)
+                .map(|(id, f)| WalRecord::Post { id, attributes: f.attributes, payload: f.payload }),
+        );
+        let posts = (live.len() - posts_from) as u64;
         // The id high-water mark survives the rewrite (#597 review, finding 7): when the highest id
-        // the log ever held was acked away, a lone `Ack` for it is kept, so the next open fences
-        // `next_id` past it and a restart never reissues an acknowledged id. A lone `Ack` names no
-        // fact, so replay — this build's or an older one's — changes nothing else for it.
-        let highest_live = live.iter().map(|r| match r { WalRecord::Post { id, .. } => *id, _ => 0 }).max();
+        // the log ever held is not live, a record naming it is kept, so the next open fences
+        // `next_id` past it and a restart never reissues an acknowledged id. It is an `Ack` only when
+        // the id is a known acked id; otherwise a lone `Claim` (ER6, D6d): a fence persisted by
+        // `fence_past` is not a tombstone, and a `Claim` never changes liveness in any order.
+        let highest_live = live[posts_from..].iter().map(|r| match r { WalRecord::Post { id, .. } => *id, _ => 0 }).max();
         if let Some(hw) = folded.high_water
             && highest_live.is_none_or(|h| h < hw)
+            && !kept.contains(&hw)
         {
-            live.push(WalRecord::Ack { id: hw });
+            live.push(if folded.tombstones.contains(hw) { WalRecord::Ack { id: hw } } else { WalRecord::Claim { id: hw } });
         }
         // Named after the whole WAL file, so two WALs sharing a stem never share a temp file.
         let tmp = {
@@ -487,6 +573,8 @@ struct Folded {
     end: usize,
     /// The highest fact id any record names, acked or live — what `next_id` is fenced past.
     high_water: Option<u64>,
+    /// Every id an `Ack` names, in log order, less any a later `Post` re-made live (ER6).
+    tombstones: Tombstones,
 }
 
 /// Fold a whole WAL image (header included) record by record. `Err(offset)` names a corrupt record
@@ -496,6 +584,7 @@ fn fold_wal(data: &[u8]) -> Result<Folded, usize> {
     let mut total = 0u64;
     let mut acked = 0u64;
     let mut high_water: Option<u64> = None;
+    let mut tombstones = Tombstones::default();
     let mut offset = WAL_HEADER_LEN as usize;
     while offset < data.len() {
         match scan_frame(&data[offset..]) {
@@ -510,11 +599,14 @@ fn fold_wal(data: &[u8]) -> Result<Folded, usize> {
                 match rec {
                     WalRecord::Post { id, attributes, payload } => {
                         total += 1;
+                        tombstones.remove(id);
                         facts.insert(id, FactState { attributes, payload, acked: false });
                     }
-                    // Counted only when it terminates a fact the log holds: the lone `Ack` a compaction
-                    // keeps for the high-water mark is not a terminal record.
+                    // Counted only when it terminates a fact the log holds: a lone `Ack` (the
+                    // high-water mark, or a tombstone a compaction or a mirror keeps) is not a
+                    // terminal record. Every `Ack` is a tombstone.
                     WalRecord::Ack { id } => {
+                        tombstones.insert(id);
                         if let Some(f) = facts.get_mut(&id) {
                             acked += 1;
                             f.acked = true;
@@ -526,7 +618,7 @@ fn fold_wal(data: &[u8]) -> Result<Folded, usize> {
             }
         }
     }
-    Ok(Folded { facts, total, acked, end: offset, high_water })
+    Ok(Folded { facts, total, acked, end: offset, high_water, tombstones })
 }
 
 /// What a WAL image holds at a record boundary — the difference between a crash and corruption
@@ -604,5 +696,48 @@ mod tests {
         WalRecord::Post { id: 1, attributes: BTreeMap::new(), payload: Bytes::from("xyz") }.encode(&mut buf);
         buf.truncate(buf.len() - 2);
         assert!(WalRecord::decode(&buf).is_none());
+    }
+
+    fn image(recs: &[WalRecord]) -> Vec<u8> {
+        let mut buf = wal_header().to_vec();
+        for r in recs {
+            r.encode(&mut buf);
+        }
+        buf
+    }
+
+    /// ER6 (D6d): a lone `Claim` — the persisted fence — counts toward the high-water mark and
+    /// changes no fact's liveness, in either order against the fact's `Post`; it is not a tombstone.
+    #[test]
+    fn a_lone_claim_fences_without_killing_a_live_fact() {
+        let post = WalRecord::Post { id: 5, attributes: BTreeMap::new(), payload: Bytes::from("p") };
+        for (order, recs) in [
+            ("claim after post", vec![post.clone(), WalRecord::Claim { id: 5 }, WalRecord::Claim { id: 9 }]),
+            ("claim before post", vec![WalRecord::Claim { id: 9 }, WalRecord::Claim { id: 5 }, post.clone()]),
+        ] {
+            let f = fold_wal(&image(&recs)).unwrap();
+            assert_eq!(f.high_water, Some(9), "{order}");
+            assert!(f.facts.get(&5).is_some_and(|s| !s.acked), "{order}: fact 5 stays live");
+            assert_eq!(f.tombstones.len(), 0, "{order}: a claim is not a tombstone");
+        }
+    }
+
+    /// ER6: every `Ack` is a tombstone, lone or terminal; a later `Post` of the id forgets it.
+    #[test]
+    fn the_fold_returns_every_acked_id() {
+        let post = |id| WalRecord::Post { id, attributes: BTreeMap::new(), payload: Bytes::new() };
+        let f = fold_wal(&image(&[WalRecord::Ack { id: 3 }, post(4), WalRecord::Ack { id: 4 }, WalRecord::Ack { id: 8 }, post(8)])).unwrap();
+        assert!(f.tombstones.contains(3) && f.tombstones.contains(4) && !f.tombstones.contains(8));
+        assert_eq!(f.acked, 1, "only the ack that terminates a held fact is a terminal record");
+    }
+
+    /// The trailer's runs: sorted, consecutive ids merged, a set never a dense range.
+    #[test]
+    fn tombstone_ranges_compress_runs() {
+        let mut t = Tombstones::default();
+        for id in [10, 11, 12, 1 << 40, 14, 13, 2] {
+            t.insert(id);
+        }
+        assert_eq!(t.ranges(), vec![(2, 1), (10, 5), (1 << 40, 1)]);
     }
 }
