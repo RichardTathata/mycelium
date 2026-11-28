@@ -5902,7 +5902,6 @@ projecting. Upgrade every member of a governed group; until then a reader may st
 - **Code:** `src/agent/emergent_groups.rs` (`reconcile_emergent_groups`), `src/agent/membership_governor.rs`
   (`governed_groups`, `is_governed`), `src/agent/lifecycle.rs` (`start_capability_group_watcher`). Tests:
   `a_governed_groups_projection_follows_a_drain_and_a_join` and its siblings in `src/lib_tests.rs`.
-## §TBD-ER3. A fresh tuple space or blackboard does not start its ids at 0 (unreleased, engineering review ER3, R4-01)
 ## 131. A fresh tuple space or blackboard does not start its ids at 0 (unreleased, engineering review ER3, R4-01)
 
 This applies to `mycelium-tuple-space` and `mycelium-blackboard` wherever a store has **no id history**: a transient
