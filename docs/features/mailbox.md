@@ -3,11 +3,19 @@
 ## What it is
 
 A [mailbox](../guide/00-concepts.md#mailbox) delivers events to one node in order, through the gossip KV. Any node that
-knows a target's id writes an event under `mailbox/{target}/{kind}/{hlc}`; it spreads like any other key, so a target
+knows a target's id writes an event under `mailbox/{target}/{kind}/{hlc}/{sender}`; it spreads like any other key, so a target
 that was down receives its pending events when it reconnects. The target's watcher hands events over in HLC order and
-then deletes each one, gossiping the tombstone so it is not delivered again after a restart. Where the delete happens
+then deletes each one, gossiping the tombstone and queueing it to the WAL (not synced), so it is not delivered again
+after a restart once the delete reaches disk — at-least-once: a crash before then can bring it back. Where the delete happens
 differs by consumer: the in-process mailbox deletes an event when it enters the receiver's channel, the gateway's
 stream only once it has handed the event to the HTTP connection.
+
+The sender segment keeps two nodes' events apart when their clocks hand out one stamp (before ER1 the key held only
+the stamp, and one of the two events was lost). The 2.40 shape, `mailbox/{target}/{kind}/{hlc}`, is still read. An
+entry under a mailbox's prefix whose remainder is neither shape (a kind containing `/`, such as `a/b` under mailbox
+`a`) is not that mailbox's: it is not delivered and not deleted. **Mixed fleets:** a target older than this release
+delivers a salted event in order and with the right sender, but with `hlc_ts == 0`; upgrade receivers before or with
+senders.
 
 ## When to use it, and when not
 
@@ -39,11 +47,14 @@ answered, run in CI. That a dropped gateway stream loses only what it had handed
 - No guarantee or rule id: the mailbox registers nothing in the
   [guarantee catalogue](../reference/guarantee-catalogue.md) or the rule catalogue.
 - **Not built:** an authenticated sender — the event's `sender` is written into the value by whoever delivered it and is
-  not checked against the writer, so a handler should not authorise on it; exactly-once delivery — an in-process receiver dropped with events queued loses them, because the
+  not checked against the writer (the key's sender segment is the same claim), so a handler should not authorise on
+  it; a durable delete — the delete of a consumed event is handed to the WAL's queue, not synced, so the mailbox is
+  at-least-once: a consumed event can return after a crash before the delete reaches disk; exactly-once delivery — an in-process receiver dropped with events queued loses them, because the
   event was deleted when it entered the channel; events carry no expiry of their own, so an event for a node that never returns stays in every replica until it is
   deleted; delivery is to a node, not to an identity that moves.
-- **Evidence:** the [what-is-proven](../operations/what-is-proven.md) ledger has no row for the mailbox; the row E
-  fixes are in [post-360 hardening](../plans/post-360-hardening.md).
+- **Evidence:** the [what-is-proven](../operations/what-is-proven.md#mailbox-sender-keyed) row for ER1 (two senders at
+  one stamp, the foreign suffix, the delete after an abrupt exit); the row E fixes are in
+  [post-360 hardening](../plans/post-360-hardening.md).
 
 ## Go deeper
 

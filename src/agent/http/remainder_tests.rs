@@ -155,6 +155,66 @@ async fn a_dropped_mailbox_stream_loses_only_what_it_handed_on() {
     agent.shutdown().await;
 }
 
+/// ER1 (R7-01) at the gateway: two gateways deliver to one target, each at the same HLC stamp. The key
+/// held only the stamp, so the two writes were one key and the target received one event. The two nodes
+/// are started apart (no gossip to move their clocks), forced to one clock state and posted to until the
+/// two stamps agree; then connected, converged and drained.
+#[tokio::test]
+async fn two_gateways_delivering_at_one_stamp_both_arrive() {
+    let (one, base_one, client) = gateway_agent().await;
+    let (two, base_two, _) = gateway_agent().await;
+    let (a, b) = (one.node_id().clone(), two.node_id().clone());
+    let stamp_of = |agent: &GossipAgent, prefix: &str| -> Vec<String> {
+        agent.kv().scan_prefix(prefix).into_iter()
+            .map(|(k, _)| k.strip_prefix(prefix).unwrap_or("").chars().take(16).collect()).collect()
+    };
+    let mut collided = None;
+    for attempt in 0..50 {
+        let kind = format!("er1.gw-{attempt}");
+        let prefix = format!("mailbox/{a}/{kind}/");
+        let ahead = one.task_ctx.hlc.decision_now_ms().max(two.task_ctx.hlc.decision_now_ms()) + 500;
+        let state = crate::hlc::pack(ahead, 0);
+        one.task_ctx.hlc.force_state_for_tests(state);
+        two.task_ctx.hlc.force_state_for_tests(state);
+        for base in [&base_two, &base_one] {
+            assert_eq!(post_status(&client, &format!("{base}/gateway/mailbox/deliver"),
+                serde_json::json!({"target": a.to_string(), "kind": kind, "payload_b64": "AA=="})).await, 200);
+        }
+        let (x, y) = (stamp_of(&one, &prefix), stamp_of(&two, &prefix));
+        if x.len() == 1 && x == y {
+            collided = Some((kind, prefix));
+            break;
+        }
+    }
+    let (kind, prefix) = collided.expect("the two gateways never wrote at one stamp");
+
+    two.connect_peer(a.clone());
+    assert!(two.kv().set_async("er1/gw-fence-two", "two").await);
+    let converged = || {
+        let (x, y) = (one.kv().scan_prefix(&prefix), two.kv().scan_prefix(&prefix));
+        one.kv().get("er1/gw-fence-two").is_some() && !x.is_empty() && x == y
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !converged() {
+        assert!(tokio::time::Instant::now() < deadline, "the two gateways never converged");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut stream = Box::pin(super::mailbox_events(Arc::clone(&one.task_ctx), Arc::from(kind.as_str()), shutdown_rx));
+    let mut senders = std::collections::BTreeSet::new();
+    while senders.len() < 2 {
+        match tokio::time::timeout(Duration::from_secs(2), stream.next()).await {
+            Ok(Some(ev)) => { senders.insert(ev["sender"].as_str().unwrap_or("").to_string()); }
+            _ => break,
+        }
+    }
+    assert_eq!(senders, [a.to_string(), b.to_string()].into(), "both gateways' events reach the target");
+    drop(stream);
+    one.shutdown().await;
+    two.shutdown().await;
+}
+
 // ── Promises 2 and 5: the log-group subscribe ─────────────────────────────────
 
 #[cfg(feature = "consensus")]

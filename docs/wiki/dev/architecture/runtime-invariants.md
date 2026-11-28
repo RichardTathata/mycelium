@@ -759,3 +759,23 @@ replay taken while it is alive — a clean shutdown would mask the loss), `snaps
 `a_failed_snapshot_lowers_the_self_opacity_mark_and_the_next_timer_snapshot_runs`.
 Not gated: `Committed { persisted: false }` end-to-end (needs a writer death or disk fault inside
 a running agent — the unit path is covered by the closed-writer test).
+
+## A key that must be unique across writers names its writer; a drain filters before it checks for empty (2026-11-27, ER1)
+
+**An HLC stamp is unique per node, not per fleet.** Each node's `Hlc` is its own: two idle nodes ticking in one wall
+millisecond hand out the same packed stamp. A key built from a stamp alone (`mailbox/{target}/{kind}/{hlc}` before
+ER1) is one key for two writers, and LWW silently keeps one value while both writes report success. A key that must
+be unique across writers puts the writer's id **after** the stamp — `…/{hlc:016x}/{node}`, the log route's and now the
+mailbox's shape — so key order is still stamp order, and the tie-break is deterministic under replay (never a random
+suffix). The bare `{hlc:016x}` grant request id (`src/agent/state_machine.rs`) has the same shape; whether it can
+collide across nodes is not determined (`docs/plans/engineering-review-urgent-fixes.md` §14).
+
+**A prefix scan of `{kind}/` also sees every kind that extends it with `/`.** A reader parses the remainder strictly
+(`parse_suffix` in `src/agent/mailbox.rs`: sixteen lowercase hex digits, then nothing or one segment that parses as a
+`NodeId`) and leaves what does not parse alone — another kind's, not its to deliver or delete.
+
+**A drain loop that skips entries must drop them from the scan before its emptiness check.** `drain_prefix` loops
+until a scan comes back empty; an entry it will never consume, left in the scan, makes the scan never empty and the
+loop never end. The skip sits in the same pass as the in-flight filter, ahead of `if entries.is_empty() { break; }`
+— `a_suffix_that_is_neither_shape_is_left_alone_and_the_drain_ends` calls the drain directly under a timeout
+([log](../.log/2026-11-27-er1-mailbox-sender.md)).

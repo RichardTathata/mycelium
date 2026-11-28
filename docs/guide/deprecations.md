@@ -80,6 +80,7 @@ the notice.
 | 109 | a struct literal of `GossipConfig`, `TlsConfig`, `GatewayTlsConfig` or `OidcConfig` outside `mycelium-core`, with or without `..Default::default()` | 2.41.0 (critique plan CR12) | `let mut c = X::default();` and assign the fields | **Yes** — `E0639`; a field added later then breaks nothing ([§109](#109-gossipconfig-tlsconfig-gatewaytlsconfig-and-oidcconfig-are-non_exhaustive-build-one-with-default-and-assignment-2410-critique-plan-row-cr12)) |
 | 126 | a `SystemStats`, `CoreCtx` or `WriterEntry` literal; a direct `run_peer_writer` call; `max_connections_per_source` at 1 per address for nodes running the control lane | unreleased (B1, PR 1) | add the new fields and arguments; a per-source cap of at least 2 per node, or `control_lane = false` | **Yes** for the literals and the call; **no** for the cap — a refused lane falls back to the shared path, counted ([§126](#126-a-control-lane-a-second-connection-per-peer-for-the-closed-set-of-control-kinds-behind-control_lane-on-by-default-max_connections_per_source-must-allow-two-per-node-behind-one-address-unreleased-b1-pr-1)) |
 | 128 | a live log consumer (`subscribe_log`, `GET /gateway/overlay/log/subscribe`, the SDKs' `subscribe_log` / `subscribeLog`) that assumes stamps only rise, or resumes from `entry.hlc + 1` | unreleased (engineering review ER8) | dedupe by what you handled, not by "stamp went up"; resume from `entry.hlc` inclusive | **No** — entries it used to miss now arrive, some with a lower stamp ([§128](#128-a-live-log-subscription-delivers-every-entry-once-a-late-entry-arrives-out-of-stamp-order-unreleased-engineering-review-er8)) |
+| 129 | code that parses `mailbox/` keys itself, or a receiver older than its senders | unreleased (engineering review ER1) | parse `{hlc:016x}` then an optional `/{sender}`; upgrade receivers before or with senders | **No** — an older receiver delivers a new writer's event with `hlc_ts == 0` ([§129](#129-a-mailbox-key-names-its-sender-mailboxtargetkindhlc016xsender-a-consumed-events-delete-is-handed-to-the-wal-unreleased-engineering-review-2026-11-26-er1)) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -5810,3 +5811,34 @@ that replicates after its position has passed it ([what is proven](../operations
 - **Code:** `mycelium-core/src/log_cursor.rs` (`LiveCursor`), `mycelium-core/src/kv_handle.rs` (`subscribe_log`),
   `src/agent/http/overlay.rs` (`gw_overlay_log_subscribe`). Tests: `src/agent/kv_handle_tests.rs`,
   `src/agent/http/remainder_tests.rs`, `src/lib_tests.rs` (`a_log_subscription_ends_at_shutdown`).
+## 129. A mailbox key names its sender: `mailbox/{target}/{kind}/{hlc:016x}/{sender}`; a consumed event's delete is handed to the WAL (unreleased, engineering review 2026-11-26, ER1)
+
+**What changes.** `deliver_event` (and `deliver_event_in`, and `POST /gateway/mailbox/deliver`) writes an event under
+`mailbox/{target}/{kind}/{hlc:016x}/{sender}`, the log route's shape; before, the key was `…/{hlc:016x}` and two nodes
+whose clocks handed out one stamp in one millisecond wrote one key, so last-writer-wins kept one of the two events while
+both calls returned `true` (R7-01). The reader accepts both shapes, with no removal date for the old one: sixteen
+lowercase hex digits, then nothing or one `/{sender}` segment that parses as a node id (a socket address). Events are delivered in `(hlc, key)` order; at one stamp an old-shape
+entry comes before a salted one. An entry under a mailbox's prefix whose remainder is **neither** shape — a kind
+containing `/`, such as kind `a/b`'s entries under mailbox `a` — is left alone for its own mailbox: not delivered,
+not deleted, traced at `debug`. No key the library writes for another kind matches mailbox `a`'s two shapes; only
+a raw KV write can. Refusing a `/` in a kind at `deliver` is a cleanliness follow-up, not a fix for an open case.
+`MeshEvent` is unchanged: `hlc_ts` is the key's first segment, `sender` still comes from the value.
+
+**The delete (R7-03).** A consumed event's tombstone is now handed to the WAL after it is applied, as the insert is, so
+a node that exits without `shutdown()` no longer brings a consumed event back on restart from the WAL's insert. The
+rung is *queued to the WAL writer*, not synced: `append_try` drops on a full queue, so the mailbox stays
+at-least-once — a consumed event can return after a crash before the delete reaches disk.
+
+**Mixed fleets.** Wire v12, the WAL and the snapshot format are unchanged. An old writer's event is read by a new
+receiver through the old-shape branch. **A new writer's event read by an older receiver is delivered, in order and with
+the right sender, but with `hlc_ts == 0`** (the old parse reads the whole remainder as hex); the same after a
+downgrade. **Upgrade receivers before or with senders.**
+
+**Will the compiler tell me?** No: no public signature changes. Code that reads `mailbox/` keys itself and parses the
+remainder as one hex number must take the first segment.
+
+- ***Check:*** after upgrading, `kv().scan_prefix("mailbox/{node}/{kind}/")` keys end in `/{sender}`; an application
+  that orders on `MeshEvent::hlc_ts` sees no zero stamps once every receiver is upgraded.
+- **Code:** `src/agent/mailbox.rs` (`mailbox_prefix`, `mailbox_key`, `deliver_event_at`, `parse_suffix`,
+  `drain_prefix`, `tombstone`). Tests: `src/agent/mailbox.rs` (the ER1 block),
+  `src/agent/http/remainder_tests.rs` (`two_gateways_delivering_at_one_stamp_both_arrive`).
