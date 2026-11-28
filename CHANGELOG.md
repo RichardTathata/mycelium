@@ -34,7 +34,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the `entry.hlc + 1`). The SDKs' resume advice is corrected (resume from
   `entry.hlc`, inclusive). A feature page, [the log overlay](docs/features/log-overlay.md); the group consumer's
   remaining late-entry limit is a ledger row (`what-is-proven.md#log-group-skips-a-late-row`). Upgrade note:
-  `deprecations.md` §TBD-ER8.
+  `deprecations.md` §128.
 - **A prefix subscription opened while its watcher is evicted is notified** (engineering review ER8's review; the
   plan's §14 question, pre-existing and made reachable by ER8, whose subscriptions now drop their receivers at
   disconnect). `subscribe_prefix` read the registered sender, then subscribed to it; if the last other receiver

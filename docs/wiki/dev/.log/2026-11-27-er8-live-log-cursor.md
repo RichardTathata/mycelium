@@ -16,4 +16,4 @@ Durable knowledge from the build:
 
 Pages: `runtime-invariants.md` (the live contract beside the group's), `docs/features/log-overlay.md` (new; registry,
 `docs/features/README.md`, `docs/capabilities.md`), `docs/guide/04-consensus.md`, `docs/guide/10-language-bridges.md`,
-`docs/operations/what-is-proven.md`, `docs/guide/deprecations.md` §TBD-ER8, `CHANGELOG.md`, the SDK docstrings.
+`docs/operations/what-is-proven.md`, `docs/guide/deprecations.md` §128, `CHANGELOG.md`, the SDK docstrings.
