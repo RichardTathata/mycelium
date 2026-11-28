@@ -5987,7 +5987,7 @@ it names acked, then fences its ids at `next_id` (`BoardStore::fence_past`, pers
 snapshot lacks and does not name is kept. `discard` of an absent id remembers it (logging the `Ack` the first time);
 `post_with_id` of a held id is a no-op, and of a remembered acked id is refused — nothing applied, `Ok` returned, and
 counted in `refused_acked`. A mirror probes the primary's digest every three `cap_refresh` (a `snapshot` request with
-body `[1]`) and re-syncs after four consecutive mismatches. A trailer that names more ids than a board remembers, or
+body `[1]`) and re-syncs after four consecutive mismatches, backing off up to 32 while re-syncs repair nothing. A trailer that names more ids than a board remembers, or
 a next id above 2^53, makes the mirror refuse that snapshot.
 
 **Mixed versions.** An older mirror decodes a new snapshot and ignores the trailer; a new mirror facing an older

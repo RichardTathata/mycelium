@@ -95,6 +95,17 @@ struct BoardInner {
     tombstones: Tombstones,
 }
 
+/// What [`BoardStore::apply_with_id`] did with a replicated fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PostOutcome {
+    /// Applied: the fact is now live here.
+    Applied,
+    /// Already held (or acked while it was being applied): nothing changed.
+    Held,
+    /// Refused: the id is one this board remembers acked.
+    Refused,
+}
+
 /// What a mirror needs from a primary's snapshot, read under one lock (ER6): the live facts, the
 /// id the primary issues next, and the acked ids it remembers as sorted runs.
 pub(crate) struct MirrorSnapshot {
@@ -249,6 +260,13 @@ impl BoardStore {
     /// bring back a completed fact (ER6). An ack that lands between the check and the insert wins:
     /// the fact is not inserted and an `Ack` follows its `Post` in the log.
     pub fn post_with_id(&self, id: u64, attributes: BTreeMap<String, String>, payload: Bytes) -> Result<(), BlackboardError> {
+        self.apply_with_id(id, attributes, payload).map(|_| ())
+    }
+
+    /// [`post_with_id`](Self::post_with_id), saying what it did — the refusal decided under the
+    /// same lock that checks it, so a caller never counts an id refused that was applied (review
+    /// round 2: a separate `remembers_acked` read could race an eviction from the memory).
+    pub(crate) fn apply_with_id(&self, id: u64, attributes: BTreeMap<String, String>, payload: Bytes) -> Result<PostOutcome, BlackboardError> {
         self.next_id.fetch_max(id.saturating_add(1), Ordering::Relaxed);
         {
             let g = self.inner.lock();
@@ -256,10 +274,10 @@ impl BoardStore {
                 drop(g);
                 self.refused_acked.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(id, "blackboard: refused a replicated fact under an id this board remembers acked");
-                return Ok(());
+                return Ok(PostOutcome::Refused);
             }
             if g.available.contains_key(&id) || g.inflight.contains_key(&id) {
-                return Ok(());
+                return Ok(PostOutcome::Held);
             }
         }
         if let Some(wal) = &self.wal {
@@ -278,10 +296,10 @@ impl BoardStore {
                 // Refused, the log replays the fact live — at-least-once, never a loss.
                 wal.append(&WalRecord::Ack { id })?;
             }
-            return Ok(());
+            return Ok(PostOutcome::Held);
         }
         self.posted.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+        Ok(PostOutcome::Applied)
     }
 
     /// Fence `next_id` at `n` or above (ER6, R11-04): a mirror told the primary's next id never

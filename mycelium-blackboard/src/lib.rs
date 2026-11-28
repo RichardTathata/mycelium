@@ -266,7 +266,14 @@ const DIGEST_PROBE_TICKS: u32 = 3;
 /// Consecutive mismatched probes that start a full sync (review I3), whatever the primary's write
 /// rate: a lost `Post` or `Ack` is repaired within this many probes — 4 × 3 × `cap_refresh`, two
 /// minutes at the default 10 s, plus up to one probe interval before the first mismatch is seen.
+/// A sync that repairs nothing (replication was only in flight) doubles the threshold, up to
+/// `DIGEST_MISMATCHES_MAX`; a sync that repairs something resets it (review round 2).
 const DIGEST_MISMATCHES_TO_SYNC: u32 = 4;
+
+/// The backed-off threshold's ceiling: 32 × 3 × `cap_refresh`, 16 minutes at the default — the
+/// worst-case repair time while it holds, and the interval between needless full syncs on a board
+/// whose replication is always in flight at probe time.
+const DIGEST_MISMATCHES_MAX: u32 = 32;
 
 /// After a primary answers a probe with a full snapshot (older than PR B), probe once in this many
 /// (review N1) — each such answer is the whole board.
@@ -277,8 +284,8 @@ const LEGACY_PROBE_BACKOFF: u32 = 10;
 pub(crate) enum Probe {
     /// The mirror's vouched facts (with its refused-but-live ids) match the primary's live set.
     Match,
-    /// They differ.
-    Mismatch,
+    /// They differ; the primary's next id at this probe (0 without a trailer).
+    Mismatch { next_id: u64 },
     /// The primary is older than PR B: its answer was a full snapshot, applied.
     Legacy,
     /// No answer, or no store.
@@ -315,6 +322,10 @@ pub struct Blackboard {
     unvouched: parking_lot::Mutex<HashSet<u64>>,
     /// Full syncs a digest mismatch started (ER6 PR B).
     digest_resyncs: AtomicU64,
+    /// Test seam: hold each replicated record this long before sending it — replication always in
+    /// flight at probe time, with nothing lost.
+    #[cfg(test)]
+    replicate_delay_ms: AtomicU64,
     tasks: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
@@ -336,6 +347,8 @@ impl Blackboard {
             refused_live: parking_lot::Mutex::new(HashSet::new()),
             unvouched: parking_lot::Mutex::new(HashSet::new()),
             digest_resyncs: AtomicU64::new(0),
+            #[cfg(test)]
+            replicate_delay_ms: AtomicU64::new(0),
             tasks: parking_lot::Mutex::new(Vec::new()),
         });
         match bb.cfg.role {
@@ -561,12 +574,17 @@ impl Blackboard {
                         // Drained once. Stay, to re-sync whenever a mirrored fact was refused
                         // (`mirror_gap`), so it is re-delivered after the WAL repairs — and, every
                         // `DIGEST_PROBE_TICKS`, to compare digests with the primary (ER6 PR B):
-                        // `DIGEST_MISMATCHES_TO_SYNC` consecutive mismatches are a lost `Post` or
-                        // `Ack` (or replication always in flight, which costs one full sync), and a
-                        // full sync repairs it. Against a primary older than PR B, whose answer is a
-                        // full snapshot, the probe backs off to one in `LEGACY_PROBE_BACKOFF`.
+                        // `threshold` consecutive mismatches start a full sync, which repairs a lost
+                        // `Post` or `Ack`. Replication in flight at probe time also mismatches, and
+                        // no sync cures that: a sync that retired nothing and refetched nothing the
+                        // primary issued before the streak began doubles `threshold`, up to
+                        // `DIGEST_MISMATCHES_MAX`; one that repaired something resets it. Against a
+                        // primary older than PR B, whose answer is a full snapshot, the probe backs
+                        // off to one in `LEGACY_PROBE_BACKOFF`.
                         let mut ticks: u32 = 0;
                         let mut mismatches: u32 = 0;
+                        let mut threshold = DIGEST_MISMATCHES_TO_SYNC;
+                        let mut floor: Option<u64> = None;
                         let mut skip: u32 = 0;
                         loop {
                             tick.tick().await;
@@ -585,18 +603,35 @@ impl Blackboard {
                                 continue;
                             }
                             match me.probe_primary().await {
-                                Probe::Mismatch => {
+                                Probe::Mismatch { next_id } => {
                                     mismatches += 1;
-                                    if mismatches >= DIGEST_MISMATCHES_TO_SYNC {
+                                    // The primary's next id when the streak began: a fact below it
+                                    // that a sync brings had time to arrive by replication.
+                                    let streak_floor = *floor.get_or_insert(next_id);
+                                    if mismatches >= threshold {
                                         me.digest_resyncs.fetch_add(1, Ordering::Relaxed);
                                         tracing::warn!(ns = %me.cfg.namespace, mismatches,
                                             "blackboard: the mirror's digest differs from the primary's — re-syncing");
-                                        break;
+                                        mismatches = 0;
+                                        floor = None;
+                                        match me.digest_resync(streak_floor).await {
+                                            Some(0) => {
+                                                threshold = (threshold * 2).min(DIGEST_MISMATCHES_MAX);
+                                                tracing::info!(ns = %me.cfg.namespace, threshold,
+                                                    "blackboard: the re-sync repaired nothing (replication in flight); backing the probe off");
+                                            }
+                                            Some(_) => threshold = DIGEST_MISMATCHES_TO_SYNC,
+                                            None => {}
+                                        }
                                     }
                                 }
-                                Probe::Match => mismatches = 0,
+                                Probe::Match => {
+                                    mismatches = 0;
+                                    floor = None;
+                                }
                                 Probe::Legacy => {
                                     mismatches = 0;
+                                    floor = None;
                                     skip = LEGACY_PROBE_BACKOFF - 1;
                                 }
                                 Probe::Unknown => {}
@@ -722,17 +757,26 @@ impl Blackboard {
 
     /// One snapshot RPC to `primary`, applied into the mirror.
     async fn sync_from(self: &Arc<Self>, primary: NodeId) -> bool {
+        match self.fetch_snapshot(primary).await {
+            Some(resp) => self.apply_snapshot(&resp),
+            None => false,
+        }
+    }
+
+    /// A full snapshot from `primary`, or `None` if it did not answer.
+    async fn fetch_snapshot(self: &Arc<Self>, primary: NodeId) -> Option<Bytes> {
         self.note_primary_seen(&primary);
         let kind = rpc::rpc_kind(&self.cfg.namespace, "snapshot");
-        let Ok(resp) = self
-            .agent
-            .service()
-            .rpc_call(primary, kind, Bytes::new(), Duration::from_secs(10))
-            .await
-        else {
-            return false;
-        };
-        self.apply_snapshot(&resp)
+        self.agent.service().rpc_call(primary, kind, Bytes::new(), Duration::from_secs(10)).await.ok()
+    }
+
+    /// The full sync a digest mismatch starts (review round 2): how many facts it repaired —
+    /// retired, or refetched with an id below `floor` (issued before the mismatch streak began, so
+    /// not merely in flight) — or `None` if no sync was applied.
+    async fn digest_resync(self: &Arc<Self>, floor: u64) -> Option<u64> {
+        let primary = self.resolve_primary().ok()?;
+        let resp = self.fetch_snapshot(primary).await?;
+        self.apply_snapshot_counted(&resp, floor)
     }
 
     /// One digest probe (ER6 PR B): ask the primary for its digest only, refresh the id fence from
@@ -776,7 +820,7 @@ impl Blackboard {
             count += 1;
             mix ^= store::digest_mix(id);
         }
-        if (count, mix) == (digest.count, digest.mix) { Probe::Match } else { Probe::Mismatch }
+        if (count, mix) == (digest.count, digest.mix) { Probe::Match } else { Probe::Mismatch { next_id: next_id.unwrap_or(0) } }
     }
 
     /// Apply a primary's snapshot response into this mirror (ER6, D6a). **Positive evidence, never
@@ -786,9 +830,16 @@ impl Blackboard {
     /// bring it back); the facts are added; the id fence moves past the primary's next id. A snapshot
     /// with no trailer (a primary older than ER6) only adds, as before. `true` iff it applied.
     pub(crate) fn apply_snapshot(&self, resp: &Bytes) -> bool {
+        self.apply_snapshot_counted(resp, 0).is_some()
+    }
+
+    /// [`apply_snapshot`](Self::apply_snapshot), returning how many facts it repaired: retired,
+    /// or applied with an id below `floor`. `None` if nothing was applied.
+    fn apply_snapshot_counted(&self, resp: &Bytes, floor: u64) -> Option<u64> {
         let (Ok(rpc::DecodedSnapshot { facts, trailer, .. }), Some(store)) = (rpc::dec_snapshot_resp(resp), self.store()) else {
-            return false;
+            return None;
         };
+        let mut repaired = 0u64;
         let carried: HashSet<u64> = facts.iter().map(|f| f.id).collect();
         if let Some(t) = &trailer {
             let mut retired = 0u64;
@@ -801,6 +852,7 @@ impl Blackboard {
                     Err(e) => tracing::error!(id, error = %e, "blackboard: a retired mirror fact's ack not logged"),
                 }
             }
+            repaired += retired;
             if retired > 0 {
                 self.mirror_retired.fetch_add(retired, Ordering::Relaxed);
                 tracing::info!(ns = %self.cfg.namespace, retired, "blackboard: retired mirrored facts the primary reports acked");
@@ -809,11 +861,13 @@ impl Blackboard {
         let mut refused = HashSet::new();
         for f in facts {
             let id = f.id;
-            if store.remembers_acked(id) {
-                refused.insert(id); // `post_with_id` refuses it, counted
-            }
-            if let Err(e) = store.post_with_id(id, f.attributes, f.payload) {
-                self.note_mirror_gap(id, &e);
+            match store.apply_with_id(id, f.attributes, f.payload) {
+                Ok(store::PostOutcome::Refused) => {
+                    refused.insert(id); // counted by the store
+                }
+                Ok(store::PostOutcome::Applied) if id < floor => repaired += 1,
+                Ok(_) => {}
+                Err(e) => self.note_mirror_gap(id, &e),
             }
         }
         *self.refused_live.lock() = refused;
@@ -831,7 +885,7 @@ impl Blackboard {
             }
             *self.unvouched.lock() = unvouched;
         }
-        true // a full snapshot (possibly empty) was applied — the mirror is now complete
+        Some(repaired) // a full snapshot (possibly empty) was applied — the mirror is now complete
     }
 
     // ── Serving paths (primary) ──────────────────────────────────────────────
@@ -865,7 +919,13 @@ impl Blackboard {
         }
         let kind = rpc::rpc_kind(&self.cfg.namespace, "replicate");
         let agent = Arc::clone(&self.agent);
+        #[cfg(test)]
+        let delay = self.replicate_delay_ms.load(Ordering::Relaxed);
         tokio::spawn(async move {
+            #[cfg(test)]
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
             for node in secondaries {
                 for _ in 0..2 {
                     if agent
@@ -1540,6 +1600,36 @@ mod wal_role_tests {
         .await;
         stop.store(true, Ordering::Relaxed);
         let _ = writer.await;
+        mirror.shutdown().await;
+        primary.shutdown().await;
+    }
+
+    /// Review round 2: replication always in flight at probe time (here: held 2 s), nothing lost.
+    /// Every probe mismatches and no sync can cure it; with a fixed threshold that was a full
+    /// snapshot every four probes for as long as the load lasted. A sync that repairs nothing
+    /// doubles the threshold.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn steady_writes_with_no_loss_back_the_probe_off() {
+        let (primary, mirror) = primary_and_mirror("probe-backoff").await;
+        primary.replicate_delay_ms.store(2_000, Ordering::Relaxed);
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (primary, stop) = (Arc::clone(&primary), Arc::clone(&stop));
+            tokio::spawn(async move {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = primary.post(BTreeMap::from([("kind".to_string(), "steady".to_string())]), Bytes::new()).await;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+        };
+        // Probes every 900 ms: a fixed threshold of 4 syncs about every 3.6 s (five in 20 s); the
+        // backed-off one at 3.6 s, then 7.2 s later, then 14.4 s after that.
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        stop.store(true, Ordering::Relaxed);
+        let _ = writer.await;
+        let syncs = mirror.mirror_digest_resyncs();
+        assert!(syncs >= 1, "replication in flight made the probes mismatch");
+        assert!(syncs <= 3, "{syncs} full syncs in 20 s that repaired nothing: the probe did not back off");
         mirror.shutdown().await;
         primary.shutdown().await;
     }

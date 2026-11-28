@@ -93,7 +93,9 @@ left blank. The obligations every companion owes are the
 - **A returning or lost-ack mirror is reconciled** (ER6). The snapshot carries the primary's acked ids (100 000 in
   memory, 16 384 kept through compaction) and its next id; a mirror discards what the primary names acked, never what
   the snapshot merely lacks, and fences its ids. A running mirror probes a digest every 3 × `cap_refresh` and re-syncs
-  after four consecutive mismatches (within about two minutes at the default `cap_refresh`). Watch `Blackboard::mirror_retired()`, `mirror_unvouched()` (facts kept that the primary
+  after four consecutive mismatches (within about two minutes at the default `cap_refresh`); a re-sync that repaired
+  nothing doubles that, up to 32 probes (about 16 minutes), so an always-behind mirror costs one whole-board
+  snapshot per 16 minutes. Watch `Blackboard::mirror_retired()`, `mirror_unvouched()` (facts kept that the primary
   could not vouch for — nonzero after a mirror returns from a long absence or a primary restarted empty),
   `mirror_refused_acked()` (a replicated post under an id this node remembers acked: counted at each full sync —
   most often a fact the primary still holds whose `Ack` was lost before an old primary died, kept out of the digest's

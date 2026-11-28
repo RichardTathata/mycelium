@@ -39,8 +39,11 @@ attributes** where the tuple space routes by lane position. WS-G G3, PRs #95–#
   old `MirrorIndex` is gone. The **snapshot** (and only it — `read` shares `facts_to_bytes`) gains a trailer
   `[u8 1][u64 next_id][u32 n] n×([u64 start][u32 len])`; `apply_snapshot` discards named ids, adds facts, then
   `fence_past(next_id)` — persisted as a lone `Claim { n-1 }`, which never changes liveness in any order. A running
-  mirror probes with body `[1]` (digest only: `[u8 2][u64 count][u64 xor-mix]`) every 3 ticks; four consecutive
-  mismatches → full sync, whatever the write rate (a replication-sequence gate, the first build, never repaired a
+  mirror probes with body `[1]` (digest only: `[u8 3][u64 count][u64 xor-mix]` — tag 3, since the first build's tag 2
+  carried a sequence) every 3 ticks; four consecutive mismatches → full sync, whatever the write rate; a sync that
+  repaired nothing (retired none, refetched nothing below the primary's next id at the streak's start) doubles the
+  threshold to at most 32, a repair resets it (review round 2: in-flight replication otherwise cost a whole-board
+  snapshot every 4 probes) (a replication-sequence gate, the first build, never repaired a
   board written between every two probes — review I3); an old primary's full-snapshot answer backs the probe off to
   one in ten. The trailer decoder refuses runs summing past the memory and a `next_id` above 2^53 (review I2: one
   12-byte run `(0, u32::MAX)` was 4.3 billion discards). The digest skips **unvouched** facts (held, neither carried nor

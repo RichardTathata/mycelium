@@ -190,8 +190,9 @@ const SNAP_EXT_FENCE: u8 = 1;
 /// The largest `next_id` a trailer may carry: ids stay below 2^53 (ER3, `fresh_id_base`).
 const MAX_TRAILER_NEXT_ID: u64 = 1 << 53;
 /// The digest extension (ER6 PR B), after the trailer of a digest-only answer:
-/// `[u8 2][u64 live count][u64 xor of the live ids' mixes]`.
-const SNAP_EXT_DIGEST: u8 = 2;
+/// `[u8 3][u64 live count][u64 xor of the live ids' mixes]`. Tag 3, not 2: a development build of
+/// PR B sent tag 2 with a replication sequence first, and a mirror must not read that as this.
+const SNAP_EXT_DIGEST: u8 = 3;
 /// A `snapshot` request body asking for the digest only (ER6 PR B). A primary older than PR B
 /// ignores the body and answers a full snapshot, which the mirror applies — still correct.
 pub(crate) const SNAP_REQ_DIGEST: u8 = 1;
@@ -602,6 +603,11 @@ mod snapshot_trailer_tests {
         assert_eq!(got.trailer, Some(SnapshotTrailer { next_id: 123, acked: Vec::new() }));
         assert_eq!(got.digest, Some(d));
         assert!(dec_facts_resp(&bytes).unwrap().is_empty());
+        // The first build's tag 2 (with a sequence) is not read as a digest.
+        let mut first_build = digest_to_bytes(123, d);
+        let tag_at = first_build.len() - 17;
+        first_build[tag_at] = 2;
+        assert_eq!(dec_snapshot_resp(&Bytes::from(first_build)).unwrap().digest, None);
     }
 }
 

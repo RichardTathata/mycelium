@@ -81,7 +81,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the primary's next id and its acked ids as runs — which an older mirror ignores. A mirror discards what the primary
   names acked, never what the snapshot merely lacks (a fact it cannot vouch for is kept and counted), and fences its
   ids, persisted as a lone `Claim`. A running mirror compares a digest with the primary's every three `cap_refresh`
-  and re-syncs after four consecutive mismatches (about two minutes at the default 10 s), so a lost replicated `Post`
+  and re-syncs after four consecutive mismatches (about two minutes at the default 10 s; backed off up to 32 probes
+  while re-syncs repair nothing), so a lost replicated `Post`
   or `Ack` is repaired without a restart; a trailer naming more ids than a board remembers, or a next id above 2^53,
   is refused. New counters
   `Blackboard::{mirror_retired, mirror_unvouched, mirror_refused_acked, mirror_digest_resyncs}`; new

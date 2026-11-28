@@ -68,8 +68,13 @@ and `a_new_mirror_preserves_the_highest_allocated_fact_id_on_promotion`, in the 
   not name acked is kept and counted (`Blackboard::mirror_unvouched`). A running mirror compares a digest of its facts
   with the primary's every three `cap_refresh` and re-syncs after four consecutive mismatched probes — within about two minutes of the first mismatch at the default `cap_refresh` of 10 s (4 probes × 3 × `cap_refresh`, the first mismatch seen up to one probe interval after the loss)
   (`Blackboard::mirror_digest_resyncs`), so a lost replicated `Post` or `Ack` is repaired without a restart, under
-  steady writes too; a board whose replication is always in flight at four probes in a row pays one needless full
-  sync. An id the primary holds live that the mirror refuses as acked (its `Ack` was lost before an old primary died)
+  steady writes too. Replication still in flight at probe time also mismatches, and no sync cures that: a sync that
+  retired nothing and refetched nothing issued before the mismatches began doubles the threshold, up to 32 probes;
+  a sync that repairs something resets it to 4. **The bounds:** a lost `Post` or `Ack` is repaired within 4 probes
+  (about 2 minutes at the default `cap_refresh`) when the threshold is at rest, and within 32 (about 16 minutes)
+  after a back-off; on a board whose replication is always behind the probe, the steady cost is one needless
+  whole-board snapshot per mirror every 32 probes (about 16 minutes). An `Ack` in flight during a sync counts as a
+  repair and resets the threshold. An id the primary holds live that the mirror refuses as acked (its `Ack` was lost before an old primary died)
   is counted in `mirror_refused_acked` at each full sync and folded into the mirror's digest, so it does not start
   syncs. Against a primary older than this probe, whose answer is the whole board, a mirror probes once in ten.
   **Frame headroom:** the trailer is up to about 1.2 MB (100 000 runs of 12 bytes) of the snapshot's 10 MiB frame;
