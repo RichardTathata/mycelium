@@ -152,6 +152,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (a timeout, never a negative). `Installed` gains a defaulted `retire`. Not yet: a dropped
   stem's re-probe, `[[serve]]` and peer-serve tasks (ER5 PR 2). Upgrade note: deprecations §132.
 
+- **A schedule whose declaration changes runs each slot once** (the engineering review of 2026-11-26, R6-02 with
+  R6-05; `docs/plans/engineering-review-urgent-fixes.md` §4, ER2). The writer of `sched/{id}/last/{node}` kept its own
+  entry's slot whatever period and phase it was written under, and wrote it under the new declaration: after the
+  documented rollout — stop a schedule, start it again with a longer period — the entry was about 9e8 slots ahead,
+  every reader left it out, and the slot due ran again every check interval, for as long as the node held. The reader
+  and the writer now share one rule (`schedule::parse_last`, `counted`, `recorded`): **the writer never keeps an entry
+  the reader would leave out** — another period or phase, or more than `MAX_AHEAD_SLOTS` ahead of the tick's slot — so
+  the first run under a new declaration records the slot it ran, and an entry already poisoned this way heals on the
+  node's next run, its trace saying what it replaced. The same rule fixes two cases the review's design found
+  (decision D14b): **a phase change** no longer skips the new phase's next slot, and **an entry left more than 64
+  slots ahead by a clock since stepped back** (a node that ran with its clock ahead and came back corrected, its entry
+  handed back by a peer or its store) no longer makes the slot due run every check interval until the clock catches
+  up. Under one declaration, within the bound, an entry is still never lowered. No new clock read: the replay
+  corpus's trace is unchanged, and its `decisions.jsonl` was re-recorded for the two revisions alone.
+  The trace of a failed late or gap run said *not retried*, which was not so when no later run of its tick completed:
+  it now says *the runs after it go on; the slot is run again only if no later run of this tick completes* (R6-05, a
+  sentence corrected, not the loop). `sched.run` and `sched.missed` are at revision 2. Upgrade notes:
+  `deprecations.md` §TBD-ER2.
 - **A gateway sends an unanswered cancel-forward again** (unreleased code: I4's cancel-forward; identity-and-lifecycle
   §9 O13, the maintainer's decision of 2026-11-22; found on #824, where behind about 12 000 concurrent mints the
   provider's stop came about 25 s after the cancel in 4 runs of 9). The forward is a best-effort signal on the

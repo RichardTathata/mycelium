@@ -6170,3 +6170,40 @@ given a unit with two editions of one requirement refuses to start, with the nam
   (`capability_config.rs`); `two_editions_of_one_requirement_are_refused_by_a_stem` (`stem.rs`);
   `a_second_install_of_a_tool_survives_the_first_ones_retirement` (`mycelium-wasm-host/src/runtime.rs`);
   `the_newest_holds_and_only_the_last_withdraws_the_key`, `keys_are_independent` (`kv_persist.rs`).
+## §TBD-ER2. A schedule's own `last` entry is replaced when no reader would count it: "never lowered" holds within one declaration (unreleased, the engineering review of 2026-11-26, ER2)
+
+This applies to every `[[schedule]]` run by `GossipAgent::run_schedule` or through `GET /gateway/schedules/run`.
+
+**Before.** After a run's work succeeded, the node wrote `sched/{id}/last/{node}` as the larger of the slot it ran
+and its entry's slot, **whatever period and phase the entry was written under**, then stamped the result with the
+current period and phase. The reader (`fleet_last`) counts only entries under the schedule's own period and phase and
+leaves out any more than `MAX_AHEAD_SLOTS` (64) ahead of its slot. So after a period was lengthened, a phase moved,
+or a node came back with its clock corrected to find its own entry more than 64 slots ahead (written while its clock
+was ahead, handed back by a peer or its store), the writer kept a slot the reader refused: the slot due ran again
+every check interval (lengthening, the corrected clock), or the next slot was skipped (a phase change).
+
+**Now.** The reader and the writer share one rule (`schedule::counted`): the writer keeps its entry's slot only when
+the reader would count it — same period and phase, at most 64 slots ahead of the tick's slot — and otherwise records
+the slot it ran. **An entry is never lowered within one declaration; an entry no reader counts is replaced.** An entry
+already poisoned by the old writer (its slot far ahead under the current declaration) is replaced by the node's next
+successful run; the run's trace effect says what it replaced and why. A node replaces only its own entry; another
+node's poisoned entry stays left out by every reader, as before.
+
+**What did not change.** No wire, key or value format; no public API. A same-declaration entry within the bound —
+a clock ahead by up to 64 slots — is still kept, and still makes a slower holder say `last_ahead`. In a mixed fleet a
+node on an older release still writes the old way, and its entry is left out by new readers as before.
+
+**The trace.** `sched.run` and `sched.missed` are at revision 2. A failed late or gap run's effect now reads *the
+runs after it go on; the slot is run again only if no later run of this tick completes* (it said *not retried*,
+which was not so when every later run of the tick failed too). A consumer that matched the old sentence, or pinned
+revision 1 of either rule, updates.
+
+- ***Check:*** after a schedule is stopped and restarted with another period or phase, `GET /gateway/schedules/last`
+  (a client's schedule) or the node's `sched/{id}/last/{node}` shows the new declaration's `period_ms`/`phase_ms`
+  and the slot last run under it, and each slot's key appears once in the work's log.
+- **Code:** `src/schedule.rs` (`parse_last`, `counted`, `recorded`, `fleet_last`, `Runner::tick`). Tests:
+  `src/schedule_tests.rs` (`recorded_*`, `lengthening_a_period_runs_each_slot_once`,
+  `a_poisoned_entry_is_replaced_by_the_next_run`, `stopping_and_restarting_with_a_longer_period_runs_each_slot_once`,
+  `a_phase_change_does_not_skip_a_slot`, `a_clock_stepped_back_past_the_bound_runs_each_slot_once`,
+  `a_failed_late_run_is_run_again_when_nothing_after_it_completes_and_the_trace_says_so`),
+  `src/agent/http/schedule_run_tests.rs` (`a_clients_schedule_over_a_poisoned_entry_is_handed_one_run_per_slot`).

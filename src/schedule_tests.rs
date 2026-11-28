@@ -450,6 +450,281 @@ async fn a_failed_late_run_is_traced_and_the_runs_after_it_go_on() {
     a.shutdown().await;
 }
 
+/// R6-05: a failed late run is not retried *when a later run of its tick completes* — that run's record covers it.
+/// When none does (here the on-time run fails too), the slot is still the fleet's next and the next tick runs it again,
+/// under the same key; the failure's trace says exactly that, not "not retried".
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn a_failed_late_run_is_run_again_when_nothing_after_it_completes_and_the_trace_says_so() {
+    use std::sync::atomic::AtomicBool;
+    let (a, sink, _band) = banded(vec![], alloc_port()).await;
+    let fail = Arc::new(AtomicBool::new(false));
+    let seen: Arc<Mutex<Vec<ScheduledRun>>> = Arc::default();
+    let (f2, s2) = (Arc::clone(&fail), Arc::clone(&seen));
+    let h = a.run_schedule(&decl("close", 2, MissedRunPolicy::RunLate), move |run: ScheduledRun| {
+        s2.lock().unwrap().push(run.clone());
+        // Every run of the first catch-up tick fails, its on-time run last; every run after it succeeds.
+        let failing = f2.load(Ordering::SeqCst);
+        if failing && run.kind == RunKind::OnTime { f2.store(false, Ordering::SeqCst); }
+        async move { if failing { Err("this tick's runs all fail".to_string()) } else { Ok(()) } }
+    }).unwrap();
+    assert!(poll_until(|| h.runs() >= 1, 15_000).await);
+    fail.store(true, Ordering::SeqCst);
+    mycelium_core::sim_seam::step_wall_clock_for_test(3 * 2_000);
+    let late_failure = || sink.snapshot().into_iter().find(|r| r.rule == RUN_RULE && r.reason == "work_failed");
+    assert!(poll_until(|| late_failure().is_some() && !fail.load(Ordering::SeqCst) && h.runs() >= 2, 10_000).await,
+        "the failing tick ran and a later one succeeded: {:?}", sink.snapshot().iter().map(|r| r.reason.clone()).collect::<Vec<_>>());
+    mycelium_core::sim_seam::step_wall_clock_for_test(0);
+    let effect = late_failure().unwrap().effect.unwrap_or_default();
+    assert!(effect.contains("the runs after it go on; the slot is run again only if no later run of this tick completes"),
+        "the late failure's trace says when it is run again: {effect}");
+    assert!(!effect.contains("not retried"), "{effect}");
+    let seen = seen.lock().unwrap().clone();
+    let first_late = seen.iter().find(|r| r.kind == RunKind::Late).expect("a late run").slot;
+    assert!(seen.iter().filter(|r| r.slot == first_late && r.kind == RunKind::Late).count() >= 2,
+        "with nothing after it completing, the failed late slot is run again: {seen:?}");
+    drop(h);
+    a.shutdown().await;
+}
+
+// ── ER2 (R6-02): one rule for the reader and the writer of `sched/{id}/last/{node}` ─────────────────────
+
+fn sched(period_secs: u64, phase_secs: u64) -> Schedule {
+    let mut d = decl("close", period_secs, MissedRunPolicy::Skip);
+    d.phase_secs = phase_secs;
+    Schedule::from_decl(&d).unwrap()
+}
+
+#[test]
+fn recorded_after_a_lengthened_period_is_the_slot_run() {
+    // An entry under a 1 s period, read by a 2 s declaration: its slot counts twice as fast, and no reader counts it.
+    assert_eq!(recorded(&sched(2, 0), Some((1_990, 1_000, 0)), 1_000, Some(1_000)), 1_000);
+}
+
+#[test]
+fn recorded_over_a_poisoned_entry_is_the_slot_run() {
+    // Same declaration, far past the reader's bound: the reader leaves it out, so the writer does not keep it.
+    assert_eq!(recorded(&sched(2, 0), Some((1_000_000_000, 2_000, 0)), 1_000, Some(1_000)), 1_000);
+}
+
+#[test]
+fn recorded_under_the_same_declaration_is_never_lowered() {
+    assert_eq!(recorded(&sched(2, 0), Some((990, 2_000, 0)), 1_000, Some(1_000)), 1_000, "a lower entry: the slot run");
+    assert_eq!(recorded(&sched(2, 0), Some((1_000, 2_000, 0)), 990, Some(1_000)), 1_000, "a late run: the entry kept");
+}
+
+#[test]
+fn recorded_under_the_same_declaration_ahead_within_the_bound_is_kept() {
+    let s = sched(2, 0);
+    assert_eq!(recorded(&s, Some((1_010, 2_000, 0)), 1_000, Some(1_000)), 1_010);
+    assert_eq!(recorded(&s, Some((1_000 + MAX_AHEAD_SLOTS, 2_000, 0)), 1_000, Some(1_000)), 1_000 + MAX_AHEAD_SLOTS, "on the bound: kept");
+    assert_eq!(recorded(&s, Some((1_001 + MAX_AHEAD_SLOTS, 2_000, 0)), 1_000, Some(1_000)), 1_000, "one past it: replaced");
+}
+
+#[test]
+fn recorded_after_a_phase_change_is_the_slot_run() {
+    // Phase 0 → 1 s: the old entry's slot can be one ahead of the new phase's; kept, it would skip that slot.
+    assert_eq!(recorded(&sched(2, 1), Some((1_001, 2_000, 0)), 1_000, Some(1_000)), 1_000);
+}
+
+#[test]
+fn parse_last_reads_the_three_numbers_and_refuses_anything_else() {
+    assert_eq!(parse_last(b"7 2000 0"), Some((7, 2_000, 0)));
+    assert_eq!(parse_last(b"7 2000 0 extra"), Some((7, 2_000, 0)), "as the reader and the route always read it");
+    assert_eq!(parse_last(b"7 2000"), None);
+    assert_eq!(parse_last(b"x 2000 0"), None);
+    assert_eq!(parse_last(&[0xff, 0x20]), None);
+}
+
+/// This node's own `last` entry for `id`, parsed.
+fn own_entry(a: &GossipAgent, id: &str) -> Option<(u64, u64, u64)> {
+    parse_last(&a.kv().get(&format!("{}{}", last_prefix(id), a.node_id()))?)
+}
+
+fn seed_own(a: &GossipAgent, id: &str, value: String) {
+    assert!(a.kv().set(format!("{}{}", last_prefix(id), a.node_id()), value), "seed this node's last");
+}
+
+/// A work that records each run and succeeds.
+fn recording(seen: &Arc<Mutex<Vec<ScheduledRun>>>) -> impl Fn(ScheduledRun) -> std::future::Ready<Result<(), String>> + Send + Sync + 'static {
+    let seen = Arc::clone(seen);
+    move |run| {
+        seen.lock().unwrap().push(run);
+        std::future::ready(Ok(()))
+    }
+}
+
+fn slots(seen: &Arc<Mutex<Vec<ScheduledRun>>>) -> Vec<u64> {
+    seen.lock().unwrap().iter().map(|r| r.slot).collect()
+}
+
+fn assert_unique(slots: &[u64]) {
+    let unique: std::collections::BTreeSet<_> = slots.iter().collect();
+    assert_eq!(unique.len(), slots.len(), "each slot run once: {slots:?}");
+}
+
+/// R6-02: this node's entry from a one-second declaration, then the schedule run at two seconds. The old entry's slot
+/// is about twice the new one; kept, the writer would make it an entry of the new declaration that no reader counts,
+/// and the slot due would run again every check interval.
+#[tokio::test]
+async fn lengthening_a_period_runs_each_slot_once() {
+    let (a, _sink, _band) = banded(vec![], alloc_port()).await;
+    let old = sched(1, 0).slot_at(mycelium_core::sim_seam::wall_now_ms()).unwrap();
+    seed_own(&a, "close", format!("{old} 1000 0"));
+    let seen: Arc<Mutex<Vec<ScheduledRun>>> = Arc::default();
+    let h = a.run_schedule(&decl("close", 2, MissedRunPolicy::Skip), recording(&seen)).unwrap();
+    assert!(poll_until(|| h.runs() >= 3, 20_000).await, "three runs: {:?}", slots(&seen));
+    drop(h);
+    let ran = slots(&seen);
+    assert_unique(&ran);
+    assert_eq!(own_entry(&a, "close"), Some((*ran.iter().max().unwrap(), 2_000, 0)), "the entry is the last slot run, under the new declaration");
+    a.shutdown().await;
+}
+
+/// R6-02, D14: an entry of this declaration far past the reader's bound — written by the unfixed writer, or a clock
+/// once far ahead — is replaced by the next run, and the trace says so.
+#[tokio::test]
+async fn a_poisoned_entry_is_replaced_by_the_next_run() {
+    let (a, sink, _band) = banded(vec![], alloc_port()).await;
+    let now_slot = sched(2, 0).slot_at(mycelium_core::sim_seam::wall_now_ms()).unwrap();
+    seed_own(&a, "close", format!("{} 2000 0", now_slot * 2));
+    let seen: Arc<Mutex<Vec<ScheduledRun>>> = Arc::default();
+    let h = a.run_schedule(&decl("close", 2, MissedRunPolicy::Skip), recording(&seen)).unwrap();
+    assert!(poll_until(|| h.runs() >= 2, 20_000).await, "two runs: {:?}", slots(&seen));
+    drop(h);
+    let ran = slots(&seen);
+    assert_unique(&ran);
+    assert_eq!(own_entry(&a, "close").map(|e| e.0), ran.iter().max().copied(), "healed: the entry is the last slot run");
+    let replaced = sink.snapshot().into_iter().filter(|r| r.rule == RUN_RULE && r.reason == "ran")
+        .filter_map(|r| r.effect).find(|e| e.contains("replacing")).expect("the first run says it replaced the entry");
+    assert!(replaced.contains(&format!("{} 2000 0", now_slot * 2)) && replaced.contains("no reader counts"), "{replaced}");
+    a.shutdown().await;
+}
+
+/// R6-02 as the reviewer ran it: the documented rollout — stop the schedule, start it again on the same node with a
+/// longer period — runs each slot once and records the new declaration's slot.
+#[tokio::test]
+async fn stopping_and_restarting_with_a_longer_period_runs_each_slot_once() {
+    let (a, _sink, _band) = banded(vec![], alloc_port()).await;
+    let seen1: Arc<Mutex<Vec<ScheduledRun>>> = Arc::default();
+    let h = a.run_schedule(&decl("close", 1, MissedRunPolicy::Skip), recording(&seen1)).unwrap();
+    assert!(poll_until(|| h.runs() >= 1, 15_000).await);
+    h.stop();
+    assert_eq!(own_entry(&a, "close").map(|e| e.1), Some(1_000));
+    assert!(poll_until(|| a.task_ctx.schedules_running.pin().get("close").is_none(), 5_000).await, "the loop ended");
+    let seen: Arc<Mutex<Vec<ScheduledRun>>> = Arc::default();
+    let h = a.run_schedule(&decl("close", 2, MissedRunPolicy::Skip), recording(&seen)).unwrap();
+    assert!(poll_until(|| h.runs() >= 3, 20_000).await, "three runs: {:?}", slots(&seen));
+    drop(h);
+    let ran = slots(&seen);
+    assert_unique(&ran);
+    assert_eq!(own_entry(&a, "close"), Some((*ran.iter().max().unwrap(), 2_000, 0)));
+    a.shutdown().await;
+}
+
+/// A clock held still through the seam until it is dropped.
+#[cfg(not(feature = "sim"))]
+struct Pinned;
+#[cfg(not(feature = "sim"))]
+impl Pinned {
+    fn at(ms: u64) -> Self {
+        mycelium_core::sim_seam::pin_wall_clock_for_test(Some(ms));
+        Pinned
+    }
+}
+#[cfg(not(feature = "sim"))]
+impl Drop for Pinned {
+    fn drop(&mut self) {
+        mycelium_core::sim_seam::pin_wall_clock_for_test(None);
+    }
+}
+
+/// R6-02's phase case (the design's §1): this node ran slot `S` of a two-second schedule at phase 0; restarted at
+/// phase 1 s half a second into that slot, the slot due is `S − 1` of the new phase. Kept, the old `S` would be
+/// recorded under the new phase, and the new phase's slot `S` would read as already run — skipped.
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn a_phase_change_does_not_skip_a_slot() {
+    let (a, _sink, _band) = banded(vec![], alloc_port()).await;
+    let s_old = mycelium_core::sim_seam::wall_now_ms() / 2_000;
+    let mut pin = Pinned::at(s_old * 2_000 + 500);
+    seed_own(&a, "close", format!("{s_old} 2000 0"));
+    let mut d = decl("close", 2, MissedRunPolicy::Skip);
+    d.phase_secs = 1;
+    let seen: Arc<Mutex<Vec<ScheduledRun>>> = Arc::default();
+    let h = a.run_schedule(&d, recording(&seen)).unwrap();
+    assert!(poll_until(|| h.runs() >= 1, 15_000).await, "the new phase's slot due runs");
+    assert_eq!(slots(&seen), vec![s_old - 1]);
+    drop(pin);
+    pin = Pinned::at(s_old * 2_000 + 1_100); // the new phase's slot `S` has begun
+    let ran = poll_until(|| h.runs() >= 2, 3_000).await;
+    drop(h);
+    drop(pin);
+    assert!(ran, "the new phase's next slot runs, not skipped: {:?}", slots(&seen));
+    assert_eq!(slots(&seen), vec![s_old - 1, s_old]);
+    assert_eq!(own_entry(&a, "close"), Some((s_old, 2_000, 1_000)));
+    a.shutdown().await;
+}
+
+/// The design's §1, second trigger: a wall clock stepped back past the reader's bound puts this node's own entry out
+/// of its reader's count. Kept, the writer would re-write it after every run, and the slot due would run every check
+/// interval until the clock caught up.
+///
+/// **How the step reaches the loop.** A node whose clock steps back in place by more than three lease refreshes — and
+/// 64 slots always is — reads its own candidacy as stamped in the future (`CapEntry::is_fresh`'s symmetric window; the
+/// HLC keeps its stamps ahead), so it holds nothing until the clock catches up: the loop never meets the entry. The
+/// entry meets the loop when it outlives the node's clock: here the node runs with its clock 128 slots ahead and
+/// records a slot, is stopped, and comes back on the same address with the clock corrected — a fresh HLC — and its
+/// entry, which a peer's anti-entropy would hand back, in its store.
+#[cfg(not(feature = "sim"))]
+#[tokio::test]
+async fn a_clock_stepped_back_past_the_bound_runs_each_slot_once() {
+    let ahead_ms = (2 * MAX_AHEAD_SLOTS as i64) * 1_000;
+    let port = alloc_port();
+    mycelium_core::sim_seam::step_wall_clock_for_test(ahead_ms);
+    let (a, _sink, band) = banded(vec![], port).await;
+    let first: Arc<Mutex<Vec<ScheduledRun>>> = Arc::default();
+    let h = a.run_schedule(&decl("close", 1, MissedRunPolicy::Skip), recording(&first)).unwrap();
+    let ran_ahead = poll_until(|| h.runs() >= 1, 15_000).await;
+    drop(h);
+    let entry = a.kv().get(&format!("{}{}", last_prefix("close"), a.node_id()));
+    drop(band);
+    a.shutdown().await;
+    mycelium_core::sim_seam::step_wall_clock_for_test(0);
+    assert!(ran_ahead, "the node ran a slot with its clock ahead");
+    let entry = entry.expect("the slot it ran is recorded");
+
+    let (b, _sink, _band) = banded(vec![], port).await;
+    seed_own(&b, "close", String::from_utf8(entry.to_vec()).unwrap());
+    let now_slot = sched(1, 0).slot_at(mycelium_core::sim_seam::wall_now_ms()).unwrap();
+    assert!(parse_last(&entry).unwrap().0 > now_slot + MAX_AHEAD_SLOTS, "the entry is past the reader's bound");
+    let seen: Arc<Mutex<Vec<ScheduledRun>>> = Arc::default();
+    let h = b.run_schedule(&decl("close", 1, MissedRunPolicy::Skip), recording(&seen)).unwrap();
+    assert!(poll_until(|| h.runs() >= 3, 15_000).await, "three runs: {:?}", slots(&seen));
+    drop(h);
+    let ran = slots(&seen);
+    assert_unique(&ran);
+    assert_eq!(own_entry(&b, "close").map(|e| e.0), ran.iter().max().copied(), "the entry is the corrected clock's");
+    b.shutdown().await;
+}
+
+/// A control: shortening a period records fresh slots — the new declaration's slots are about twice the old entry's,
+/// so the maximum was already the slot run.
+#[tokio::test]
+async fn shortening_a_period_records_fresh_slots() {
+    let (a, _sink, _band) = banded(vec![], alloc_port()).await;
+    let old = sched(2, 0).slot_at(mycelium_core::sim_seam::wall_now_ms()).unwrap();
+    seed_own(&a, "close", format!("{old} 2000 0"));
+    let seen: Arc<Mutex<Vec<ScheduledRun>>> = Arc::default();
+    let h = a.run_schedule(&decl("close", 1, MissedRunPolicy::Skip), recording(&seen)).unwrap();
+    assert!(poll_until(|| h.runs() >= 3, 20_000).await, "three runs: {:?}", slots(&seen));
+    drop(h);
+    let ran = slots(&seen);
+    assert_unique(&ran);
+    assert_eq!(own_entry(&a, "close"), Some((*ran.iter().max().unwrap(), 1_000, 0)));
+    a.shutdown().await;
+}
+
 /// One id is one schedule fleet-wide: two nodes declaring it with different periods both refuse to hold, and say
 /// why; a second loop for an id this node runs is refused.
 #[tokio::test]

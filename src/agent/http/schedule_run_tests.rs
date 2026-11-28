@@ -179,6 +179,28 @@ async fn a_run_never_acknowledged_is_traced_and_its_slot_is_not_recorded() {
     agent.shutdown().await;
 }
 
+/// ER2 (R6-02) at the gateway's door: a client's schedule over a poisoned entry of its own — `"{far ahead} 2000 0"`,
+/// what the unfixed writer leaves after a period is lengthened — is handed one run per slot: the first acknowledged run
+/// replaces the entry, so the next tick reads the slot as run.
+#[tokio::test]
+async fn a_clients_schedule_over_a_poisoned_entry_is_handed_one_run_per_slot() {
+    let (agent, _sink, base, _band) = node(vec![], alloc_port()).await;
+    let now_slot = mycelium_core::sim_seam::wall_now_ms() / 2_000;
+    assert!(agent.kv().set(format!("sched/{}/last/{}", scoped("close"), agent.node_id()), format!("{} 2000 0", now_slot * 2)));
+    let mut s = open(&base, &schedule_toml("close", 2, "skip")).await;
+    let mut handed = Vec::new();
+    while handed.len() < 3 {
+        let Some(run) = s.run(20_000).await else { break };
+        handed.push(run["slot"].as_u64().unwrap());
+        assert_eq!(ack(&base, run["run_id"].as_str().unwrap(), true).await.status(), 200);
+    }
+    drop(s);
+    let unique: std::collections::BTreeSet<_> = handed.iter().collect();
+    assert_eq!((handed.len(), unique.len()), (3, 3), "one run per slot: {handed:?}");
+    assert!(poll_until(|| last_run(&agent, "close") == handed.last().copied(), 5_000).await, "the entry is the last slot run");
+    agent.shutdown().await;
+}
+
 /// Y12's exit: **a missed run's decision traced with its reason when the client is gone.** A client runs a slot and
 /// leaves; while no one holds, slots pass (the wall clock stepped five periods through the seam, what a paused or
 /// absent client looks like); the next client's node finds the gap and decides it under the policy — `run_once`

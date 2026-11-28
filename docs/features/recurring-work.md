@@ -59,7 +59,9 @@ has no row for this feature. The tests, in [`src/schedule_tests.rs`](../../src/s
 side holds once the holder's lease has left its view, never before),
 `a_missed_run_is_a_decision_in_the_trace_with_its_reason` (a holder's clock stepped five periods through the seam;
 the gap decided as run once or skipped, the run naming the decision its parent) and
-`a_host_outside_the_holder_band_never_runs`; through the gateway, in
+`a_host_outside_the_holder_band_never_runs`; a declaration changed on one node —
+`stopping_and_restarting_with_a_longer_period_runs_each_slot_once`, `a_phase_change_does_not_skip_a_slot`,
+`a_clock_stepped_back_past_the_bound_runs_each_slot_once`; through the gateway, in
 [`src/agent/http/schedule_run_tests.rs`](../../src/agent/http/schedule_run_tests.rs):
 `a_client_receives_its_schedules_runs_and_an_acknowledged_run_records_its_slot`,
 `a_run_never_acknowledged_is_traced_and_its_slot_is_not_recorded`,
@@ -77,13 +79,17 @@ the gap decided as run once or skipped, the run naming the decision its parent) 
 - A loop waits three lease refreshes before it may hold; a run gets one period, and work that overruns it is
   abandoned, traced (`work_overran`) and the holding withdrawn. A loop whose thread is blocked by synchronous work
   keeps its advertisements re-asserted by the node's persist task: such work belongs on a blocking thread.
-- The fleet's last run is the highest `sched/{id}/last/{node}` under the schedule's period and phase, never lowered;
-  a run recorded ahead of a holder's clock (a fast clock elsewhere) is said once (`last_ahead`) and nothing runs
+- The fleet's last run is the highest `sched/{id}/last/{node}` under the schedule's period and phase, never lowered
+  within one declaration; a node replaces its own entry when no reader would count it (another period or phase, or
+  more than 64 slots ahead), so a stop and a restart with another period or phase, or an entry left ahead by a clock
+  since corrected, runs each slot once; a run recorded ahead of a holder's clock (a fast clock elsewhere) is said once (`last_ahead`) and nothing runs
   until the clock reaches it. A schedule with no recorded run starts at the slot due. Holders whose clocks disagree
   across a slot boundary compute two slots — two keys.
 - One id is one schedule: candidates that declare another period or phase hold nowhere (`declaration_mismatch`) —
   so changing a running schedule's period or phase stops it fleet-wide for the rollout; roll a change under a new id,
-  or stop it everywhere and start it again.
+  or stop it everywhere and start it again (the first run under the new declaration records the slot it ran).
+- A failed on-time run is retried at the next tick. A failed late or gap run is traced and the runs after it go on;
+  the slot is run again only if no later run of that tick completes.
 - A recorded run more than 64 slots ahead of a holder's clock is ignored and said once; `last` entries are one per
   node that ever ran the schedule, kept for good, and no route clears one.
 - A holder whose work always overruns re-holds every tick and never hands over; the trace says `work_overran` each

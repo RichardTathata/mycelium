@@ -25,9 +25,12 @@
 //! **A slot** is a period counted from the Unix epoch plus the phase: the slot due at `now` is
 //! `(now − phase) / period`. The node's wall clock is read through the replay seam
 //! ([`sim_seam::wall_now_ms`](mycelium_core::sim_seam::wall_now_ms)) and the loop ticks through the timer seam.
-//! Each node that runs a slot writes `sched/{id}/last/{node}`, never lowering it; the fleet's last run is the
-//! highest entry under the same period and phase, so a holder that ran an older slot later cannot pull it back and
-//! a restarted node's stale entry does not count against the fleet's. **A clock ahead** runs its slots early and
+//! Each node that runs a slot writes `sched/{id}/last/{node}`, never lowering it within one declaration; the fleet's
+//! last run is the highest entry under the same period and phase, so a holder that ran an older slot later cannot pull
+//! it back and a restarted node's stale entry does not count against the fleet's. **The reader and the writer share
+//! one rule** (`counted`): a node keeps its entry's slot only while a reader would count it, and otherwise records the
+//! slot it ran — so an entry written under another period or phase, or one too far ahead (a clock since corrected), is
+//! replaced by the node's next run, and its trace says what it replaced. **A clock ahead** runs its slots early and
 //! records them: a holder whose clock is behind that record runs nothing until it reaches it, and says so once
 //! (`last_ahead`) — for at most [`MAX_AHEAD_SLOTS`] slots: an entry further ahead is left out and that is said once
 //! (`ignored_last_far_ahead`). There is one entry per node that ever ran the schedule, kept for good: no route
@@ -36,7 +39,7 @@
 //! **Changing a schedule's period or phase** is a new declaration under the same id: while nodes run both, every
 //! candidate sees a mismatch and **the schedule runs nowhere** for the rollout. Roll a change by declaring it under a
 //! new id (and retiring the old one once the new one runs), or by stopping the schedule everywhere and starting it
-//! again with the new declaration.
+//! again with the new declaration — the first run under it records the slot it ran.
 //!
 //! **A loop waits** before it may hold: three lease refreshes ([`warm_up_ms`]) after it starts, so that its peers'
 //! advertisements and `last` entries have had that long to reach it before it holds or decides a gap. A delay, not a
@@ -51,7 +54,8 @@
 //! before the first run is counted missed. A `run_once` run is keyed by the gap's newest slot — it *is* that slot's
 //! run, so a holder that ran the slot on time and one that runs it for a gap make one effect, provided the content
 //! depends on the key alone (content that names the gap would be a `Conflict` at the destination). A failed late or
-//! gap run is traced and not retried; the runs after it go on. A failed on-time run is retried at the next tick.
+//! gap run is traced and the runs after it go on; the slot is run again only if no later run of this tick completes
+//! (one that does records a later slot, which covers it). A failed on-time run is retried at the next tick.
 //!
 //! **Not built, stated:** no cron-expression language beyond a period and a phase; no fleet-wide calendar; no
 //! exclusivity — a partition runs a slot on both sides, and only the destination's deduplication makes that one
@@ -357,21 +361,41 @@ fn fleet_last(kv: &crate::store::KvState, s: &Schedule, now_slot: Option<u64>) -
     let mut ignored = 0;
     let last = crate::store::scan_kv_prefix(kv, &last_prefix(&s.id))
         .into_iter()
-        .filter_map(|(_, v)| {
-            let text = std::str::from_utf8(&v).ok()?.to_string();
-            let mut parts = text.split_whitespace();
-            let slot = parts.next()?.parse::<u64>().ok()?;
-            let period = parts.next()?.parse::<u64>().ok()?;
-            let phase = parts.next()?.parse::<u64>().ok()?;
-            (period == s.period_ms && phase == s.phase_ms).then_some(slot)
-        })
-        .filter(|slot| {
-            let too_far = now_slot.is_some_and(|n| *slot > n.saturating_add(MAX_AHEAD_SLOTS));
-            if too_far { ignored += 1; }
-            !too_far
+        .filter_map(|(_, v)| parse_last(&v))
+        .filter(|&(_, period, phase)| period == s.period_ms && phase == s.phase_ms)
+        .filter_map(|e| {
+            let slot = counted(s, e, now_slot);
+            if slot.is_none() { ignored += 1; } // same declaration, so left out only for being too far ahead
+            slot
         })
         .max();
     (last, ignored)
+}
+
+/// A `sched/{id}/last/{node}` value, `"{slot} {period_ms} {phase_ms}"`, as every reader reads it — `fleet_last`, the
+/// loop's own entry, and `GET /gateway/schedules/last`. Anything after the third number is ignored; anything less is
+/// `None`.
+pub(crate) fn parse_last(v: &[u8]) -> Option<(u64, u64, u64)> {
+    let mut parts = std::str::from_utf8(v).ok()?.split_whitespace().map(|p| p.parse::<u64>().ok());
+    Some((parts.next()??, parts.next()??, parts.next()??))
+}
+
+/// **The one rule for reading a `last` entry**, shared by the reader ([`fleet_last`]) and the writer ([`recorded`]):
+/// the entry's slot counts toward `s`'s last run only if it was written under `s`'s period and phase and is at most
+/// [`MAX_AHEAD_SLOTS`] past `now_slot`.
+fn counted(s: &Schedule, (slot, period, phase): (u64, u64, u64), now_slot: Option<u64>) -> Option<u64> {
+    let ours = period == s.period_ms && phase == s.phase_ms;
+    let too_far = now_slot.is_some_and(|n| slot > n.saturating_add(MAX_AHEAD_SLOTS));
+    (ours && !too_far).then_some(slot)
+}
+
+/// The slot a node records after running `slot`, given its own entry `mine`: never lower than an entry the reader
+/// counts (so a late run does not pull it back), and **never an entry the reader would leave out** — one written under
+/// another period or phase, or too far ahead of `now_slot` — which is replaced by the slot run. Kept, such an entry
+/// would be stamped with this declaration and still not counted, and the slot would run again every check interval
+/// (ER2, R6-02).
+fn recorded(s: &Schedule, mine: Option<(u64, u64, u64)>, slot: u64, now_slot: Option<u64>) -> u64 {
+    mine.and_then(|e| counted(s, e, now_slot)).map_or(slot, |m| m.max(slot))
 }
 
 /// A candidate's declaration as its advertisement carries it: `(period_ms, phase_ms)`.
@@ -708,16 +732,27 @@ impl Runner {
             rec = match parent { Some(p) => rec.parent(p), None => rec.no_parent() };
             match outcome {
                 Some(Ok(())) => {
-                    let mine = self.kv.get(&format!("{}{}", last_prefix(&s.id), self.me))
-                        .and_then(|b| std::str::from_utf8(&b).ok()?.split_whitespace().next()?.parse::<u64>().ok());
-                    let written = mine.map_or(slot, |m| m.max(slot));
+                    // The tick's own slot bounds the entry, as it bounded `fleet_last`: no new clock read, so a
+                    // recording replays draw for draw.
+                    let mine = self.kv.get(&format!("{}{}", last_prefix(&s.id), self.me)).and_then(|b| parse_last(&b));
+                    let written = recorded(&s, mine, slot, tick.slot);
                     let _ = self.kv.set(format!("{}{}", last_prefix(&s.id), self.me), format!("{written} {} {}", s.period_ms, s.phase_ms));
                     self.runs.fetch_add(1, Ordering::Relaxed);
-                    self.record(rec.effect(format!("work done under {key}; this node's sched/{}/last = {written}", s.id)));
+                    let replaced = match mine {
+                        Some(e @ (m, p, ph)) if counted(&s, e, tick.slot).is_none() => format!(
+                            " (replacing \"{m} {p} {ph}\", which no reader counts: another period or phase, or more than {MAX_AHEAD_SLOTS} slots ahead)"
+                        ),
+                        _ => String::new(),
+                    };
+                    self.record(rec.effect(format!("work done under {key}; this node's sched/{}/last = {written}{replaced}", s.id)));
                 }
                 Some(Err(RunFailure::Failed(e))) => {
                     self.failures.fetch_add(1, Ordering::Relaxed);
-                    let then = if kind == RunKind::OnTime { "retried at the next tick" } else { "not retried: the runs after it go on" };
+                    let then = if kind == RunKind::OnTime {
+                        "retried at the next tick"
+                    } else {
+                        "the runs after it go on; the slot is run again only if no later run of this tick completes"
+                    };
                     self.record(rec.effect(format!("work failed under {key}: {e}; {then}")));
                 }
                 Some(Err(RunFailure::Unacknowledged(why))) => {
