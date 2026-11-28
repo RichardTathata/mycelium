@@ -83,6 +83,11 @@ signed echo component, invoked by discovery, and recover when one goes. CI runs 
     command (an `ollama create`, say) after the stop, before it is retired.
   - **Not built (ER5's second PR):** a dropped stem's re-probe, `[[serve]]` and peer-serve tasks still detach rather
     than stop; only `stop()` aborts them.
+- **One capability name, one running build** (ER4, R12-01): a stem's provisioner holds each name it serves from the
+  reservation on, so a second catalogue line for the name — a new build staged beside the old — waits, deferred
+  `capability_already_held`, until the first build goes; one call runs on one build. The stem ticks every 500 ms, so
+  the earlier one-round guard let the next tick start the sibling. Per stem: two stems on one node hold names
+  separately. No upgrade is built yet — see [demand-driven provisioning](demand-provisioning.md).
 - **Not built:** the catalogue is the supply chain, so `[hosts].trusted_publishers` is the posture to review; a stem's
   placement is decided at runtime, never by the file; a stem built without `llm` refuses a unit file with a `[[serve]]`.
 - **Evidence:** the ledger row

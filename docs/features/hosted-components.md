@@ -74,6 +74,15 @@ installs a WASM component that arrives over the mesh, and the component is bridg
   `retire` is what a stop or a dropped provisioner does — stop serving, keep
   placed bytes; `uninstall` is a withdraw — stop serving and remove them. An `Installed` written outside this crate
   must stop serving when dropped (the trait's doc); `retire` defaults to dropping it.
+- **One receiver per name from one provisioner** (ER4, R12-01): a call on `cap.invoke/{namespace}/{name}` is delivered
+  to every receiver on the kind, so the provisioner runs one build per name — a second line for the name waits until
+  the first build's entry leaves its map — and one call runs on one component. A `tool/{name}` build is bridged as
+  one MCP tool for the same reason. **Not built:** the guard is per provisioner; a receiver on the same kind
+  registered by other code, or by a second provisioner on the node, still receives the call. A stem stopped with an
+  install in flight and replaced by a new stem on the node: the old install, finishing late, registers its receiver
+  and MCP tool before it sees its provisioner closed, answers for that moment beside the new stem's build, and its
+  retire tombstones `tools/{name}/{node}`, so the new stem's `tool/{name}` is no longer discoverable until something
+  re-writes the key (ER5-F1).
 - **Not built:** a component's resource use beyond memory, fuel and the deadline; a guest-to-guest boundary beyond the
   per-component namespace; anything but what the world imports — the host is only as safe as wasmtime, which is why
   its advisories are releases here. A call past its deadline or fuel is stopped and recorded by name.

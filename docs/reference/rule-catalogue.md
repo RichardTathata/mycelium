@@ -19,12 +19,12 @@ Schema `mycelium.rules/1` · 32 rules.
 | [`prov.activation`](#provactivation) | Response | instrumented | After placement the declared command hands the blob to its local runtime — confined when the unit names a profile, which a node that cannot apply it refuses by name rather than run unconfined, as it refuses one whose egress proxy is not running; a failure is an install failure at stage `activation`, retried next round. |
 | [`prov.activation_egress`](#provactivation_egress) | Authority | catalogue only | An activation's command reaches another host only through its proxy: a listed host by name, a credential attached by the node's gate where its binding authorises; anything else is refused with the proxy's marker, logged and counted per activation by reason (`mycelium_activation_egress_total{activation, event}`) — not recorded in the decision trace. |
 | [`prov.advertise`](#provadvertise) | Propagation | catalogue only | A completed install advertises its capability to the mesh; the advertisement's lifetime is the install's. |
-| [`prov.demand_response`](#provdemand_response) | Response | instrumented | A requirement with demanding nodes and no provider, as this node sees it, makes this node a candidate installer; an observed unmet requirement is not an instruction to install. |
+| [`prov.demand_response`](#provdemand_response) | Response | instrumented | A requirement with demanding nodes and no provider, as this node sees it, makes this node a candidate installer; an observed unmet requirement is not an instruction to install. One build per capability name: a line whose name another build here holds, reserved or live, waits (rev 2; rev 1 held the name for one round only, so the next round started a sibling build while the first installed). |
 | [`prov.eligible`](#proveligible) | Response | instrumented | An entry providing an `llm-meta` ad is never hosted (a model's metadata is its serving node's own, post-360 row R); an entry of a kind outside `[hosts].kinds` is refused by name (rev 3); otherwise this node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record. |
 | [`prov.health_pass`](#provhealth_pass) | Response | instrumented | A live install whose probe fails this round is withdrawn; restart ≡ provisioning brings it back. |
 | [`prov.install`](#provinstall) | Response | instrumented | Fetch, verify, place and host the artifact under an install token; a superseded token tears its install down rather than advertising it. |
 | [`prov.loadable`](#provloadable) | Authority | catalogue only | A proposed entry loads live only once a listed reviewer has accepted it; until then it may load into the shadow lane only (D20). |
-| [`prov.presence_floor`](#provpresence_floor) | Response | instrumented | Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry that passes provenance and eligibility (rev 3; earlier revisions chose the cheapest before checking, so a cheaper bad line any member gossiped stalled the floor). |
+| [`prov.presence_floor`](#provpresence_floor) | Response | instrumented | Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry that passes provenance and eligibility; a name this node already holds answers the floor, and a line whose artifact is hosted here as another capability is passed over (rev 4; rev 3 started a second build of a held name; earlier revisions chose the cheapest before checking, so a cheaper bad line any member gossiped stalled the floor). |
 | [`prov.probe`](#provprobe) | Response | instrumented | The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on. A confined re-probe re-resolves a profile whose declared path was replaced, every check repeated, and runs under the fresh one; only a refused re-resolution (`confinement_*`), or a path that changed under every attempt (`confinement_changed`), withdraws. Recorded under the install's token; a re-probe records only a change of verdict. |
 | [`prov.promotion`](#provpromotion) | Response | instrumented | A shadow install whose entry a listed reviewer has since accepted, or whose entry has left the catalogue, is withdrawn from the shadow lane (D20); it does not replace a live provider. |
 | [`prov.provenance`](#provprovenance) | Authority | catalogue only | An entry is a candidate only if a trusted publisher signed it; an empty trust list trusts everything, which the report says. |
@@ -279,9 +279,9 @@ A completed install advertises its capability to the mesh; the advertisement's l
 
 ## `prov.demand_response`
 
-rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
+rev 2 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
 
-A requirement with demanding nodes and no provider, as this node sees it, makes this node a candidate installer; an observed unmet requirement is not an instruction to install.
+A requirement with demanding nodes and no provider, as this node sees it, makes this node a candidate installer; an observed unmet requirement is not an instruction to install. One build per capability name: a line whose name another build here holds, reserved or live, waits (rev 2; rev 1 held the name for one round only, so the next round started a sibling build while the first installed).
 
 - **Trigger:** every provisioning round, per catalogue entry this node could host
 - **Reads:**
@@ -291,14 +291,14 @@ A requirement with demanding nodes and no provider, as this node sees it, makes 
   - the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`) — scope: this node; freshness: read at start
 - **Outcomes:**
   - Action: `unmet_demand_live`, `unmet_demand_shadow`
-  - Deferral: `self_election_declined`, `already_started_this_round`
-  - Refusal: `already_hosted`, `provenance_rejected`, `ineligible`, `rights_refused`
+  - Deferral: `self_election_declined`, `capability_already_held`
+  - Refusal: `already_hosted`, `artifact_hosted_as`, `provenance_rejected`, `ineligible`, `rights_refused`
   - NoAction: `no_demand`, `provider_present`
 - **Effects:** start_install (live) or the shadow lane · `mycelium_artifact_shadow_installs_total`
 - **Guards:** Provenance, ResourceBudget, Authority
 - **May trigger:** [`prov.install`](#provinstall)
 - **Depends on:** [`prov.provenance`](#provprovenance), [`prov.loadable`](#provloadable), [`prov.eligible`](#proveligible), [`prov.self_election`](#provself_election), [`prov.rights_admission`](#provrights_admission)
-- **Code:** `provisioner::Provisioner::provision_round` · **Docs:** docs/operations/capability-lifecycle.md · **Tests:** `a_hosting_stem_re_serves_its_verified_cache_to_a_late_joiner`, `a_proposed_entry_loads_only_into_the_shadow_lane_until_a_listed_reviewer_accepts_it`
+- **Code:** `provisioner::Provisioner::provision_round` · **Docs:** docs/operations/capability-lifecycle.md · **Tests:** `a_hosting_stem_re_serves_its_verified_cache_to_a_late_joiner`, `a_proposed_entry_loads_only_into_the_shadow_lane_until_a_listed_reviewer_accepts_it`, `a_sibling_build_does_not_start_on_the_next_round_while_the_first_installs`, `the_trace_names_the_holder_when_a_name_is_held`, `the_demand_pass_names_an_artifact_hosted_as_another_capability`
 
 ## `prov.eligible`
 
@@ -380,9 +380,9 @@ A proposed entry loads live only once a listed reviewer has accepted it; until t
 
 ## `prov.presence_floor`
 
-rev 3 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
+rev 4 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
 
-Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry that passes provenance and eligibility (rev 3; earlier revisions chose the cheapest before checking, so a cheaper bad line any member gossiped stalled the floor).
+Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry that passes provenance and eligibility; a name this node already holds answers the floor, and a line whose artifact is hosted here as another capability is passed over (rev 4; rev 3 started a second build of a held name; earlier revisions chose the cheapest before checking, so a cheaper bad line any member gossiped stalled the floor).
 
 - **Trigger:** every provisioning round, per `[[presence]]` declaration
 - **Reads:**
@@ -392,14 +392,14 @@ Fewer live providers than the declared floor, as this node sees it, makes this n
   - the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`) — scope: this node; freshness: read at start
 - **Outcomes:**
   - Action: `below_floor`
-  - Deferral: `self_election_declined`
-  - Refusal: `already_hosted`, `provenance_rejected`, `ineligible`, `no_loadable_candidate`, `rights_refused`
+  - Deferral: `self_election_declined`, `capability_already_held`
+  - Refusal: `already_hosted`, `artifact_hosted_as`, `provenance_rejected`, `ineligible`, `no_loadable_candidate`, `rights_refused`
   - NoAction: `floor_met`
 - **Effects:** start_install of the smallest loadable candidate that passes provenance and eligibility
 - **Guards:** Provenance, ResourceBudget
 - **May trigger:** [`prov.install`](#provinstall)
 - **Depends on:** [`prov.provenance`](#provprovenance), [`prov.loadable`](#provloadable), [`prov.eligible`](#proveligible), [`prov.self_election`](#provself_election)
-- **Code:** `provisioner::Provisioner::provision_round` · **Docs:** docs/reference/unit-file.md · **Tests:** `the_stem_fleet_fills_a_presence_floor_and_reheals`, `a_cheaper_bad_entry_does_not_stall_the_presence_floor`
+- **Code:** `provisioner::Provisioner::provision_round` · **Docs:** docs/reference/unit-file.md · **Tests:** `the_stem_fleet_fills_a_presence_floor_and_reheals`, `a_cheaper_bad_entry_does_not_stall_the_presence_floor`, `a_presence_started_install_blocks_a_demand_sibling_next_round`, `a_demand_started_install_blocks_a_presence_sibling`, `a_floor_tries_another_digest_when_its_cheapest_is_hosted_as_another_capability`, `a_floor_reads_its_candidates_own_shadow_as_already_hosted`
 
 ## `prov.probe`
 

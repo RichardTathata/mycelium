@@ -46,6 +46,8 @@ CI runs it.
 - **Rules:** [`prov.loadable`](../reference/rule-catalogue.md#provloadable) — `accepted` or `not_a_proposal`, refused
   `proposed_unaccepted`; [`prov.promotion`](../reference/rule-catalogue.md#provpromotion) — the shadow install of an entry
   accepted, or no longer in the catalogue, withdrawn (`accepted_withdraw_shadow`), or `still_proposed`.
+- **One shadow per name** (ER4, R12-01): the shadow lane holds `{name}.shadow` like any name, so two proposals for one
+  name load one shadow and the second waits, `capability_already_held`. A shadow never holds the incumbent's name.
 - **Not built:** acceptance is per host — a host with a different reviewer list decides differently; reviewers are a
   separate key set from publishers, so the review is only as strong as who holds those keys; an accepted entry's fuel
   is still its signer's ([guide 16 § Agent-authored functions](../guide/16-guardrails.md#agent-authored-functions-the-legitimate-uses-of-dynamic-load)).

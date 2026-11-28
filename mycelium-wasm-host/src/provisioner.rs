@@ -48,11 +48,32 @@ enum HostedState {
     /// `reserved` carries the entry's declared requirements so concurrent eligibility checks
     /// see resources already spoken for (two 3 GB models must not both pass a 5 GB-free check).
     /// `loading` is the install's `{ns}/loading` tier, held here so a shutdown or a withdraw can end it while
-    /// the pull runs (ER5 review, finding 1).
-    Installing { token: u64, reserved: ResourceRequirements, loading: Loading },
+    /// the pull runs (ER5 review, finding 1). `serves` is the capability the install will advertise —
+    /// `(namespace, name)`, `{name}.shadow` in the shadow lane — held from the reservation on, so one name has one
+    /// build per provisioner (ER4, R12-01; [`name_holder`]).
+    Installing { token: u64, reserved: ResourceRequirements, loading: Loading, serves: (Arc<str>, Arc<str>) },
     /// Installed, advertised, serving. (Its real consumption — placed bytes on disk, activated
     /// memory — is visible to the probe directly, so no virtual accounting is kept.)
     Live(LiveHosted),
+}
+
+impl HostedState {
+    /// The capability this entry serves, `(namespace, name)` as advertised (a shadow's is `{name}.shadow`): the
+    /// reservation's `serves`, or what the live install advertises.
+    fn serves(&self) -> (&str, &str) {
+        match self {
+            HostedState::Installing { serves, .. } => (serves.0.as_ref(), serves.1.as_ref()),
+            HostedState::Live(live) => (live.provides.namespace.as_ref(), live.provides.name.as_ref()),
+        }
+    }
+}
+
+/// Which artifact holds the capability name `(ns, name)` on this provisioner — reserved or live — if any (ER4,
+/// R12-01). Called with row 21 held: a scan of the map inside the caller's one acquisition, so a check and the
+/// insert after it are atomic. The name frees wherever the entry leaves the map — a withdraw, a shed, a probe
+/// failure, a failed install, a shutdown — with no release code of its own.
+fn name_holder(map: &HashMap<ArtifactId, HostedState>, ns: &str, name: &str) -> Option<ArtifactId> {
+    map.iter().find_map(|(artifact, state)| (state.serves() == (ns, name)).then_some(*artifact))
 }
 
 /// An in-flight install's `{ns}/loading` tier (lock-order row 22): the last step advertised, its registration,
@@ -274,6 +295,14 @@ enum StartOutcome {
     AlreadyHosted,
     NoRuntime,
     RightsRefused,
+    /// Another build — this artifact — holds the capability name (ER4): one name, one build.
+    NameHeld(ArtifactId),
+    /// The provisioner has shut down (ER5): nothing is reserved after it.
+    Closed,
+}
+
+fn holder_input(holder: &ArtifactId) -> InputSnapshot {
+    InputSnapshot::new("Provisioner::hosted (lock-order row 21) — the build holding the name", format!("held by {holder}"), Provenance::Local)
 }
 
 fn cap_target(entry: &InstallableEntry) -> String {
@@ -788,6 +817,20 @@ impl Provisioner {
         self.hosted.lock().unwrap().map.contains_key(artifact)
     }
 
+    /// The artifact holding the capability name `(ns, name)` here, reserved or live (ER4, [`name_holder`]).
+    fn name_held(&self, ns: &str, name: &str) -> Option<ArtifactId> {
+        name_holder(&self.hosted.lock().unwrap().map, ns, name)
+    }
+
+    /// What `artifact` is hosted as here — `{ns}/{name}` — if it is reserved or live (D4b, R17-01).
+    fn hosted_as(&self, artifact: &ArtifactId) -> Option<String> {
+        let hosted = self.hosted.lock().unwrap();
+        hosted.map.get(artifact).map(|state| {
+            let (ns, name) = state.serves();
+            format!("{ns}/{name}")
+        })
+    }
+
     /// The live install this node can withdraw for `filter`, if any — read from what each install
     /// advertises, so an entry since removed from the catalogue, or a different entry for the same band,
     /// still counts; a shadow never matches (its name is the shadow name), and an `Installing` reservation
@@ -825,6 +868,12 @@ impl Provisioner {
         if self.is_hosted(&entry.artifact) {
             return StartOutcome::AlreadyHosted;
         }
+        // Before admission too: `admit_install` only checks `map.len()` against the ledger, but a refusal there ticks
+        // the refusal counter and journals a rejection — a start the name refuses should cause neither. The hold below
+        // decides.
+        if let Some(holder) = self.name_held(&entry.provides.namespace, &entry.provides.name) {
+            return StartOutcome::NameHeld(holder);
+        }
         if !self.admit_install() {
             tracing::info!(ns = %entry.provides.namespace, name = %entry.provides.name,
                 "install refused: the node holds too few install rights");
@@ -832,14 +881,26 @@ impl Provisioner {
         }
         let loading = new_loading();
         {
+            // One hold (row 21): `closed`, the artifact, the name, then the insert — the lasting guard for every
+            // caller (ER4: one capability name, one build; ER5: nothing reserved after a shutdown). No await here.
             let mut hosted = self.hosted.lock().unwrap();
+            if hosted.closed {
+                return StartOutcome::Closed;
+            }
             let map = &mut hosted.map;
             if map.contains_key(&entry.artifact) {
                 return StartOutcome::AlreadyHosted;
             }
+            // The authority by construction: check and insert under one acquisition. While rounds take `&mut self`
+            // the pre-check above always answers first, so no test reaches this arm; it is what keeps the guard true
+            // for any caller that does not run the pre-check (ER20's chooser, a future concurrent caller).
+            if let Some(holder) = name_holder(map, &entry.provides.namespace, &entry.provides.name) {
+                return StartOutcome::NameHeld(holder);
+            }
+            let serves = (entry.provides.namespace.clone(), entry.provides.name.clone());
             map.insert(
                 entry.artifact,
-                HostedState::Installing { token, reserved: entry.requires, loading: Arc::clone(&loading) },
+                HostedState::Installing { token, reserved: entry.requires, loading: Arc::clone(&loading), serves },
             );
         }
         metrics::counter!("mycelium_artifact_installs_started_total").increment(1);
@@ -1004,6 +1065,13 @@ impl Provisioner {
             StartOutcome::Started => t.record(rule, OutcomeKind::Action, acted, target.to_string(), inputs, Some("start_install".into())),
             StartOutcome::AlreadyHosted => t.record(rule, OutcomeKind::Refusal, "already_hosted", target.to_string(), inputs, None),
             StartOutcome::NoRuntime => t.record(rule, OutcomeKind::Refusal, "ineligible", target.to_string(), inputs, None),
+            StartOutcome::NameHeld(holder) => {
+                let mut inputs = inputs;
+                inputs.push(holder_input(&holder));
+                t.record(rule, OutcomeKind::Deferral, "capability_already_held", target.to_string(), inputs, None)
+            }
+            // A round after a shutdown returns before it records anything; so does a start that finds it closed.
+            StartOutcome::Closed => {}
             StartOutcome::RightsRefused => {
                 t.record("prov.rights_admission", OutcomeKind::Refusal, "allocation_exhausted", target.to_string(),
                     vec![InputSnapshot::new("InstallRights::ledger (lock-order row 37)", "allocation exhausted", Provenance::Local)], None);
@@ -1099,17 +1167,26 @@ impl Provisioner {
 
         // ── Demand-driven (M15) ──────────────────────────────────────────────
         let entries: Vec<InstallableEntry> = self.catalog.entries().to_vec();
-        // Dedup by CAPABILITY within a round, not just by ArtifactId. Two catalog entries providing
-        // the same `(ns,name)` via DIFFERENT artifacts would both read demand as unmet this round
-        // (neither install has advertised yet) and both start → two runtimes both `rpc_rx` the same
-        // `cap.invoke/{ns}/{name}` kind, and `deliver_to_handlers` fans out to BOTH, so every
-        // invocation executes on both components (double side effects) (audit 2026-07-15 pass 5).
-        let mut started_caps: std::collections::HashSet<(String, String)> = Default::default();
+        // One build per CAPABILITY NAME, not per artifact: two catalogue lines providing one `(ns,name)` via
+        // different artifacts would both read demand as unmet (an install advertises only once it resolves)
+        // and both start → two runtimes `rpc_rx` the same `cap.invoke/{ns}/{name}` kind, and
+        // `deliver_to_handlers` fans out to both, so every invocation executes twice (audit 2026-07-15 pass 5).
+        // The name is held in `hosted` for as long as its entry is reserved or live (ER4, R12-01; corrected
+        // 2026-11-28 — the per-round set the audit added held for one round only, so the next round started the
+        // sibling). The check here only says why and spends no draw; the reservation's hold is the guard.
         for entry in entries {
             let target = cap_target(&entry);
-            if self.is_hosted(&entry.artifact) {
+            if let Some(hosted_as) = self.hosted_as(&entry.artifact) {
+                // D4b (R17-01): an artifact hosted as *another* capability is named, not reported `already_hosted`.
+                let own = [target.clone(), format!("{}/{}", entry.provides.namespace, shadow_name(&entry.provides.name))];
                 if let Some(t) = self.round_trace() {
-                    t.record("prov.demand_response", OutcomeKind::Refusal, "already_hosted", target, Vec::new(), None);
+                    if own.contains(&hosted_as) {
+                        t.record("prov.demand_response", OutcomeKind::Refusal, "already_hosted", target, Vec::new(), None);
+                    } else {
+                        t.record("prov.demand_response", OutcomeKind::Refusal, "artifact_hosted_as", target,
+                            vec![InputSnapshot::new("Provisioner::hosted (lock-order row 21) — what the artifact is hosted as",
+                                format!("hosted as {hosted_as}"), Provenance::Local)], None);
+                    }
                 }
                 continue;
             }
@@ -1119,21 +1196,23 @@ impl Provisioner {
                 }
                 continue;
             }
-            let cap_key = (entry.provides.namespace.to_string(), entry.provides.name.to_string());
-            if started_caps.contains(&cap_key) {
+            // D20: a proposal without acceptance would be served as `{name}.shadow` — that is the name it holds.
+            let loadable = self.loadable(&entry);
+            let served = if loadable { entry.provides.name.to_string() } else { shadow_name(&entry.provides.name) };
+            if let Some(holder) = self.name_held(&entry.provides.namespace, &served) {
                 if let Some(t) = self.round_trace() {
-                    t.record("prov.demand_response", OutcomeKind::Deferral, "already_started_this_round", target, Vec::new(), None);
+                    t.record("prov.demand_response", OutcomeKind::Deferral, "capability_already_held", target, vec![holder_input(&holder)], None);
                 }
-                continue; // a sibling artifact for this capability already started this round
+                continue; // another build holds this name, reserved or live: it waits until that one goes
             }
             let filter =
                 CapFilter::new(entry.provides.namespace.clone(), entry.provides.name.clone());
             let demand = self.agent.capabilities().demand(&filter);
             let inputs = || demand_inputs(&demand, hosted_now);
-            if !self.loadable(&entry) {
+            if !loadable {
                 // D20: a proposal without acceptance loads only into the shadow lane, and only
                 // where the capability is wanted at all — beside the incumbent, taking none of
-                // its demand. Its own dedup: one shadow per artifact (`is_hosted`, above).
+                // its demand. One shadow per name (`name_held` on `{name}.shadow`, above).
                 if demand.demanding_nodes.is_empty() {
                     if let Some(t) = self.round_trace() {
                         t.record("prov.demand_response", OutcomeKind::NoAction, "no_demand", target, inputs(), None);
@@ -1185,7 +1264,6 @@ impl Provisioner {
             let outcome = self.try_start_install_as(entry, false);
             if outcome == StartOutcome::Started {
                 started += 1;
-                started_caps.insert(cap_key);
             }
             self.record_start(&target, "prov.demand_response", "unmet_demand_live", outcome, inputs());
         }
@@ -1233,12 +1311,49 @@ impl Provisioner {
                 }
                 continue; // nothing a trusted publisher signed provides it
             }
-            // One install per floor here at a time: a trusted candidate reserved or live on this node
-            // answers it. Read after provenance, so a line nobody trusted — naming an artifact this node
-            // hosts for something else — cannot hold the floor at `already_hosted` either.
-            if candidates.iter().any(|e| self.is_hosted(&e.artifact)) {
+            // One build per name (ER4): a name this node holds, reserved or live — started by this floor, by
+            // demand, or a line since replaced in the catalogue — answers the floor here. `already_hosted` when the
+            // holder is a trusted candidate, as before; `capability_already_held` when it is another build.
+            if let Some(holder) = self.name_held(&policy.filter.namespace, &policy.filter.name) {
+                if let Some(t) = self.round_trace() {
+                    if candidates.iter().any(|e| e.artifact == holder) {
+                        t.record("prov.presence_floor", OutcomeKind::Refusal, "already_hosted", target, inputs(), None);
+                    } else {
+                        let mut inputs = inputs();
+                        inputs.push(holder_input(&holder));
+                        t.record("prov.presence_floor", OutcomeKind::Deferral, "capability_already_held", target, inputs, None);
+                    }
+                }
+                continue;
+            }
+            // D4b (R17-01): the name is free, so a candidate whose artifact is hosted here is hosted as another
+            // capability. One placed file is not served under two names (aliasing is a later decision): drop it
+            // and try another digest for the name. Read after provenance, so an untrusted line naming a hosted
+            // artifact never decides anything. A candidate hosted as its own shadow (a proposal line and a loadable
+            // line for one artifact) is this floor's own artifact: `already_hosted`, as the demand pass reads it.
+            let own_shadow = format!("{}/{}", policy.filter.namespace, shadow_name(&policy.filter.name));
+            if candidates.iter().any(|e| self.hosted_as(&e.artifact).as_deref() == Some(own_shadow.as_str())) {
                 if let Some(t) = self.round_trace() {
                     t.record("prov.presence_floor", OutcomeKind::Refusal, "already_hosted", target, inputs(), None);
+                }
+                continue;
+            }
+            let mut hosted_as = None;
+            candidates.retain(|e| match self.hosted_as(&e.artifact) {
+                Some(other) => {
+                    tracing::info!(artifact = %e.artifact, floor = %target, hosted_as = %other,
+                        "a presence candidate's artifact is hosted here as another capability — trying another line");
+                    hosted_as.get_or_insert(other);
+                    false
+                }
+                None => true,
+            });
+            if candidates.is_empty() {
+                if let Some(t) = self.round_trace() {
+                    let mut inputs = inputs();
+                    inputs.push(InputSnapshot::new("Provisioner::hosted (lock-order row 21) — what the artifact is hosted as",
+                        format!("hosted as {}", hosted_as.unwrap_or_default()), Provenance::Local));
+                    t.record("prov.presence_floor", OutcomeKind::Refusal, "artifact_hosted_as", target, inputs, None);
                 }
                 continue;
             }
@@ -1852,7 +1967,7 @@ mod tests {
             prov.supervise(CapFilter::new("text", "echo"), 1);
             if case == "untrusted, naming a hosted artifact" {
                 // This node already holds `bad`, as something else (a reservation stands in for it).
-                prov.hosted.lock().unwrap().map.insert(bad, HostedState::Installing { token: 0, reserved: Default::default(), loading: new_loading() });
+                prov.hosted.lock().unwrap().map.insert(bad, HostedState::Installing { token: 0, reserved: Default::default(), loading: new_loading(), serves: (Arc::from("text"), Arc::from("other")) });
             }
             let sink = Arc::new(mycelium::decision::DecisionSink::default());
             prov.with_decision_trace(Arc::clone(&sink));
@@ -3347,6 +3462,374 @@ mod tests {
         let served = call_echo(&agent, b"late", Duration::from_secs(2)).await;
         assert!(served.is_err(), "the late install serves: {served:?}");
         assert!(agent.kv().get(&format!("cap/{}/text/echo", agent.node_id())).is_none(), "the late install is advertised");
+        agent.shutdown().await;
+    }
+
+    // ── ER4 (R12-01): one capability, one running build ──────────────────────────────────────
+
+    /// The echo component as a different build: the same code with a trailing custom section, so its content
+    /// address differs and it serves `text/echo` as the original does.
+    fn echo_build(tag: u8) -> Vec<u8> {
+        let mut bytes = ECHO_COMPONENT.to_vec();
+        // Custom section (id 0): size 5 = name length (1) + "er4" (3) + the tag (1).
+        bytes.extend_from_slice(&[0x00, 5, 3, b'e', b'r', b'4', tag]);
+        bytes
+    }
+
+    /// A provisioner over `catalog` whose Blob installs wait on `gate` — an install stays in flight until a
+    /// permit is added.
+    fn gated_blob_prov(agent: &Arc<GossipAgent>, catalog: InstallableCatalog, source: InMemorySource, gate: &Arc<tokio::sync::Semaphore>) -> Provisioner {
+        let host = Arc::new(WasmHost::new().expect("engine"));
+        let mut prov = Provisioner::new(Arc::clone(agent), host, catalog, Arc::new(source), 1.0);
+        prov.register_runtime(Arc::new(GatedRuntime { gate: Arc::clone(gate) }));
+        prov
+    }
+
+    fn blob_line(ns: &str, name: &str, artifact: ArtifactId) -> InstallableEntry {
+        InstallableEntry::new(Capability::new(ns, name), artifact).with_kind(ArtifactKind::Blob)
+    }
+
+    /// Reserved or live, whichever.
+    fn builds(prov: &Provisioner) -> usize {
+        prov.hosted_count() + prov.installing_count()
+    }
+
+    /// R12-01: two catalogue lines for one name (two builds), demand unmet while the first installs, two rounds
+    /// back to back — the reviewer's sequence. The second round starts nothing, one build goes live, and one call
+    /// runs on one build. Seen failing first on `e3b984bf`: `(1, 2, 2)` — the second round started the sibling
+    /// (`started_caps` lasted one round), both went live, and one call executed on both.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn a_sibling_build_does_not_start_on_the_next_round_while_the_first_installs() {
+        let agent = live_agent().await;
+        let host = Arc::new(WasmHost::new().expect("engine"));
+        let mut source = InMemorySource::new();
+        let a = source.insert(echo_build(1));
+        let b = source.insert(echo_build(2));
+        assert_ne!(a, b);
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(InstallableEntry::new(Capability::new("text", "echo"), a));
+        catalog.add(InstallableEntry::new(Capability::new("text", "echo"), b));
+        let mut prov = Provisioner::new(Arc::clone(&agent), Arc::clone(&host), catalog, Arc::new(source), 1.0);
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let inner = crate::runtime::WasmComponentRuntime::new(host).with_invocation_log(Arc::clone(&prov.invocations));
+        prov.register_runtime(Arc::new(GatedWasm { inner, gate: Arc::clone(&gate) }));
+        let _req = declare_and_await_demand(&agent, "text", "echo").await;
+
+        assert_eq!(prov.provision_round(), 1, "round 1 starts the first build");
+        let second = prov.provision_round();
+        gate.add_permits(2);
+        for _ in 0..200 {
+            if prov.installing_count() == 0 && prov.hosted_count() > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(call_echo(&agent, b"once", Duration::from_secs(5)).await.expect("served").as_ref(), b"once");
+        // A second build answers the same call a moment later; give it the chance to.
+        for _ in 0..40 {
+            if prov.invocations().len() > 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!((second, prov.hosted_count(), prov.invocations().len()), (0, 1, 1),
+            "(started by round 2, builds live, executions of one call)");
+        agent.shutdown().await;
+    }
+
+    /// ER4: an install the presence pass started holds its name against the demand pass next round. Seen failing
+    /// first on `e3b984bf`: round 2's demand pass started the sibling — two builds.
+    #[tokio::test]
+    async fn a_presence_started_install_blocks_a_demand_sibling_next_round() {
+        let agent = live_agent().await;
+        let mut source = InMemorySource::new();
+        let a = source.insert(b"weights, build a".to_vec());
+        let b = source.insert(b"weights, build b".to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(blob_line("llm", "weights", a).with_cost(100, 1));
+        catalog.add(blob_line("llm", "weights", b).with_cost(1, 1)); // the floor's cheapest
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut prov = gated_blob_prov(&agent, catalog, source, &gate);
+        prov.supervise(CapFilter::new("llm", "weights"), 1);
+
+        assert_eq!(prov.provision_round(), 1, "no demand yet: the floor starts the cheapest build");
+        let _req = declare_and_await_demand(&agent, "llm", "weights").await;
+        let second = prov.provision_round();
+        assert_eq!((second, builds(&prov)), (0, 1), "the demand pass started a sibling build");
+        agent.shutdown().await;
+    }
+
+    /// ER4, the reverse: an install the demand pass started holds its name against the presence pass — here the
+    /// floor's only candidate is a line the catalogue now has in place of the first (an upgrade's two lines).
+    /// Seen failing first on `e3b984bf`: the floor started the sibling — two builds.
+    #[tokio::test]
+    async fn a_demand_started_install_blocks_a_presence_sibling() {
+        let agent = live_agent().await;
+        let mut source = InMemorySource::new();
+        let a = source.insert(b"weights, build a".to_vec());
+        let b = source.insert(b"weights, build b".to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(blob_line("llm", "weights", a));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut prov = gated_blob_prov(&agent, catalog, source, &gate);
+
+        let req = declare_and_await_demand(&agent, "llm", "weights").await;
+        assert_eq!(prov.provision_round(), 1, "demand starts the first build");
+        drop(req);
+        for _ in 0..200 {
+            if agent.capabilities().demand(&CapFilter::new("llm", "weights")).demanding_nodes.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let mut next = InstallableCatalog::new();
+        next.add(blob_line("llm", "weights", b));
+        prov.refresh_catalog(next);
+        prov.supervise(CapFilter::new("llm", "weights"), 1);
+        let second = prov.provision_round();
+        assert_eq!((second, builds(&prov)), (0, 1), "the floor started a sibling build");
+        agent.shutdown().await;
+    }
+
+    /// ER4, the shadow lane: two proposals for one name load one `{name}.shadow`. Seen failing first on
+    /// `e3b984bf`: one round loaded both (the shadow lane deduplicated by artifact only).
+    #[tokio::test]
+    async fn two_proposals_for_one_name_load_one_shadow() {
+        let agent = live_agent().await;
+        let mut source = InMemorySource::new();
+        let a = source.insert(b"proposal a".to_vec());
+        let b = source.insert(b"proposal b".to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(blob_line("llm", "weights", a).as_proposed());
+        catalog.add(blob_line("llm", "weights", b).as_proposed());
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut prov = gated_blob_prov(&agent, catalog, source, &gate);
+        let _req = declare_and_await_demand(&agent, "llm", "weights").await;
+        let first = prov.provision_round();
+        let second = prov.provision_round();
+        gate.add_permits(2);
+        wait_live(&prov, 1).await;
+        assert_eq!((first, second, prov.shadow_count()), (1, 0, 1), "(started by round 1, by round 2, shadows live)");
+        agent.shutdown().await;
+    }
+
+    /// ER4: a failed install takes its name with it, so a sibling line is tried. Seen failing first on
+    /// `e3b984bf` at round 2 — the sibling started while the first was still in flight (there was no guard to
+    /// release).
+    #[tokio::test]
+    async fn a_failed_install_releases_the_name_and_the_sibling_then_starts() {
+        let agent = live_agent().await;
+        let host = Arc::new(WasmHost::new().expect("engine"));
+        let mut source = InMemorySource::new();
+        let a = source.insert(b"weights, build a".to_vec());
+        let b = source.insert(b"weights, build b".to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(blob_line("llm", "weights", a));
+        catalog.add(blob_line("llm", "weights", b));
+        let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        prov.register_runtime(Arc::new(TrackingRuntime {
+            gate:           Some(Arc::clone(&gate)),
+            fail_remaining: Arc::new(AtomicU64::new(1)), // the first install fails
+            uninstalled:    Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }));
+        let _req = declare_and_await_demand(&agent, "llm", "weights").await;
+        assert_eq!(prov.provision_round(), 1);
+        assert_eq!((prov.provision_round(), builds(&prov)), (0, 1), "the sibling waits while the first installs");
+        // The first fails; its reservation leaves the map, and the name with it.
+        let mut next = InstallableCatalog::new();
+        next.add(blob_line("llm", "weights", b));
+        prov.refresh_catalog(next); // only the sibling is left to try
+        gate.add_permits(1);
+        for _ in 0..200 {
+            if builds(&prov) == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(builds(&prov), 0, "the failed install dropped its reservation");
+        assert_eq!(prov.provision_round(), 1, "the sibling starts once the name is free");
+        gate.add_permits(1);
+        wait_live(&prov, 1).await;
+        assert!(prov.is_hosted(&b), "the sibling is the build live");
+        agent.shutdown().await;
+    }
+
+    /// ER4: a withdrawn build — a shed or a failed probe; both go through `withdraw` — frees its name, and the
+    /// sibling installs. Seen failing first on `e3b984bf` at the second round: the sibling started beside the
+    /// first.
+    #[tokio::test]
+    async fn a_withdrawn_build_releases_the_name() {
+        let agent = live_agent().await;
+        let mut source = InMemorySource::new();
+        let a = source.insert(b"weights, build a".to_vec());
+        let b = source.insert(b"weights, build b".to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(blob_line("llm", "weights", a));
+        catalog.add(blob_line("llm", "weights", b));
+        let gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let mut prov = gated_blob_prov(&agent, catalog, source, &gate);
+        let _req = declare_and_await_demand(&agent, "llm", "weights").await;
+        assert_eq!(prov.provision_round(), 1);
+        assert_eq!(prov.provision_round(), 0, "the sibling waits while the first installs");
+        wait_live(&prov, 1).await;
+        assert!(prov.withdraw(&a), "the live build is withdrawn");
+        let mut next = InstallableCatalog::new();
+        next.add(blob_line("llm", "weights", b));
+        prov.refresh_catalog(next);
+        let mut started = 0;
+        for _ in 0..80 {
+            // The withdrawn build's tombstone clears the local view shortly after; until then demand reads as met.
+            started += prov.provision_round();
+            if started > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!((started, builds(&prov)), (1, 1), "the sibling installs through the freed name");
+        agent.shutdown().await;
+    }
+
+    /// ER4: the round's record says which build holds the name. Seen failing first on `e3b984bf`: no
+    /// `capability_already_held` record (the sibling started).
+    #[tokio::test]
+    async fn the_trace_names_the_holder_when_a_name_is_held() {
+        let agent = live_agent().await;
+        let mut source = InMemorySource::new();
+        let a = source.insert(b"weights, build a".to_vec());
+        let b = source.insert(b"weights, build b".to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(blob_line("llm", "weights", a));
+        catalog.add(blob_line("llm", "weights", b));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut prov = gated_blob_prov(&agent, catalog, source, &gate);
+        let sink = Arc::new(mycelium::decision::DecisionSink::default());
+        prov.with_decision_trace(Arc::clone(&sink));
+        let _req = declare_and_await_demand(&agent, "llm", "weights").await;
+        prov.provision_round();
+        prov.provision_round();
+        let held: Vec<_> = sink.snapshot().into_iter()
+            .filter(|r| r.rule == "prov.demand_response" && r.reason == "capability_already_held")
+            .collect();
+        assert!(!held.is_empty(), "no capability_already_held record: {:?}",
+            sink.snapshot().iter().map(|r| (r.rule.clone(), r.reason.clone())).collect::<Vec<_>>());
+        assert!(held.iter().all(|r| r.outcome == OutcomeKind::Deferral && r.inputs.iter().any(|i| i.value.contains(&a.to_hex()))),
+            "the record names the holder {a}: {held:?}");
+        agent.shutdown().await;
+    }
+
+    /// ER4's control: two names from two artifacts both install in one round.
+    #[tokio::test]
+    async fn two_names_from_two_artifacts_both_install() {
+        let agent = live_agent().await;
+        let mut source = InMemorySource::new();
+        let a = source.insert(b"weights a".to_vec());
+        let b = source.insert(b"weights b".to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(blob_line("llm", "weights-a", a));
+        catalog.add(blob_line("llm", "weights-b", b));
+        let gate = Arc::new(tokio::sync::Semaphore::new(2));
+        let mut prov = gated_blob_prov(&agent, catalog, source, &gate);
+        let _ra = declare_and_await_demand(&agent, "llm", "weights-a").await;
+        let _rb = declare_and_await_demand(&agent, "llm", "weights-b").await;
+        assert_eq!(prov.provision_round(), 2);
+        wait_live(&prov, 2).await;
+        agent.shutdown().await;
+    }
+
+    /// ER4, with ER5: the reservation's own hold refuses a start once the provisioner is closed — not only
+    /// `provision_round`'s early return. Seen failing first on `e3b984bf`: the start after the shutdown
+    /// returned `Started` and reserved into the closed map.
+    #[tokio::test]
+    async fn a_start_after_shutdown_reserves_nothing() {
+        let agent = live_agent().await;
+        let mut source = InMemorySource::new();
+        let a = source.insert(b"weights".to_vec());
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut prov = gated_blob_prov(&agent, InstallableCatalog::new(), source, &gate);
+        prov.shutdown();
+        let outcome = prov.try_start_install_as(blob_line("llm", "weights", a), false);
+        assert!(outcome != StartOutcome::Started && prov.installing_count() == 0,
+            "a start after the shutdown: {outcome:?}, installing {}", prov.installing_count());
+        agent.shutdown().await;
+    }
+
+    /// D4b (R17-01, named now): the floor's cheapest line names an artifact this node already hosts as another
+    /// capability. It cannot be served under this name too (aliasing is later), so the floor tries another
+    /// digest for the name. Seen failing first on `e3b984bf`: the floor stopped at `already_hosted` and started
+    /// nothing.
+    #[tokio::test]
+    async fn a_floor_tries_another_digest_when_its_cheapest_is_hosted_as_another_capability() {
+        let agent = live_agent().await;
+        let mut source = InMemorySource::new();
+        let x = source.insert(b"shared bytes".to_vec());
+        let y = source.insert(b"weights b".to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(blob_line("llm", "weights-a", x));
+        catalog.add(blob_line("llm", "weights-b", x).with_cost(1, 1));
+        catalog.add(blob_line("llm", "weights-b", y).with_cost(100, 1));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut prov = gated_blob_prov(&agent, catalog, source, &gate);
+        prov.supervise(CapFilter::new("llm", "weights-a"), 1);
+        assert_eq!(prov.provision_round(), 1, "x installs as weights-a");
+        prov.supervise(CapFilter::new("llm", "weights-b"), 1);
+        let sink = Arc::new(mycelium::decision::DecisionSink::default());
+        prov.with_decision_trace(Arc::clone(&sink));
+        assert_eq!(prov.provision_round(), 1, "the floor for weights-b tries y: {:?}",
+            sink.snapshot().iter().map(|r| (r.rule.clone(), r.reason.clone())).collect::<Vec<_>>());
+        assert!(prov.is_hosted(&y));
+        agent.shutdown().await;
+    }
+
+    /// ER4 review N1: a floor whose candidate's artifact is hosted here as that candidate's own shadow (a proposal line
+    /// and a loadable line for one artifact) is answered `already_hosted`, as the demand pass reads it — not
+    /// `artifact_hosted_as`, which is for another capability. Seen failing first on `fbab51d4`: the floor recorded
+    /// `artifact_hosted_as`.
+    #[tokio::test]
+    async fn a_floor_reads_its_candidates_own_shadow_as_already_hosted() {
+        let agent = live_agent().await;
+        let mut source = InMemorySource::new();
+        let x = source.insert(b"one artifact, two lines".to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(blob_line("llm", "weights", x).as_proposed()); // shadows: no reviewers are listed
+        catalog.add(blob_line("llm", "weights", x)); // the same artifact, loadable
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut prov = gated_blob_prov(&agent, catalog, source, &gate);
+        prov.supervise(CapFilter::new("llm", "weights"), 1);
+        let _req = declare_and_await_demand(&agent, "llm", "weights").await;
+        let sink = Arc::new(mycelium::decision::DecisionSink::default());
+        prov.with_decision_trace(Arc::clone(&sink));
+        assert_eq!(prov.provision_round(), 1, "the proposal shadows x");
+        let floor: Vec<String> = sink.snapshot().into_iter().filter(|r| r.rule == "prov.presence_floor").map(|r| r.reason).collect();
+        assert_eq!(floor, vec!["already_hosted".to_string()], "the floor reads x, hosted as its own shadow");
+        agent.shutdown().await;
+    }
+
+    /// D4b: the demand pass names the conflict — an artifact hosted as another capability — in place of a wrong
+    /// `already_hosted`, and records the capability it is hosted as. Seen failing first on `e3b984bf`: the
+    /// record said `already_hosted`.
+    #[tokio::test]
+    async fn the_demand_pass_names_an_artifact_hosted_as_another_capability() {
+        let agent = live_agent().await;
+        let mut source = InMemorySource::new();
+        let x = source.insert(b"shared bytes".to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(blob_line("llm", "weights-a", x));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut prov = gated_blob_prov(&agent, catalog, source, &gate);
+        prov.supervise(CapFilter::new("llm", "weights-a"), 1);
+        assert_eq!(prov.provision_round(), 1, "x installs as weights-a");
+        let mut next = InstallableCatalog::new();
+        next.add(blob_line("llm", "weights-b", x));
+        prov.refresh_catalog(next);
+        prov.policies.clear();
+        let _req = declare_and_await_demand(&agent, "llm", "weights-b").await;
+        let sink = Arc::new(mycelium::decision::DecisionSink::default());
+        prov.with_decision_trace(Arc::clone(&sink));
+        assert_eq!(prov.provision_round(), 0);
+        let rec = sink.snapshot().into_iter().find(|r| r.rule == "prov.demand_response").expect("a demand record");
+        assert_eq!(rec.reason, "artifact_hosted_as");
+        assert!(rec.inputs.iter().any(|i| i.value.contains("llm/weights-a")), "names what it is hosted as: {:?}", rec.inputs);
         agent.shutdown().await;
     }
 

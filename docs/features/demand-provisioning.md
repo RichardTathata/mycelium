@@ -58,7 +58,27 @@ same way.
   install, never an instruction; an entry providing a model's `llm-meta` ad is never installed; a stem runs only the
   kinds its `[hosts].kinds` declares, and refuses an entry of any other kind at `prov.eligible` as `kind_not_declared`
   (rev 3) — an empty `kinds` installs nothing.
-- **Not built:** an exact count — self-election overshoots and corrects in later rounds; placement by anything but
+- **One live build per name, per provisioner** (ER4, R12-01). The name an entry serves — `{name}.shadow` in the
+  shadow lane — is held from its reservation until its entry leaves the provisioner's map (a withdraw, a shed, a probe
+  failure, a failed install, a stop). A second catalogue line for a held name, another digest, waits:
+  `prov.demand_response` defers it `capability_already_held` (rev 2) and names the holder, and a presence floor reads
+  the held name as answered. The check sits in the reservation's one hold, beside the `closed` check, so neither pass
+  can start a sibling of the other's install (`a_sibling_build_does_not_start_on_the_next_round_while_the_first_installs`).
+  A line whose artifact this node hosts as another capability is refused `artifact_hosted_as` and never served under a
+  second name. A pull holds its name for as long as it runs: a first line that fails delays its sibling until it
+  fails, and one that never resolves holds the name for good (below).
+- **Not built:** an upgrade — a live build stays live whether or not its line is still in the catalogue, and a
+  replacement line waits until something withdraws the old build (retire-then-replace is a separate change, D4a of the
+  engineering review); one build per name across provisioners — two provisioners on one node (two stems) hold names
+  separately; an install deadline — nothing bounds an install, and the HTTP source sets no timeout, so a pull from a
+  server that accepts the connection and never sends the body holds `{ns}/{name}` on that node until it restarts, and
+  every sibling line defers `capability_already_held` all that time (before ER4 a sibling started the next round; a
+  bounded deadline is a queued follow-up); a stopped stem's late install — a stem stopped while an install is in flight
+  (D5a) is replaced by a new stem with its own provisioner, which holds names separately and brings the same name live;
+  when the old install finishes, its runtime registers its receiver and, for a `tool/{name}` build, its MCP tool
+  (re-writing `tools/{name}/{node}`) before its completion sees the old provisioner closed and retires it, so for that
+  moment it answers beside the new build, and the retire's drop tombstones `tools/{name}/{node}` — the new stem's tool
+  then stays undiscoverable, as nothing re-writes the key (ER5-F1; the one-build guard does not close it); an exact count — self-election overshoots and corrects in later rounds; placement by anything but
   eligibility and the roll; install rights that bind under `Legacy`, `Observe` or `EnforceLocal` (they count what they
   would refuse); anything but WASM components and blobs.
 - **Evidence:** the ledger row

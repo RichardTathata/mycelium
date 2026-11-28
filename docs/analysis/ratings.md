@@ -68,6 +68,10 @@ existed. This is the framework's own report card.
     `ArtifactId`, not capability, so two catalog entries providing one `(ns,name)` via different
     artifacts both install → two runtimes serve the same RPC kind and `deliver_to_handlers` runs every
     invocation on BOTH (double side effects). Verified probe. Fixed: dedup by capability.
+    *Corrected 2026-11-28 (engineering review R12-01, ER4):* the fix held for one round only — the set of
+    started capabilities was a local of `provision_round`, so while the first build installed the next round
+    started the sibling, and the presence pass and the shadow lane were never covered. The name is now held in
+    the provisioner's hosted map for as long as the entry is reserved or live.
   - **Semantic (11) / Robustness (12)** — `decode_load_state` returned a peer-supplied `fill_ratio`
     unvalidated; the consensus retry-jitter turned an unclamped `1e30` into a `u64::MAX`-ms
     (~584-M-year) sleep. Fixed: clamp to [0,1].
