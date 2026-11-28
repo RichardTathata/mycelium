@@ -177,7 +177,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The trace of a failed late or gap run said *not retried*, which was not so when no later run of its tick completed:
   it now says *the runs after it go on; the slot is run again only if no later run of this tick completes* (R6-05, a
   sentence corrected, not the loop). `sched.run` and `sched.missed` are at revision 2. Upgrade notes:
-  `deprecations.md` §TBD-ER2.
+  `deprecations.md` §133.
 - **A gateway sends an unanswered cancel-forward again** (unreleased code: I4's cancel-forward; identity-and-lifecycle
   §9 O13, the maintainer's decision of 2026-11-22; found on #824, where behind about 12 000 concurrent mints the
   provider's stop came about 25 s after the cancel in 4 runs of 9). The forward is a best-effort signal on the

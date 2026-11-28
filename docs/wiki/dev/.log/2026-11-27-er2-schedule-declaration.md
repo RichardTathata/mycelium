@@ -33,4 +33,4 @@ advanced the record); its trace said *not retried*. The trace and the module doc
 choice; re-recorded, only `decisions.jsonl`'s six `rule_revision` fields changed — `choices.trace` byte-identical,
 so no draw was added.
 
-**Seen failing first:** see the commit message. Upgrade note `deprecations.md` §TBD-ER2.
+**Seen failing first:** see the commit message. Upgrade note `deprecations.md` §133.
