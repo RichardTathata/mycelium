@@ -74,7 +74,8 @@ impl super::intent::FleetIntent for MembershipIntent {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum GovernedFor<'a> {
     /// Whether the group's **population** is governed anywhere in the fleet: an intent `target`ed at one node still
-    /// governs the group. The gateway's refusals read it so, as do the electorate floor and the conflict detector.
+    /// governs the group. The gateway's refusals read it so, as the conflict detector does. (The electorate floor,
+    /// `helpers::declared_electorate_min`, also ignores `target` but reads by key under its own TTL: not this one.)
     #[cfg_attr(not(feature = "gateway"), allow(dead_code))]
     Fleet,
     /// Whether **this node's** membership of the group is the governor's: an intent `target`ed at another node does

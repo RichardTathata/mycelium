@@ -452,8 +452,9 @@ pub(super) async fn gw_group_leave(
 /// (fresh within `MEMBERSHIP_INTENT_TTL_MS`, its group read from the intent's body as the governor reads it). Such a
 /// group's population is governed: who belongs to it decides an election's roster and quorum, so changing it is a
 /// governance act, not a data-plane write. Read **fleet-wide** (`GovernedFor::Fleet`): an intent `target`ed at one
-/// node still governs the group here — the electorate floor (`declared_electorate_min`) and the conflict detector
-/// read it the same way. "Live" lapses: an intent not re-published within the TTL leaves the group ungoverned (and a
+/// node still governs the group here, as the conflict detector (`emergent::detect_governed_group_conflicts`) reads it.
+/// The electorate floor (`declared_electorate_min`) also ignores `target`, but reads the intent by its key and under
+/// its own, shorter TTL (`ELECTORATE_INTENT_TTL_MS`), so it is not this definition. "Live" lapses: an intent not re-published within the TTL leaves the group ungoverned (and a
 /// future-dated `written_at_ms` reads as fresh, as it does for the governor).
 #[cfg(feature = "gateway")]
 pub(super) fn is_governed_group(ctx: &Arc<TaskCtx>, group: &str) -> bool {

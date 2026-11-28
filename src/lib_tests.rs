@@ -1303,9 +1303,11 @@ async fn a_governed_member_that_does_not_match_the_filter_does_not_project() {
     assert!(still_member, "and its membership stays the governor's: the watcher does not leave a governed group");
 }
 
-/// **An emergent group the application left by hand is not rejoined** (ER9, item 4's control): the evaporation
-/// re-join is restricted to the governed → emergent transition, and the new `grp/` wake source does not turn a
-/// hand-made leave into a rejoin. Passes on the unfixed code.
+/// **An emergent group the application left by hand is not rejoined, and stops projecting** (ER9, item 4's control,
+/// and the review of f0a824cf, finding 1). The evaporation re-join is restricted to the governed → emergent
+/// transition, so the `grp/` wake source does not turn a hand-made leave into a rejoin; and a projection is the node's
+/// statement that it is a member, so it does not outlive the leave. Seen failing first (on f0a824cf): not rejoined,
+/// but `gcap/sorters/…` stayed — dispatch would report `Emitted` to a group with no member.
 #[tokio::test]
 async fn an_emergent_group_left_by_hand_is_not_rejoined() {
     use crate::capability::{Capability, CapFilter, CapabilityGroupDef};
@@ -1313,16 +1315,99 @@ async fn an_emergent_group_left_by_hand_is_not_rejoined() {
     let life = Duration::from_secs(30);
     let _worker = a.capabilities().advertise_capability(Capability::new("svc", "worker"), Duration::from_secs(1));
     let _sorters = a.capabilities().define_capability_group("sorters", er9_def("group-sort", &[]), life);
-    assert!(er9_until(|| er9_member(&a, "sorters"), 10_000).await);
+    assert!(er9_until(|| er9_member(&a, "sorters") && er9_projects(&a, "sorters", "group-sort"), 10_000).await);
     a.mesh().leave_group("sorters");
     // Passes after the leave: a control group, and two re-advertisements.
     let _audit = a.capabilities().define_capability_group("audit", CapabilityGroupDef {
         filter: CapFilter::new("svc", "worker"), topology_policy: None,
         provides: vec![Capability::new("dispatch", "audit-sort")], requires: vec![] }, life);
     assert!(er9_until(|| er9_projects(&a, "audit", "audit-sort"), 10_000).await, "a pass ran");
+    let stopped = er9_until(|| !er9_projects(&a, "sorters", "group-sort"), 5_000).await;
     let rejoined = er9_until(|| er9_member(&a, "sorters"), 2_500).await;
+    let still_stopped = !er9_projects(&a, "sorters", "group-sort");
+    // A join by hand is a membership again: the projection comes back.
+    a.mesh().join_group("sorters");
+    let back = er9_until(|| er9_projects(&a, "sorters", "group-sort"), 5_000).await;
     a.shutdown().await;
     assert!(!rejoined, "an emergent group left by hand must not be rejoined by the watcher");
+    assert!(stopped && still_stopped, "an emergent group left by hand must stop being projected");
+    assert!(back, "a join by hand projects the group again");
+}
+
+/// **A node removed through `DELETE /gateway/govern/group` stops projecting** (the review of f0a824cf, finding 1, the
+/// route's door). The intent is `target`ed at another node, so the group is governed fleet-wide (the route reads it
+/// so) but emergent for this node (the watcher reads it per node): the node joined it on a match and projects it.
+/// Seen failing first (on f0a824cf): after the route removed it, the node kept projecting `gcap/split/…`.
+#[cfg(feature = "gateway")]
+#[tokio::test]
+async fn a_node_removed_through_the_govern_route_stops_projecting() {
+    use axum::http::header::AUTHORIZATION;
+    use crate::capability::Capability;
+    let (gossip_port, http_port) = (alloc_port(), alloc_port());
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    cfg.gateway_auth_token = Some("t".into());
+    let a = GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg);
+    a.start().await.unwrap();
+    let life = Duration::from_secs(30);
+    let _worker = a.capabilities().advertise_capability(Capability::new("svc", "worker"), Duration::from_secs(1));
+    let elsewhere = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+    assert!(a.publish_membership_intent(crate::MembershipIntent::new("split", 0, None).for_node(elsewhere)));
+    let _split = a.capabilities().define_capability_group("split", er9_def("split-sort", &[]), life);
+    assert!(er9_until(|| er9_member(&a, "split") && er9_projects(&a, "split", "split-sort"), 10_000).await,
+        "emergent for this node: joined on a match and projected");
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{http_port}/gateway");
+    let r = client.delete(format!("{base}/govern/group?group=split")).header(AUTHORIZATION, "Bearer t").send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(!er9_member(&a, "split"), "the route removed the node");
+    let stopped = er9_until(|| !er9_projects(&a, "split", "split-sort"), 10_000).await;
+    let rejoined = er9_until(|| er9_member(&a, "split"), 2_500).await;
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+    assert!(stopped, "a node removed through the govern route must stop projecting");
+    assert!(!rejoined, "and is not rejoined by the watcher");
+}
+
+/// **A changed governed definition rebuilds a member's projection** (ER9, plan item 3). Passes on f0a824cf: a pin.
+#[tokio::test]
+async fn a_changed_governed_definition_rebuilds_a_members_projection() {
+    use crate::capability::Capability;
+    let a = er9_node().await;
+    let _worker = a.capabilities().advertise_capability(Capability::new("svc", "worker"), Duration::from_secs(30));
+    assert!(a.publish_membership_intent(crate::MembershipIntent::new("ruled", 0, None)));
+    a.mesh().join_group("ruled");
+    assert!(a.kv().set("cap-group/ruled", er9_def("first-sort", &[]).encode()));
+    assert!(er9_until(|| er9_projects(&a, "ruled", "first-sort"), 10_000).await, "the governed member projects");
+    assert!(a.kv().set("cap-group/ruled", er9_def("second-sort", &[]).encode()));
+    let rebuilt = er9_until(|| !er9_projects(&a, "ruled", "first-sort") && er9_projects(&a, "ruled", "second-sort"), 10_000).await;
+    let seen = (er9_projects(&a, "ruled", "first-sort"), er9_projects(&a, "ruled", "second-sort"));
+    a.shutdown().await;
+    assert!(rebuilt, "a changed definition must rebuild the projection: (first, second) = {seen:?}");
+}
+
+/// **An electorate member with an unmet group requirement goes opaque, and under the default config still votes**
+/// (the review of f0a824cf, finding 2). The opacity is the node's own true statement about itself; it reaches
+/// consensus only through the opt-in `abstain_when_opaque` and `count_opaque_as_absent` (both off by default). A pin:
+/// on 01bb75b2 no opacity key was written for a governed member at all.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_electorate_member_with_an_unmet_requirement_is_opaque_and_still_votes() {
+    use crate::capability::Capability;
+    let (agents, _l, _serial) = electorate_mesh(1, |_| {}).await;
+    let a = &agents[0];
+    a.mesh().join_group("council");
+    roster_converges(&agents, "council", &[a]).await;
+    declare(a, "council", false).await.expect("a genesis of one");
+    let _worker = a.capabilities().advertise_capability(Capability::new("svc", "worker"), Duration::from_secs(30));
+    let _council = a.capabilities().define_capability_group("council", er9_def("", &["thing"]), Duration::from_secs(30));
+    let opaque = er9_until(|| er9_opaque(a, "council"), 10_000).await;
+    let quick = ConsensusConfig { phase1_timeout: Duration::from_millis(500), ..ConsensusConfig::default() };
+    assert!(!quick.abstain_when_opaque && !quick.count_opaque_as_absent, "the default config consults no opacity");
+    let voted = a.consensus().group_propose("council", "work/ordinary", Bytes::from_static(b"o"), quick).await;
+    agents[0].shutdown_with_timeout(Duration::from_secs(5)).await;
+    assert!(opaque, "an electorate member with an unwired requirement writes its opacity key");
+    assert!(matches!(voted, ConsensusResult::Committed { .. }), "and under the default config its vote decides: {voted:?}");
 }
 
 // Compile-time proof that GossipAgent is Send + Sync so it can be wrapped in Arc.
