@@ -82,6 +82,7 @@ the notice.
 | 128 | a live log consumer (`subscribe_log`, `GET /gateway/overlay/log/subscribe`, the SDKs' `subscribe_log` / `subscribeLog`) that assumes stamps only rise, or resumes from `entry.hlc + 1` | unreleased (engineering review ER8) | dedupe by what you handled, not by "stamp went up"; resume from `entry.hlc` inclusive | **No** — entries it used to miss now arrive, some with a lower stamp ([§128](#128-a-live-log-subscription-delivers-every-entry-once-a-late-entry-arrives-out-of-stamp-order-unreleased-engineering-review-er8)) |
 | 129 | code that parses `mailbox/` keys itself, or a receiver older than its senders | unreleased (engineering review ER1) | parse `{hlc:016x}` then an optional `/{sender}`; upgrade receivers before or with senders | **No** — an older receiver delivers a new writer's event with `hlc_ts == 0` ([§129](#129-a-mailbox-key-names-its-sender-mailboxtargetkindhlc016xsender-a-consumed-events-delete-is-handed-to-the-wal-unreleased-engineering-review-2026-11-26-er1)) |
 | 130 | code or dashboards that assume a governed or electorate group's members never project into `gcap/` or write group-requirement opacity, or that a node left by hand keeps projecting | unreleased (engineering review ER9) | read group providers from `gcap/` as members' own projections; under `abstain_when_opaque` or `count_opaque_as_absent`, expect such members' opacity to count | **No** — a behaviour change only ([§130](#130-a-governed-groups-member-projects-its-provides-and-tracks-its-requires-a-drained-member-stops-an-ineligible-member-does-not-project-unreleased-engineering-review-er9-r10-01)) |
+| 131 | code, tests or dashboards that expect a fresh tuple space or blackboard's ids to start at 0, or to be small | unreleased (engineering review ER3) | treat ids as opaque `u64`s (they stay below 2^53); assert relative to the first id | **No** — a behaviour change only ([§131](#131-a-fresh-tuple-space-or-blackboard-does-not-start-its-ids-at-0-unreleased-engineering-review-er3-r4-01)) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -5902,6 +5903,7 @@ projecting. Upgrade every member of a governed group; until then a reader may st
   (`governed_groups`, `is_governed`), `src/agent/lifecycle.rs` (`start_capability_group_watcher`). Tests:
   `a_governed_groups_projection_follows_a_drain_and_a_join` and its siblings in `src/lib_tests.rs`.
 ## §TBD-ER3. A fresh tuple space or blackboard does not start its ids at 0 (unreleased, engineering review ER3, R4-01)
+## 131. A fresh tuple space or blackboard does not start its ids at 0 (unreleased, engineering review ER3, R4-01)
 
 This applies to `mycelium-tuple-space` and `mycelium-blackboard` wherever a store has **no id history**: a transient
 space or board (`persist: false`, the default), and a WAL-backed one opened over a missing or empty WAL. A WAL that

@@ -11,5 +11,5 @@ stores ahead of the clock) is named, not gated.
 
 Pages: `companions/tuple-space.md`, `companions/blackboard.md`, `companions/effects.md`. Outside the wiki: the feature
 pages `tuple-space.md`, `destination-commit.md`, `blackboard.md`; `what-is-proven.md#fresh-id-space-not-reissued`;
-`deprecations.md` §TBD-ER3; `docs/plans/mycelium-tuple-space.md` (step 5's rationale corrected);
+`deprecations.md` §131; `docs/plans/mycelium-tuple-space.md` (step 5's rationale corrected);
 `docs/design/contracts-receipts.md` (the tuple row).

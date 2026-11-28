@@ -83,7 +83,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   at its highest id + 1 as before, so a redelivery is still `Replayed`. Ids stay below 2^53. **The assumption:** fresh
   starts of one namespace whose clocks read within *N*/1024 ms of each other can overlap
   (`what-is-proven.md#fresh-id-space-not-reissued`). Wire, RPC and WAL unchanged. *Behaviour change:* a fresh space's
-  ids are large and do not start at 0 (`deprecations.md` §TBD-ER3).
+  ids are large and do not start at 0 (`deprecations.md` §131).
 - **A gateway sends an unanswered cancel-forward again** (unreleased code: I4's cancel-forward; identity-and-lifecycle
   §9 O13, the maintainer's decision of 2026-11-22; found on #824, where behind about 12 000 concurrent mints the
   provider's stop came about 25 s after the cancel in 4 runs of 9). The forward is a best-effort signal on the
