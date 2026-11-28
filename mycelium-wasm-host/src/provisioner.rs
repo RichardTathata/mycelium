@@ -868,7 +868,9 @@ impl Provisioner {
         if self.is_hosted(&entry.artifact) {
             return StartOutcome::AlreadyHosted;
         }
-        // Before admission too, so a start the name refuses spends no install right (the hold below decides).
+        // Before admission too: `admit_install` only checks `map.len()` against the ledger, but a refusal there ticks
+        // the refusal counter and journals a rejection — a start the name refuses should cause neither. The hold below
+        // decides.
         if let Some(holder) = self.name_held(&entry.provides.namespace, &entry.provides.name) {
             return StartOutcome::NameHeld(holder);
         }
@@ -889,6 +891,9 @@ impl Provisioner {
             if map.contains_key(&entry.artifact) {
                 return StartOutcome::AlreadyHosted;
             }
+            // The authority by construction: check and insert under one acquisition. While rounds take `&mut self`
+            // the pre-check above always answers first, so no test reaches this arm; it is what keeps the guard true
+            // for any caller that does not run the pre-check (ER20's chooser, a future concurrent caller).
             if let Some(holder) = name_holder(map, &entry.provides.namespace, &entry.provides.name) {
                 return StartOutcome::NameHeld(holder);
             }
@@ -1324,7 +1329,15 @@ impl Provisioner {
             // D4b (R17-01): the name is free, so a candidate whose artifact is hosted here is hosted as another
             // capability. One placed file is not served under two names (aliasing is a later decision): drop it
             // and try another digest for the name. Read after provenance, so an untrusted line naming a hosted
-            // artifact never decides anything.
+            // artifact never decides anything. A candidate hosted as its own shadow (a proposal line and a loadable
+            // line for one artifact) is this floor's own artifact: `already_hosted`, as the demand pass reads it.
+            let own_shadow = format!("{}/{}", policy.filter.namespace, shadow_name(&policy.filter.name));
+            if candidates.iter().any(|e| self.hosted_as(&e.artifact).as_deref() == Some(own_shadow.as_str())) {
+                if let Some(t) = self.round_trace() {
+                    t.record("prov.presence_floor", OutcomeKind::Refusal, "already_hosted", target, inputs(), None);
+                }
+                continue;
+            }
             let mut hosted_as = None;
             candidates.retain(|e| match self.hosted_as(&e.artifact) {
                 Some(other) => {
@@ -3765,6 +3778,30 @@ mod tests {
         assert_eq!(prov.provision_round(), 1, "the floor for weights-b tries y: {:?}",
             sink.snapshot().iter().map(|r| (r.rule.clone(), r.reason.clone())).collect::<Vec<_>>());
         assert!(prov.is_hosted(&y));
+        agent.shutdown().await;
+    }
+
+    /// ER4 review N1: a floor whose candidate's artifact is hosted here as that candidate's own shadow (a proposal line
+    /// and a loadable line for one artifact) is answered `already_hosted`, as the demand pass reads it — not
+    /// `artifact_hosted_as`, which is for another capability. Seen failing first on `fbab51d4`: the floor recorded
+    /// `artifact_hosted_as`.
+    #[tokio::test]
+    async fn a_floor_reads_its_candidates_own_shadow_as_already_hosted() {
+        let agent = live_agent().await;
+        let mut source = InMemorySource::new();
+        let x = source.insert(b"one artifact, two lines".to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(blob_line("llm", "weights", x).as_proposed()); // shadows: no reviewers are listed
+        catalog.add(blob_line("llm", "weights", x)); // the same artifact, loadable
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut prov = gated_blob_prov(&agent, catalog, source, &gate);
+        prov.supervise(CapFilter::new("llm", "weights"), 1);
+        let _req = declare_and_await_demand(&agent, "llm", "weights").await;
+        let sink = Arc::new(mycelium::decision::DecisionSink::default());
+        prov.with_decision_trace(Arc::clone(&sink));
+        assert_eq!(prov.provision_round(), 1, "the proposal shadows x");
+        let floor: Vec<String> = sink.snapshot().into_iter().filter(|r| r.rule == "prov.presence_floor").map(|r| r.reason).collect();
+        assert_eq!(floor, vec!["already_hosted".to_string()], "the floor reads x, hosted as its own shadow");
         agent.shutdown().await;
     }
 

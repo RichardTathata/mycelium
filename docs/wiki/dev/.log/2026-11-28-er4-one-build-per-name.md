@@ -14,8 +14,10 @@ map. No new lock (row 21's text changed). A second map keyed by name, keying `ho
 guard at the signal layer were rejected (two locks in step; breaks withdraw and the token logic; teaches Layer II a
 provisioner's law).
 
-Limits stated, not closed: per provisioner only; an install withdrawn mid-pull frees its name at once and may serve for
-a moment when it finishes (ER5-F1); no upgrade path (retire-then-replace, D4a, a separate PR).
+Limits stated, not closed: per provisioner only; a pull that never resolves holds its name for good (no install
+deadline; the HTTP source has no timeout); a stopped stem's late install serves for a moment beside its replacement
+stem's build and its retire tombstones `tools/{name}/{node}` (ER5-F1 — the reachable path is across provisioners, since
+no production caller withdraws an `Installing` entry); no upgrade path (retire-then-replace, D4a, a separate PR).
 
 Pages: `concurrency/lock-order.md` row 21. Outside the wiki: `docs/features/demand-provisioning.md`, `stem.md`,
 `hosted-components.md`, `presence-bands.md`, `shadow-acceptance.md`, the rule catalogue (`prov.demand_response` rev 2,

@@ -77,7 +77,7 @@ pub static RULES: &[RuleDescriptor] = &[
         symbol: "provisioner::Provisioner::provision_round", docs: "docs/reference/unit-file.md",
         tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals", "a_cheaper_bad_entry_does_not_stall_the_presence_floor",
             "a_presence_started_install_blocks_a_demand_sibling_next_round", "a_demand_started_install_blocks_a_presence_sibling",
-            "a_floor_tries_another_digest_when_its_cheapest_is_hosted_as_another_capability"], trace: Instrumented,
+            "a_floor_tries_another_digest_when_its_cheapest_is_hosted_as_another_capability", "a_floor_reads_its_candidates_own_shadow_as_already_hosted"], trace: Instrumented,
         summary: "Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry that passes provenance and eligibility; a name this node already holds answers the floor, and a line whose artifact is hosted here as another capability is passed over (rev 4; rev 3 started a second build of a held name; earlier revisions chose the cheapest before checking, so a cheaper bad line any member gossiped stalled the floor).",
     },
     RuleDescriptor {

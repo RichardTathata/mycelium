@@ -399,7 +399,7 @@ Fewer live providers than the declared floor, as this node sees it, makes this n
 - **Guards:** Provenance, ResourceBudget
 - **May trigger:** [`prov.install`](#provinstall)
 - **Depends on:** [`prov.provenance`](#provprovenance), [`prov.loadable`](#provloadable), [`prov.eligible`](#proveligible), [`prov.self_election`](#provself_election)
-- **Code:** `provisioner::Provisioner::provision_round` · **Docs:** docs/reference/unit-file.md · **Tests:** `the_stem_fleet_fills_a_presence_floor_and_reheals`, `a_cheaper_bad_entry_does_not_stall_the_presence_floor`, `a_presence_started_install_blocks_a_demand_sibling_next_round`, `a_demand_started_install_blocks_a_presence_sibling`, `a_floor_tries_another_digest_when_its_cheapest_is_hosted_as_another_capability`
+- **Code:** `provisioner::Provisioner::provision_round` · **Docs:** docs/reference/unit-file.md · **Tests:** `the_stem_fleet_fills_a_presence_floor_and_reheals`, `a_cheaper_bad_entry_does_not_stall_the_presence_floor`, `a_presence_started_install_blocks_a_demand_sibling_next_round`, `a_demand_started_install_blocks_a_presence_sibling`, `a_floor_tries_another_digest_when_its_cheapest_is_hosted_as_another_capability`, `a_floor_reads_its_candidates_own_shadow_as_already_hosted`
 
 ## `prov.probe`
 
