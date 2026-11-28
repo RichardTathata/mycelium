@@ -83,6 +83,7 @@ the notice.
 | 129 | code that parses `mailbox/` keys itself, or a receiver older than its senders | unreleased (engineering review ER1) | parse `{hlc:016x}` then an optional `/{sender}`; upgrade receivers before or with senders | **No** — an older receiver delivers a new writer's event with `hlc_ts == 0` ([§129](#129-a-mailbox-key-names-its-sender-mailboxtargetkindhlc016xsender-a-consumed-events-delete-is-handed-to-the-wal-unreleased-engineering-review-2026-11-26-er1)) |
 | 130 | code or dashboards that assume a governed or electorate group's members never project into `gcap/` or write group-requirement opacity, or that a node left by hand keeps projecting | unreleased (engineering review ER9) | read group providers from `gcap/` as members' own projections; under `abstain_when_opaque` or `count_opaque_as_absent`, expect such members' opacity to count | **No** — a behaviour change only ([§130](#130-a-governed-groups-member-projects-its-provides-and-tracks-its-requires-a-drained-member-stops-an-ineligible-member-does-not-project-unreleased-engineering-review-er9-r10-01)) |
 | 131 | code, tests or dashboards that expect a fresh tuple space or blackboard's ids to start at 0, or to be small | unreleased (engineering review ER3) | treat ids as opaque `u64`s (they stay below 2^53); assert relative to the first id | **No** — a behaviour change only ([§131](#131-a-fresh-tuple-space-or-blackboard-does-not-start-its-ids-at-0-unreleased-engineering-review-er3-r4-01)) |
+| 132 | an `Installed` implementation whose `Drop` does not stop serving; code that drops a `Provisioner` (or a stem) and expects its installs to keep serving | unreleased (engineering review ER5, PR 1) | stop serving on drop, or override `Installed::retire`; keep the `Provisioner` alive for as long as its installs should serve | **No** — `retire` is defaulted; the change is behaviour ([§132](#132-a-dropped-or-shut-down-provisioner-stops-what-it-installed-installedretire-defaulted-an-installed-must-stop-serving-when-dropped-unreleased-er5-pr-1-r14-01)) |
 | 134 | code or dashboards that expect a second `put_keyed` / `complete_keyed` under one key to replace the first, `taken <= admitted`, or `waiters` to exclude `take_by_key` workers | unreleased (engineering review ER7) | expect a FIFO queue per key; read `taken` as deliveries (redeliveries included); `waiters` now counts keyed waiters | **No** — a behaviour change only ([§134](#134-tuple-space-items-and-workers-under-one-correlation-key-queue-in-arrival-order-taken-counts-each-delivery-once-keyed-workers-count-in-waiters-unreleased-engineering-review-er7--r11-03-r11-10-r11-11)) |
 | 136 | code that calls `BoardStore::discard` or `post_with_id` directly and relies on an absent id being forgotten, on a re-post of a held id being logged again, or on a post of an acked id being applied | unreleased (engineering review ER6) | read `remembers_acked` / `refused_acked`; a board that must take an id again needs a new id, which is the rule | **No** — a behaviour change only ([§136](#136-a-blackboard-remembers-the-ids-it-acked-and-a-mirror-acts-on-them-unreleased-engineering-review-er6-r11-01-r11-04)) |
 
@@ -6008,3 +6009,48 @@ holds unless a replicated `Post` for it arrives later, which the mirror then ref
   `wal.rs` (`Tombstones`, `fold_wal`, compaction), `rpc.rs` (`snapshot_to_bytes`, `dec_snapshot_resp`), `lib.rs`
   (`apply_snapshot`, `probe_primary`). Tests: `mycelium-blackboard/tests/board_failover.rs`, and the ER6 tests in each
   of those files.
+## 132. A dropped or shut-down `Provisioner` stops what it installed; `Installed::retire` (defaulted); an `Installed` must stop serving when dropped (unreleased, ER5 PR 1, R14-01)
+
+*Numbered by the release: rows of `docs/plans/engineering-review-urgent-fixes.md` land in parallel.*
+
+**Before.** `Stem::stop()` and a dropped `Stem` ended the ticker with `drop(prov)`, and `Provisioner` had no `Drop`.
+Each live install's advertisement was withdrawn, but its `Installed` was dropped without `uninstall`: a WASM
+component's serve task was a `JoinHandle` aborted only in `uninstall`, so dropped, it detached and kept its receiver on
+`cap.invoke/{ns}/{name}`. A stem started again on the same node registered a second receiver, and one call ran on the
+retired build and the current one. An install still in flight when the provisioner was dropped was advertised and
+served on completion, then orphaned. The `Stem` doc's *"installed capabilities are withdrawn with the provisioner"*
+was true of the advertisement only.
+
+**Now.**
+- `Provisioner::shutdown(&mut self)` and `impl Drop for Provisioner`: every advertisement is withdrawn and every
+  install is **retired** (`Installed::retire`: it stops serving and keeps placed bytes). A round after `shutdown`
+  starts nothing. The stem's ticker ends in `prov.shutdown()`.
+- An install in flight at the shutdown is not waited for. Its `{ns}/loading` tier is withdrawn at the shutdown (a
+  withdraw of an in-flight install ends it the same way) and the rest of the pull advertises no further step; when it
+  finishes it is not advertised and not served, it is retired (its placed bytes are kept), and its `prov.install`
+  record says `superseded`. **Not built:** the install itself is not stopped (install tasks are not aborted, D5a),
+  so a late blob install still runs its activation command — an `ollama create`, say — after the shutdown.
+- A WASM install's serve loop stops by a retire channel checked ahead of each request, never by an abort: a call
+  already running is answered. What was still queued is answered three ways: a request awaiting a deferred provider
+  check (`gateway` with `tls`) is refused `authority_not_established` as the receiver drops; a bridged MCP tool call
+  gets an immediate error, *the component is no longer served*; a mesh request already queued at the receiver is not
+  answered, and its caller times out (`DeliveryUnknown`, never a negative). `uninstall` (a withdraw, a shed, a probe
+  failure) no longer aborts the serve task mid-call.
+- `Installed` gains `fn retire(self: Box<Self>)`, defaulted to dropping the install. `uninstall` stays *stop and remove
+  placed bytes*. The trait's doc now says a dropped `Installed` must stop serving.
+
+**What did not change.** Placed bytes are removed on a withdraw, a shed or a probe failure, as before, and kept on a
+stop. No KV key, wire, unit-file or trace-reason change.
+
+***Check:*** an embedder that dropped a `Provisioner` and relied on its WASM installs serving on is the one case this
+breaks: keep the `Provisioner` alive for as long as its installs should serve. An `Installed` implemented outside this
+crate whose drop leaves something serving should stop it in `Drop` (or in `retire` and `uninstall`); one that holds
+placed state it wants removed on a stop should override `retire` to do so.
+- **Code:** `mycelium-wasm-host/src/provisioner.rs` (`Hosted`, `shutdown`, `Drop`, the completion path),
+  `mycelium-wasm-host/src/runtime.rs` (`Installed::retire`, `serve_loop`, `WasmInstalled`), `mycelium-wasm-host/src/stem.rs`
+  (the ticker). Tests: `a_restarted_stem_dispatches_only_to_the_current_build`,
+  `a_dropped_stem_stops_serving_its_installs`, `a_stopped_stem_keeps_its_placed_blob_and_a_withdraw_removes_it`
+  (`stem.rs`); `a_dropped_provisioner_stops_its_serve_loops`,
+  `an_install_that_finishes_after_shutdown_is_not_advertised_or_served`,
+  `a_call_in_flight_when_its_install_retires_is_answered`,
+  `a_blob_pulling_at_shutdown_stops_its_loading_tier_and_keeps_its_file` (`provisioner.rs`).

@@ -47,10 +47,45 @@ enum HostedState {
     /// withdraw-then-reinstall never lets a stale task's completion clobber the newer install.
     /// `reserved` carries the entry's declared requirements so concurrent eligibility checks
     /// see resources already spoken for (two 3 GB models must not both pass a 5 GB-free check).
-    Installing { token: u64, reserved: ResourceRequirements },
+    /// `loading` is the install's `{ns}/loading` tier, held here so a shutdown or a withdraw can end it while
+    /// the pull runs (ER5 review, finding 1).
+    Installing { token: u64, reserved: ResourceRequirements, loading: Loading },
     /// Installed, advertised, serving. (Its real consumption — placed bytes on disk, activated
     /// memory — is visible to the probe directly, so no virtual accounting is kept.)
     Live(LiveHosted),
+}
+
+/// An in-flight install's `{ns}/loading` tier (lock-order row 22): the last step advertised, its registration,
+/// and whether the tier has been stopped. Once stopped — by a shutdown or a withdraw of the install, or by its
+/// resolving — nothing is advertised again, so a pull that runs on after a stop says nothing.
+struct LoadingTier {
+    step:    u64,
+    reg:     Option<CapabilityReg>,
+    stopped: bool,
+}
+
+type Loading = Arc<Mutex<LoadingTier>>;
+
+fn new_loading() -> Loading {
+    Arc::new(Mutex::new(LoadingTier { step: u64::MAX, reg: None, stopped: false }))
+}
+
+/// End a loading tier: withdraw its advertisement and advertise no further step. Takes row 22 alone — a caller
+/// holding row 21 releases it first.
+fn stop_loading(loading: &Loading) {
+    let mut tier = loading.lock().unwrap_or_else(|e| e.into_inner());
+    tier.stopped = true;
+    tier.reg.take(); // signals the advertisement's task to tombstone it
+}
+
+/// What the provisioner's one lock holds (lock-order row 21): every hosted artifact's state, and whether
+/// the provisioner has shut down. `closed` sits under the same lock as the map so an install's completion
+/// decides *advertise and go live* or *retire* in the hold where a shutdown would take the map (ER5).
+#[derive(Default)]
+struct Hosted {
+    /// Set once, by [`Provisioner::shutdown`] or the drop: nothing is reserved or made live after it.
+    closed: bool,
+    map:    HashMap<ArtifactId, HostedState>,
 }
 
 /// The provisioner's **install rights** (item 4 PR 4c, `docs/design/adaptive-stability.md` §4, §9):
@@ -198,9 +233,9 @@ pub struct Provisioner {
     /// prevention).
     resource_policy: Option<(Arc<dyn ResourceProbe>, f64)>,
     /// Artifacts this node has reserved (install in flight) or brought live — a round never
-    /// double-starts. Lock discipline: acquired once per function, flat, never across `await`
-    /// (wiki lock-order table row 21).
-    hosted:       Arc<Mutex<HashMap<ArtifactId, HostedState>>>,
+    /// double-starts — and, with them, whether this provisioner has shut down ([`Hosted`]). Lock
+    /// discipline: acquired once per function, flat, never across `await` (wiki lock-order table row 21).
+    hosted:       Arc<Mutex<Hosted>>,
     /// Tripwire (detection, not prevention): resolvable entries skipped because no runtime is
     /// registered for their kind or they exceed the install budget. Counts skip *events* (one
     /// per entry per round), not distinct entries.
@@ -287,7 +322,7 @@ impl Provisioner {
             trusted_reviewers: Vec::new(),
             install_budget_bytes: None,
             resource_policy: Some((Arc::new(SystemResourceProbe::new()), 0.8)),
-            hosted: Arc::new(Mutex::new(HashMap::new())),
+            hosted: Arc::new(Mutex::new(Hosted::default())),
             ineligible: Arc::new(AtomicU64::new(0)),
             install_rights: None,
             wasm_host: host,
@@ -375,7 +410,7 @@ impl Provisioner {
     /// republished). No rights attached = admitted, as before.
     fn admit_install(&self) -> bool {
         let Some(rights) = self.install_rights.as_ref() else { return true };
-        let consumed = self.hosted.lock().unwrap().len() as u64;
+        let consumed = self.hosted.lock().unwrap().map.len() as u64;
         let requested = consumed.saturating_add(1);
         let admitted = match rights.ledger.try_lock() {
             Ok(ledger) => ledger.may_admit(&rights.holder, &rights.resource, requested).is_ok(),
@@ -480,7 +515,7 @@ impl Provisioner {
 
     /// Requirements reserved by in-flight installs (the `Installing` states).
     fn reserved_requirements(&self) -> ResourceRequirements {
-        let map = self.hosted.lock().unwrap();
+        let map = &self.hosted.lock().unwrap().map;
         let mut sum = ResourceRequirements::default();
         for state in map.values() {
             if let HostedState::Installing { reserved, .. } = state {
@@ -513,6 +548,7 @@ impl Provisioner {
         self.hosted
             .lock()
             .unwrap()
+            .map
             .values()
             .filter(|s| matches!(s, HostedState::Live(LiveHosted { shadow: true, .. })))
             .count()
@@ -523,6 +559,7 @@ impl Provisioner {
         self.hosted
             .lock()
             .unwrap()
+            .map
             .iter()
             .filter(|(_, s)| matches!(s, HostedState::Live(LiveHosted { shadow: true, .. })))
             .map(|(a, _)| *a)
@@ -670,19 +707,55 @@ impl Provisioner {
         });
     }
 
+    /// **Stop what this provisioner started** (ER5): withdraw every advertisement it made and retire every
+    /// install ([`Installed::retire`] — it stops serving and keeps placed bytes, so a later start on this node
+    /// reuses them). An install still in flight is not waited for: when it finishes it finds the provisioner
+    /// closed, is neither advertised nor served, and is retired. A round after this starts nothing. Dropping
+    /// the provisioner does the same; calling this twice is harmless.
+    ///
+    /// Synchronous — a lock, a channel drop per install, and a signal to each advertisement's task to
+    /// tombstone it (that task writes the tombstone, shortly after) — so it is safe in the drop of an aborted
+    /// task. The teardown runs after the lock is released.
+    pub fn shutdown(&mut self) {
+        let taken = {
+            let mut hosted = self.hosted.lock().unwrap_or_else(|e| e.into_inner());
+            hosted.closed = true;
+            std::mem::take(&mut hosted.map)
+        };
+        for state in taken.into_values() {
+            match state {
+                HostedState::Live(LiveHosted { _cap: cap, installed, .. }) => {
+                    drop(cap); // signals the advertisement's task to tombstone the cap/ entry
+                    installed.retire();
+                }
+                // The pull runs on (install tasks are not aborted); its loading tier ends now.
+                HostedState::Installing { loading, .. } => stop_loading(&loading),
+            }
+        }
+        self.shed_regs.clear();
+    }
+
+    /// Has [`shutdown`](Self::shutdown) run?
+    fn is_closed(&self) -> bool {
+        self.hosted.lock().unwrap().closed
+    }
+
     /// Stop hosting `artifact`: tombstone its `cap/` advertisement and let the runtime tear down
-    /// ([`Installed::uninstall`] — abort the serve task, delete placed bytes). An **in-flight**
+    /// ([`Installed::uninstall`] — stop serving, a call in flight answered; delete placed bytes). An **in-flight**
     /// install is cancelled by removing its reservation; the install task's token check tears the
     /// finished result down on completion. Cooperative self-removal — the symmetric counterpart
     /// to [`try_start_install_as`](Self::try_start_install_as).
-    fn withdraw(&mut self, artifact: &ArtifactId) -> bool {
-        let removed = self.hosted.lock().unwrap().remove(artifact);
+    pub(crate) fn withdraw(&mut self, artifact: &ArtifactId) -> bool {
+        let removed = self.hosted.lock().unwrap().map.remove(artifact);
         match removed {
             Some(HostedState::Live(live)) => {
                 live.installed.uninstall(); // dropping live._cap tombstones the cap/ entry
                 true
             }
-            Some(HostedState::Installing { .. }) => true,
+            Some(HostedState::Installing { loading, .. }) => {
+                stop_loading(&loading); // the pull runs on until it resolves; it advertises nothing more
+                true
+            }
             None => false,
         }
     }
@@ -693,6 +766,7 @@ impl Provisioner {
         self.hosted
             .lock()
             .unwrap()
+            .map
             .values()
             .filter(|s| matches!(s, HostedState::Live(_)))
             .count()
@@ -703,6 +777,7 @@ impl Provisioner {
         self.hosted
             .lock()
             .unwrap()
+            .map
             .values()
             .filter(|s| matches!(s, HostedState::Installing { .. }))
             .count()
@@ -710,7 +785,7 @@ impl Provisioner {
 
     /// True if `artifact` is reserved or live on this node.
     fn is_hosted(&self, artifact: &ArtifactId) -> bool {
-        self.hosted.lock().unwrap().contains_key(artifact)
+        self.hosted.lock().unwrap().map.contains_key(artifact)
     }
 
     /// The live install this node can withdraw for `filter`, if any — read from what each install
@@ -719,7 +794,7 @@ impl Provisioner {
     /// is not a provider yet.
     fn hosted_artifact_for(&self, filter: &CapFilter) -> Option<ArtifactId> {
         let hosted = self.hosted.lock().unwrap();
-        hosted.iter().find_map(|(artifact, state)| match state {
+        hosted.map.iter().find_map(|(artifact, state)| match state {
             HostedState::Live(live) if filter.matches(&live.provides) => Some(*artifact),
             _ => None,
         })
@@ -755,14 +830,16 @@ impl Provisioner {
                 "install refused: the node holds too few install rights");
             return StartOutcome::RightsRefused;
         }
+        let loading = new_loading();
         {
-            let mut map = self.hosted.lock().unwrap();
+            let mut hosted = self.hosted.lock().unwrap();
+            let map = &mut hosted.map;
             if map.contains_key(&entry.artifact) {
                 return StartOutcome::AlreadyHosted;
             }
             map.insert(
                 entry.artifact,
-                HostedState::Installing { token, reserved: entry.requires },
+                HostedState::Installing { token, reserved: entry.requires, loading: Arc::clone(&loading) },
             );
         }
         metrics::counter!("mycelium_artifact_installs_started_total").increment(1);
@@ -787,9 +864,8 @@ impl Provisioner {
             // attribute stepped in tens — the capability-tier convention the llm_agent example
             // established, here driven by real bytes from the runtime's pull. Each step
             // tombstones-then-re-advertises (that order makes the advertise the LWW winner);
-            // the whole tier drops when the install resolves. Lock-order table row 22.
-            let loading: Arc<Mutex<(u64, Option<CapabilityReg>)>> =
-                Arc::new(Mutex::new((u64::MAX, None)));
+            // the whole tier drops when the install resolves, or earlier when a shutdown or a withdraw
+            // stops it (the reservation holds the same tier). Lock-order table row 22.
             let progress: ProgressFn = {
                 let loading = Arc::clone(&loading);
                 let agent = Arc::clone(&agent);
@@ -799,62 +875,79 @@ impl Provisioner {
                         return;
                     }
                     let step = (fetched.saturating_mul(100) / total).min(100) / 10 * 10;
-                    let mut tier = loading.lock().unwrap();
-                    if tier.0 == step {
+                    let mut tier = loading.lock().unwrap_or_else(|e| e.into_inner());
+                    if tier.stopped || tier.step == step {
                         return;
                     }
-                    tier.0 = step;
+                    tier.step = step;
                     let mut cap = Capability::new(ns.clone(), "loading");
                     cap.attributes.insert("pct".into(), CapValue::Integer(step as i64));
-                    tier.1.take(); // tombstone the previous step first
-                    tier.1 =
+                    tier.reg.take(); // tombstone the previous step first
+                    tier.reg =
                         Some(agent.capabilities().advertise_capability(cap, ADVERTISE_INTERVAL));
                 })
             };
             let ctx = RuntimeCtx { agent: Arc::clone(&agent), trace: trace.clone(), install_token: token, shadow };
 
             let result = runtime.install(entry, source, ctx, progress).await;
-            loading.lock().unwrap().1.take(); // install resolved — the loading tier ends
+            stop_loading(&loading); // install resolved — the loading tier ends
 
             match result {
                 Ok(installed) => {
-                    // Advertise only after a successful install: a resolvable `cap/` entry always
-                    // has a live receiver behind it (the runtime registered its serve path before
-                    // returning).
-                    let cap = agent
-                        .capabilities()
-                        .advertise_capability(provides.clone(), ADVERTISE_INTERVAL);
-                    // Take the lock once; hand ownership back out on the not-ours path so the
-                    // teardown below runs *outside* the lock. Dropping `installed` would NOT stop
-                    // the serve path (JoinHandle drop detaches) — uninstall must be explicit.
-                    let leftover = {
-                        let mut map = hosted.lock().unwrap();
-                        match map.get(&artifact) {
-                            Some(HostedState::Installing { token: t, .. }) if *t == token => {
-                                map.insert(
-                                    artifact,
-                                    HostedState::Live(LiveHosted { _cap: cap, installed, provides: provides.clone(), shadow }),
-                                );
-                                None
-                            }
-                            _ => Some((cap, installed)),
+                    /// What a finished install is, once the lock has decided it.
+                    enum Landed {
+                        Live,
+                        /// Withdrawn, or superseded by a later token: torn down, placed bytes removed.
+                        Withdrawn(Box<dyn Installed>),
+                        /// The provisioner shut down (ER5): retired, placed bytes kept.
+                        Closed(Box<dyn Installed>),
+                    }
+                    // One hold decides it (ER5, lock-order row 21): when the reservation is still ours and
+                    // the provisioner open, advertise and go live here — advertising only after a successful
+                    // install, so a resolvable `cap/` entry always has a live receiver behind it (the
+                    // runtime registered its serve path before returning). A shutdown takes the map under
+                    // this same lock, so it either retires this install `Live` or this sees `closed` and
+                    // never advertises. Otherwise ownership comes back out, and the teardown runs below,
+                    // *outside* the lock.
+                    let landed = {
+                        let mut hosted = hosted.lock().unwrap_or_else(|e| e.into_inner());
+                        let ours = matches!(hosted.map.get(&artifact),
+                            Some(HostedState::Installing { token: t, .. }) if *t == token);
+                        if hosted.closed {
+                            Landed::Closed(installed)
+                        } else if ours {
+                            let cap = agent.capabilities().advertise_capability(provides.clone(), ADVERTISE_INTERVAL);
+                            hosted.map.insert(
+                                artifact,
+                                HostedState::Live(LiveHosted { _cap: cap, installed, provides: provides.clone(), shadow }),
+                            );
+                            Landed::Live
+                        } else {
+                            Landed::Withdrawn(installed)
                         }
                     };
-                    match leftover {
-                        None => {
+                    match landed {
+                        Landed::Live => {
                             metrics::counter!("mycelium_artifact_installs_completed_total")
                                 .increment(1);
                             tracing::info!(ns = %provides.namespace, name = %provides.name,
                                 "provisioned + serving capability");
                             record(OutcomeKind::Action, "completed", Some(format!("install token {token}: live, advertised")));
                         }
-                        Some((cap, installed)) => {
-                            // Withdrawn (or superseded) while installing: nothing references
-                            // this install — tombstone the just-made ad and tear it down.
-                            drop(cap);
+                        Landed::Withdrawn(installed) => {
+                            // Withdrawn (or superseded) while installing: nothing references this
+                            // install — tear it down; it was never advertised.
                             installed.uninstall();
                             tracing::info!(ns = %provides.namespace, name = %provides.name,
                                 "install finished after withdraw — torn down");
+                            record(OutcomeKind::NoAction, "superseded", None);
+                        }
+                        Landed::Closed(installed) => {
+                            // The provisioner shut down while this installed: stop it, keep what it
+                            // placed (a stop does not delete a blob it has just pulled).
+                            installed.retire();
+                            tracing::info!(ns = %provides.namespace, name = %provides.name,
+                                "install finished after the provisioner shut down — retired, not advertised");
                             record(OutcomeKind::NoAction, "superseded", None);
                         }
                     }
@@ -865,11 +958,11 @@ impl Provisioner {
                     tracing::warn!(ns = %provides.namespace, name = %provides.name, %e,
                         "provisioning failed");
                     {
-                        let mut map = hosted.lock().unwrap();
-                        if matches!(map.get(&artifact),
+                        let mut hosted = hosted.lock().unwrap_or_else(|e| e.into_inner());
+                        if matches!(hosted.map.get(&artifact),
                             Some(HostedState::Installing { token: t, .. }) if *t == token)
                         {
-                            map.remove(&artifact);
+                            hosted.map.remove(&artifact);
                         }
                     }
                     record(OutcomeKind::Refusal, e.stage(), None);
@@ -938,7 +1031,12 @@ impl Provisioner {
     ///    `min_providers` → resolve the catalog and bring a provider live. Self-healing falls out:
     ///    a dead provider's `cap/` evaporates, the count drops, this fires again — restart and
     ///    first-time provisioning are the same path.
+    ///
+    /// After [`shutdown`](Self::shutdown) a round does nothing and returns 0.
     pub fn provision_round(&mut self) -> usize {
+        if self.is_closed() {
+            return 0;
+        }
         let mut started = 0;
         self.rounds += 1;
         let hosted_now = self.hosted_count();
@@ -951,7 +1049,7 @@ impl Provisioner {
         // node's own observation; there is no fleet health protocol. Probes run under the
         // hosted lock — they must be cheap and non-blocking (see `Installed::probe`).
         let unhealthy: Vec<ArtifactId> = {
-            let map = self.hosted.lock().unwrap();
+            let map = &self.hosted.lock().unwrap().map;
             map.iter()
                 .filter_map(|(artifact, state)| match state {
                     HostedState::Live(live) if !live.installed.probe() => Some(*artifact),
@@ -1430,6 +1528,14 @@ impl ShedView {
     }
 }
 
+/// A dropped provisioner stops what it started, as [`Provisioner::shutdown`] does (ER5): its installs stop
+/// serving and keep their placed bytes, and an install still in flight is neither advertised nor served.
+impl Drop for Provisioner {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1746,7 +1852,7 @@ mod tests {
             prov.supervise(CapFilter::new("text", "echo"), 1);
             if case == "untrusted, naming a hosted artifact" {
                 // This node already holds `bad`, as something else (a reservation stands in for it).
-                prov.hosted.lock().unwrap().insert(bad, HostedState::Installing { token: 0, reserved: Default::default() });
+                prov.hosted.lock().unwrap().map.insert(bad, HostedState::Installing { token: 0, reserved: Default::default(), loading: new_loading() });
             }
             let sink = Arc::new(mycelium::decision::DecisionSink::default());
             prov.with_decision_trace(Arc::clone(&sink));
@@ -3139,6 +3245,266 @@ mod tests {
         assert_eq!(prov.installing_count(), 0);
 
         agent.shutdown().await;
+    }
+
+    /// One call of `text/echo` on this node, bounded by `timeout`.
+    async fn call_echo(agent: &GossipAgent, payload: &[u8], timeout: Duration) -> Result<bytes::Bytes, mycelium::RpcError> {
+        agent
+            .service()
+            .rpc_call(agent.node_id().clone(), crate::runtime::cap_invoke_kind("text", "echo"), payload.to_vec(), timeout)
+            .await
+    }
+
+    /// A provisioner hosting the echo component as `text/echo`, live.
+    async fn hosting_echo(agent: &Arc<GossipAgent>) -> Provisioner {
+        let host = Arc::new(WasmHost::new().expect("engine"));
+        let mut source = InMemorySource::new();
+        let id = source.insert(ECHO_COMPONENT.to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(InstallableEntry::new(Capability::new("text", "echo"), id));
+        let mut prov = Provisioner::new(Arc::clone(agent), host, catalog, Arc::new(source), 1.0);
+        prov.supervise(CapFilter::new("text", "echo"), 1);
+        assert_eq!(prov.provision_round(), 1);
+        wait_live(&prov, 1).await;
+        assert_eq!(call_echo(agent, b"before", Duration::from_secs(5)).await.expect("serves").as_ref(), b"before");
+        prov
+    }
+
+    /// ER5 (R14-01): a provisioner dropped — not shut down, nothing awaited — stops the serve loops of
+    /// what it installed; after it, no receiver answers the capability's kind. A [`shutdown`](Provisioner::shutdown)
+    /// does the same, and a round after it starts nothing. Seen failing first (the drop case): the dropped
+    /// install's serve loop detached and still answered `after`.
+    #[tokio::test]
+    async fn a_dropped_provisioner_stops_its_serve_loops() {
+        let agent = live_agent().await;
+        let prov = hosting_echo(&agent).await;
+        drop(prov);
+        let after = call_echo(&agent, b"after", Duration::from_secs(2)).await;
+        assert!(after.is_err(), "a dropped provisioner's install still serves: {after:?}");
+
+        let mut prov = hosting_echo(&agent).await;
+        prov.shutdown();
+        let after = call_echo(&agent, b"after shutdown", Duration::from_secs(2)).await;
+        assert!(after.is_err(), "a shut-down provisioner's install still serves: {after:?}");
+        assert_eq!((prov.hosted_count(), prov.provision_round(), prov.installing_count()), (0, 0, 0),
+            "a round after the shutdown starts nothing");
+        agent.shutdown().await;
+    }
+
+    /// The WASM runtime behind a gate: an install waits for a permit, then runs as usual.
+    struct GatedWasm {
+        inner: crate::runtime::WasmComponentRuntime,
+        gate:  Arc<tokio::sync::Semaphore>,
+    }
+    #[async_trait::async_trait]
+    impl ArtifactRuntime for GatedWasm {
+        fn kind(&self) -> ArtifactKind {
+            ArtifactKind::WasmComponent
+        }
+        async fn install(
+            &self,
+            entry: InstallableEntry,
+            source: Arc<dyn ArtifactSource + Send + Sync>,
+            ctx: RuntimeCtx,
+            progress: ProgressFn,
+        ) -> Result<Box<dyn Installed>, crate::runtime::InstallError> {
+            self.gate.acquire().await.map_err(|e| crate::runtime::InstallError::Host(e.to_string()))?.forget();
+            self.inner.install(entry, source, ctx, progress).await
+        }
+    }
+
+    /// ER5 (R14-01, item 4): an install still in flight when its provisioner goes away finishes against a
+    /// closed map — it is not advertised, it is not served, and its record says it was superseded. Seen
+    /// failing first: the late install recorded `completed`, advertised, and its detached serve loop answered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn an_install_that_finishes_after_shutdown_is_not_advertised_or_served() {
+        use mycelium::decision::DecisionSink;
+        let agent = live_agent().await;
+        let host = Arc::new(WasmHost::new().expect("engine"));
+        let mut source = InMemorySource::new();
+        let id = source.insert(ECHO_COMPONENT.to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(InstallableEntry::new(Capability::new("text", "echo"), id));
+        let mut prov = Provisioner::new(Arc::clone(&agent), Arc::clone(&host), catalog, Arc::new(source), 1.0);
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        prov.register_runtime(Arc::new(GatedWasm { inner: crate::runtime::WasmComponentRuntime::new(host), gate: Arc::clone(&gate) }));
+        let sink = Arc::new(DecisionSink::default());
+        prov.with_decision_trace(Arc::clone(&sink));
+        prov.supervise(CapFilter::new("text", "echo"), 1);
+        assert_eq!(prov.provision_round(), 1);
+        assert_eq!(prov.installing_count(), 1, "the install waits at the gate");
+
+        drop(prov);
+        gate.add_permits(1);
+        let install = || sink.snapshot().into_iter().find(|r| r.rule == "prov.install").map(|r| r.reason);
+        for _ in 0..200 {
+            if install().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(install().as_deref(), Some("superseded"), "the late install is not made live");
+        let served = call_echo(&agent, b"late", Duration::from_secs(2)).await;
+        assert!(served.is_err(), "the late install serves: {served:?}");
+        assert!(agent.kv().get(&format!("cap/{}/text/echo", agent.node_id())).is_none(), "the late install is advertised");
+        agent.shutdown().await;
+    }
+
+    /// A ranged source holding one blob whose pull stops at its second range until `open` is set — the
+    /// first range has been read (and its progress reported) by then.
+    struct GatedRanged {
+        id:      ArtifactId,
+        bytes:   bytes::Bytes,
+        reached: Arc<std::sync::atomic::AtomicBool>,
+        open:    Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl ArtifactSource for GatedRanged {
+        fn fetch(&self, id: &ArtifactId) -> Option<bytes::Bytes> {
+            (*id == self.id).then(|| self.bytes.clone())
+        }
+        fn as_ranged(&self) -> Option<&dyn crate::artifact::RangedArtifactSource> {
+            Some(self)
+        }
+    }
+    impl crate::artifact::RangedArtifactSource for GatedRanged {
+        fn size(&self, id: &ArtifactId) -> Option<u64> {
+            (*id == self.id).then_some(self.bytes.len() as u64)
+        }
+        fn fetch_range(&self, id: &ArtifactId, offset: u64, len: u64) -> Option<bytes::Bytes> {
+            if *id != self.id {
+                return None;
+            }
+            if offset > 0 {
+                self.reached.store(true, Ordering::SeqCst);
+                while !self.open.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            let end = (offset + len).min(self.bytes.len() as u64);
+            Some(self.bytes.slice(offset as usize..end as usize))
+        }
+    }
+
+    /// ER5 review, finding 1 (and finding 5): a blob still being pulled when its provisioner shuts down stops
+    /// advertising `{ns}/loading` at the shutdown, and the rest of the pull — every later 10 % step — advertises
+    /// nothing; when the pull finishes the install is retired, not advertised, and keeps the file it placed. Seen
+    /// failing first: the loading tier stayed advertised after `shutdown` (the tier was the install task's alone).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn a_blob_pulling_at_shutdown_stops_its_loading_tier_and_keeps_its_file() {
+        use mycelium::decision::DecisionSink;
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let place = std::env::temp_dir().join(format!(
+            "mycelium-er5-loading-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+        let agent = live_agent().await;
+        let host = Arc::new(WasmHost::new().expect("engine"));
+        let payload: Vec<u8> = (0..160u8).collect();
+        let id = ArtifactId::of(&payload);
+        let (reached, open) = (Arc::new(std::sync::atomic::AtomicBool::new(false)), Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let source = GatedRanged { id, bytes: payload.clone().into(), reached: Arc::clone(&reached), open: Arc::clone(&open) };
+        // Opens the gate however the test ends: a panic before the explicit open below would otherwise leave the
+        // pull spinning on its blocking thread, and dropping the runtime would wait for it forever.
+        struct OpenOnDrop(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for OpenOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let _open_on_drop = OpenOnDrop(Arc::clone(&open));
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(InstallableEntry::new(Capability::new("llm", "weights"), id).with_kind(ArtifactKind::Blob).with_cost(160, 1));
+        let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
+        prov.register_runtime(Arc::new(crate::runtime::BlobRuntime::new(&place).with_chunk_bytes(16)));
+        let sink = Arc::new(DecisionSink::default());
+        prov.with_decision_trace(Arc::clone(&sink));
+        prov.supervise(CapFilter::new("llm", "weights"), 1);
+        assert_eq!(prov.provision_round(), 1);
+
+        let loading_key = format!("cap/{}/llm/loading", agent.node_id());
+        let loading = || agent.kv().get(&loading_key).is_some();
+        let mut pulling = false;
+        for _ in 0..200 {
+            if reached.load(Ordering::SeqCst) && loading() {
+                pulling = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(pulling, "the pull is under way and advertises its loading tier");
+
+        prov.shutdown();
+        let mut withdrawn = false;
+        for _ in 0..120 {
+            if !loading() {
+                withdrawn = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        // The rest of the pull runs either way (install tasks are not aborted), so open it before asserting.
+        open.store(true, Ordering::SeqCst);
+        let install = || sink.snapshot().into_iter().find(|r| r.rule == "prov.install").map(|r| r.reason);
+        for _ in 0..200 {
+            if install().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await; // a re-advertised step, if any, has landed
+        let loading_after = loading();
+        let advertised = agent.kv().get(&format!("cap/{}/llm/weights", agent.node_id())).is_some();
+        let placed = std::fs::read(place.join(id.to_hex())).ok();
+        agent.shutdown().await;
+        std::fs::remove_dir_all(&place).ok();
+        assert!(withdrawn, "the loading tier outlived the shutdown");
+        assert!(!loading_after, "the rest of the pull re-advertised the loading tier");
+        assert_eq!(install().as_deref(), Some("superseded"), "the late blob install is not made live");
+        assert!(!advertised, "the late blob install is advertised");
+        assert_eq!(placed.as_deref(), Some(&payload[..]), "the late blob install kept its placed file");
+    }
+
+    /// ER5 (R14-01, item 1): a call already running when its install is withdrawn finishes and is answered —
+    /// the serve loop stops by its retire channel, after the call, not by an abort in the middle of it. The
+    /// guest spins until the host's call deadline (600 ms), and the withdraw waits for the serve loop to begin the
+    /// call, so it lands while the call runs. Seen failing
+    /// first: `uninstall` aborted the serve task mid-call and the caller timed out (`Err(Timeout)`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn a_call_in_flight_when_its_install_retires_is_answered() {
+        let (agent, host, mut prov) =
+            hosting_spin(WasmHost::new().expect("engine").with_call_deadline(Some(Duration::from_millis(600))), None).await;
+        let artifact = prov.hosted_artifact_for(&CapFilter::new("text", "spin")).expect("hosted");
+        let caller = Arc::clone(&agent);
+        let call = tokio::spawn(async move {
+            caller
+                .service()
+                .rpc_call(caller.node_id().clone(), crate::runtime::cap_invoke_kind("text", "spin"), b"payload".to_vec(),
+                    Duration::from_secs(5))
+                .await
+        });
+        // Withdraw only once the serve loop has begun the call (a structural wait, not a sleep: a withdraw before
+        // the request is dequeued would rightly drop it unanswered).
+        let mut begun = false;
+        for _ in 0..400 {
+            if host.serve_calls_begun() >= 1 {
+                begun = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(begun, "the call never reached the guest");
+        assert!(prov.withdraw(&artifact), "withdrawn while its call runs");
+        let reply = call.await.unwrap();
+        let reply = reply.map(|b| String::from_utf8_lossy(&b).into_owned());
+        assert!(matches!(&reply, Ok(r) if r.contains("deadline exceeded")), "the call in flight is answered: {reply:?}");
+        let after = call_text(&agent, "spin").await;
+        assert!(after.is_err(), "the withdrawn install serves the next call: {after:?}");
+        agent.shutdown().await;
+    }
+
+    async fn call_text(agent: &GossipAgent, name: &str) -> Result<bytes::Bytes, mycelium::RpcError> {
+        agent
+            .service()
+            .rpc_call(agent.node_id().clone(), crate::runtime::cap_invoke_kind("text", name), b"{}".to_vec(), Duration::from_secs(2))
+            .await
     }
 
     /// M2 Run-38 falsification probe (Resource Management), kept: an agent shut down while an
