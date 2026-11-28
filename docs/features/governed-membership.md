@@ -52,7 +52,12 @@ goes offline, and a member is killed; the governors self-elect and heal the coun
   opacity, as an emergent member does — whoever wrote the membership (the governor, `/gateway/govern/group`,
   `join_group`, a peer). A drained member stops projecting and clears its opacity; a member that does not match the
   filter does not project. The watcher never writes a governed group's `grp/` entry; when an intent evaporates it
-  writes a matching, drained node back into the roster once.
+  writes a matching, drained node back into the roster once. An emergent member that leaves (by hand, through the
+  route, or by a peer's tombstone) stops projecting too, and is not rejoined until it is a member again.
+- **A governed member's group-requirement opacity reaches consensus only by opt-in:** under the default
+  `ConsensusConfig` its votes are unaffected; under `abstain_when_opaque` a member with an unwired `requires` abstains
+  on every ballot, an electorate group's included, up to `max_abstain_ballots`, and under `count_opaque_as_absent` it
+  is counted out of a non-electorate group's quorum.
 - **Not built:** the band is a target the governors reach, not an invariant at every instant — a count can sit
   outside it while moves settle; a group is self-joined by filter, so a node that matches and misbehaves is not kept
   out; in-process `join_group` and `leave_group`, and in-process or gossiped `grp/` writes (the HTTP KV routes refuse `grp/`, 403 `protected_key`), are not checked against governance. The

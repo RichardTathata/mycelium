@@ -65,7 +65,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   governed group exactly while `grp/{g}/{self}` is live and the node matches the definition's filter, whoever wrote
   the membership — the governor, `/gateway/govern/group`, `join_group`, or a peer — and never writes a governed
   group's `grp/` itself; it wakes on its own `grp/` entries and on the membership intents. When an intent evaporates,
-  a matching node the governor had drained is written back into the roster. "Governed" has one definition
+  a matching node the governor had drained is written back into the roster. No projection outlives its membership:
+  an emergent group the node leaves (by hand, through `DELETE /gateway/govern/group`, or by a peer's tombstone) stops
+  being projected and is not rejoined until the node is a member again. A governed member's new group-requirement
+  opacity reaches consensus only under the opt-in `abstain_when_opaque` / `count_opaque_as_absent`. "Governed" has one definition
   (`membership_governor::governed_groups`), read fleet-wide by the gateway and per node by the watcher.
   *Check:* after a drain, `GET /gateway/kv/keys?prefix=gcap/{group}/` lists no key ending in the drained node.
 

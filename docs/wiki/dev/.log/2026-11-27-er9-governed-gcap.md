@@ -21,7 +21,17 @@ Durable knowledge:
 - **Wake sources, no new timer:** a predicate subscription on `grp/` keys ending `/{self}` and the intent prefix,
   into the existing debounce; an evaporation is noticed on the next own-advertisement refresh.
 - **Replay corpora:** neither `tests/replay-corpus/` recording (`x9-selective-recovery`, `y2-schedule-run`) holds a
-  group, an intent or a `grp/` write, so the extra wakes add no pass there; both still replay (see the PR).
+  group, an intent or a `grp/` write, so the extra wakes add no pass there, and the shutdown's second reading of
+  "governed" is taken only when a group is projected; both replay without a re-record (`schedule_replay` and
+  `faults_recovery_replay` were run by the author and in review).
+
+**After the review of f0a824cf (2026-11-28):** a projection is the node's statement that it is a member, so it never
+outlives the membership, emergent groups included — a task-local `left` set holds an emergent group the node was seen
+to leave (by hand, the route, a peer's tombstone; the Fleet/Node split put a route-removed node there too), cleared when
+the filter or the definition goes. The governed members' new group-requirement opacity reaches consensus only through
+the opt-in `abstain_when_opaque` / `count_opaque_as_absent`; kept and stated. The shutdown departure reads "governed"
+again. The electorate floor (`declared_electorate_min`) is a third, separate reading (by key, its own TTL) — a
+follow-up, not folded in.
 
 Not built here: ER9's second PR, the readers' membership check (`wiring_snapshot`, `demand_snapshot`).
 

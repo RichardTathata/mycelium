@@ -5861,15 +5861,31 @@ definition's filter matches one of this node's own live capabilities; it drops t
 `gcap/` keys and clearing the opacity keys) when either stops. It still never writes a governed group's `grp/` entry:
 the membership stays the governor's, the route's or the application's. A governed member that does not match the
 filter does not project (it stays a member). When an intent evaporates, a node that matches the filter and is not in
-`grp/` is written back into it once; an emergent group the application left by hand is not rejoined. At shutdown the
-watcher writes a departure only for emergent groups (before, also for a group it had joined emergently and that
+`grp/` is written back into it once; an emergent group the application left by hand is not rejoined.
+
+**An emergent group's projection does not outlive the membership either.** Before, a node that left an emergent group
+it was projecting — by `leave_group`, by `DELETE /gateway/govern/group`, or because a peer tombstoned its `grp/`
+entry — kept projecting it (and re-asserted the projection every 60 s), so dispatch reported `Emitted` to a group it
+was not in. Now the watcher drops the projection when it sees the membership gone and does not rejoin the group until
+the node is a member again (a `join_group`, a route, a peer's write) or the filter or the definition goes. This
+includes a group governed fleet-wide by an intent `target`ed at another node, which this node reads as emergent.
+
+At shutdown the watcher writes a departure only for the groups that are emergent for this node at that moment — it
+reads "governed" again then, not from its last pass (before, it also left a group it had joined emergently and that
 became governed later).
+
+**What the new opacity reaches.** A governed or electorate member now tracks the definition's `requires`, so one
+whose requirement is unwired writes `sys/load/{self}/group-req/{group}/{i}` and is opaque (`is_self_opaque` reads
+every `sys/load/{self}/…` key). Under the default `ConsensusConfig` nothing changes for its votes. Under the opt-in
+`abstain_when_opaque` it abstains on every ballot — in an electorate group too — up to `max_abstain_ballots`; under the
+opt-in `count_opaque_as_absent` it is counted out of a non-electorate group's quorum. Both are kept: the opacity is
+the node's own true statement about itself, and abstaining on it is the operator's choice.
 
 "Governed" now has one definition (`membership_governor::governed_groups` / `is_governed`): a fresh intent names its
 group **by its body** (the governor's reading), and an electorate group is governed for good. The watcher reads it
 for this node (an intent `target`ed at another node does not govern it here, as before); the gateway's
-`/gateway/mesh/group` refusal, `units/declare`'s and `/gateway/govern/group`'s `governed` field read it fleet-wide (as
-before). The one change at the gateway: an intent whose key names one group and whose body names another governs the
+`/gateway/mesh/group` and `units/declare` refusals (403 `governed_group`) and `/gateway/govern/group`'s `governed`
+response field read it fleet-wide (as before). The one change at the gateway: an intent whose key names one group and whose body names another governs the
 body's group, not the key's. `publish_membership_intent` and `POST /gateway/govern/membership` always write both the
 same.
 
