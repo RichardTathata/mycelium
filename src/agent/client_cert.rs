@@ -642,9 +642,14 @@ pub(crate) fn fold_ticket(ctx: &TaskCtx) -> u64 {
     ctx.client_certs.fold.ticket()
 }
 
-/// [`refresh`], then whether `ticket` is answered by a client fold that started after it, on any thread.
+/// [`refresh`], then whether `ticket` is answered by a client fold that started after it, on any thread. A caller that
+/// runs the fold itself leaves once its ticket is answered, handing the run to the next asker
+/// ([`super::single_flight::SingleFlight::run_for`], as the revocation fold).
 pub(crate) fn refresh_answers(ctx: &TaskCtx, ticket: u64) -> bool {
-    refresh(ctx);
+    ctx.client_certs.fold.run_for(ticket, || {
+        refresh_once(ctx);
+        true
+    });
     ctx.client_certs.fold.answered(ticket)
 }
 
