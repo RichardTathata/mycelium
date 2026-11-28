@@ -14,4 +14,4 @@ never advertises. Install tasks are not aborted (the blocking pull would leak it
 
 Pages: `concurrency/lock-order.md` row 21 (type, sites, the advertisement under the lock: rows 1 and 7 as leaves).
 Outside the wiki: `docs/features/stem.md`, `docs/features/hosted-components.md`, `docs/guide/deprecations.md`
-§TBD-ER5, `CHANGELOG.md`. Not yet (PR 2): the stem's other tasks on a drop, the re-probe `JoinSet`.
+§132, `CHANGELOG.md`. Not yet (PR 2): the stem's other tasks on a drop, the re-probe `JoinSet`.

@@ -123,7 +123,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   withdrawn or retired is answered; of the calls still queued, one awaiting a deferred provider check is refused
   `authority_not_established`, a bridged MCP call gets an immediate error, and a queued mesh request is not answered
   (a timeout, never a negative). `Installed` gains a defaulted `retire`. Not yet: a dropped
-  stem's re-probe, `[[serve]]` and peer-serve tasks (ER5 PR 2). Upgrade note: deprecations §TBD-ER5.
+  stem's re-probe, `[[serve]]` and peer-serve tasks (ER5 PR 2). Upgrade note: deprecations §132.
 
 - **A gateway sends an unanswered cancel-forward again** (unreleased code: I4's cancel-forward; identity-and-lifecycle
   §9 O13, the maintainer's decision of 2026-11-22; found on #824, where behind about 12 000 concurrent mints the
