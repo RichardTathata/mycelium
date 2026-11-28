@@ -88,6 +88,11 @@ signed echo component, invoked by discovery, and recover when one goes. CI runs 
   `capability_already_held`, until the first build goes; one call runs on one build. The stem ticks every 500 ms, so
   the earlier one-round guard let the next tick start the sibling. Per stem: two stems on one node hold names
   separately. No upgrade is built yet — see [demand-driven provisioning](demand-provisioning.md).
+- **One requirement per name on a node** (ER10, R21): a unit with two `[[requirement]]`s of one `ns/name` and different
+  filters (two schema editions) is refused at start, by name, before anything is declared — the node publishes one
+  `req/` record per name, so the fleet would see one edition only. `wire-check` still reads such a file. Two installs
+  of one `tool/{name}` on the node (two stems, or a stopped stem's late install) no longer withdraw each other's
+  `tools/{name}/{node}` entry ([§TBD-ER10](../guide/deprecations.md)).
 - **Not built:** the catalogue is the supply chain, so `[hosts].trusted_publishers` is the posture to review; a stem's
   placement is decided at runtime, never by the file; a stem built without `llm` refuses a unit file with a `[[serve]]`.
 - **Evidence:** the ledger row

@@ -509,6 +509,23 @@ on cancellation), `a_registration_removes_only_its_own_entry` (a forced collisio
 `a_reply_emitted_by_the_awaiting_emitter_reaches_a_caller_on_this_node`, and
 `a_probe_dropped_mid_flight_leaves_nothing_pending`.
 
+## A handle withdraws only its own registration of a name (2026-11-28, ER10)
+
+Several handles on one node can register one name, and each writes the same key (`cap/{self}/…`, `req/{self}/…`,
+`svc/{kind}/{self}`, `cap-group/{g}`, `tools/{name}/{self}`). **The key carries the newest live registration's value;
+a withdrawn registration writes only what it leaves** — nothing under a newer one, the older one's value when it held
+the key, a tombstone only as the last. The table is `CoreCtx::soft_state_holders`
+(`mycelium_core::kv_persist::Registrations`, through `HeldKey`; lock-order row 83), and every soft-state writer that
+tombstones on exit goes through it: a new caller of `run_kv_persist_task` does so for free, and a key written once
+uses `HeldKey::register_written` and holds the `HeldKey` in its task. The update is stamped **under** the table's
+lock, so the stamps' order is the decisions' order and last-writer-wins at every reader agrees with it; the apply,
+signing and send run after. Registration happens when the task's future is built, not when it first runs, and a
+`HeldKey` dropped without `withdraw` withdraws in `Drop`. A serving loop for the name (an MCP tool's) serves only
+while it `holds()`. Node-local and above Layer I — `apply_and_notify` learns nothing (detection, not prevention), and
+another member's write to the key is not looked at. A prompt skill's backend follows the same rule
+(`TaskCtx::llm_skill_holders`) instead of comparing `Arc`s, which could not tell two registrations of one backend
+object apart (R10-03).
+
 ## Shutdown retracts through the sweep, not through the tasks (2026-10-16)
 
 A soft-state task tombstones its key when it exits, and it exits on the shutdown signal — which

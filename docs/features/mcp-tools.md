@@ -29,6 +29,10 @@ This feature is turned on in code; `/mcp` needs `gateway` and an `http_port`.
 - `/mcp` under `mcp:invoke` — a scope checked only in a build with `compliance` (the published node has it); without it
   any valid bearer reaches `/mcp` — with an [action evaluator](action-authorisation.md) to decide which tools a caller
   may run.
+- **Replacing a tool** ([§TBD-ER10](../guide/deprecations.md)): register the new version under the same name before
+  dropping the old handle. On one node the newest registration's schema is the one `tools/{name}/{node}` carries and
+  its handler the only one that serves the name; dropping the old handle writes nothing, dropping the newest writes the
+  older one's schema back, and only the last tombstones the key. A bridged server's tools take part in the same way.
 - `test_mcp_tools_call_round_trip`, in [`src/agent/http/http_tests.rs`](../../src/agent/http/http_tests.rs).
 
 ## See it work
@@ -46,7 +50,9 @@ grows a tool on demand ([hosted components](hosted-components.md)).
   the gateway and [`provider.enforcement`](../reference/rule-catalogue.md#providerenforcement)'s at a provider that
   turns it on.
 - **Not built:** a tool registration is a claim, not proof the tool does what its description says; a bridged external
-  server's own behaviour is outside the node; discovery is as fresh as gossip. **A bridged server's tool, and a tool
+  server's own behaviour is outside the node; discovery is as fresh as gossip. A call that arrives at the instant a
+  replacement is registered or dropped may be served by the outgoing registration, or, if both look in the same
+  instant, by neither (the caller times out); `tools/{name}/{node}` is written once and not refreshed. **A bridged server's tool, and a tool
   registered with `register_mcp_tool_unstoppable`, refuse a call under a cancellable rule** (`door_cannot_stop`,
   [§110](../guide/deprecations.md)): neither can stop a call once it runs, and a bridged server cannot promise
   through the node (the maintainer's decision (C) of 2026-11-16, I4's PR 3b). **Under any other rule, a bridged call

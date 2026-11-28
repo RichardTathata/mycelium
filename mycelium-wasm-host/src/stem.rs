@@ -303,6 +303,11 @@ impl Stem {
     pub fn start(agent: Arc<GossipAgent>, units: &NodeCapabilityConfig, opts: StemOptions) -> Result<Self, StemError> {
         let watch: crate::activation::WatchList = Arc::new(std::sync::Mutex::new(Vec::new()));
         units.validate().map_err(|e| StemError(e.to_string()))?;
+        // ER10 (R21): one requirement record per name on a node, so two filters for one name are refused before
+        // anything is declared.
+        if let Some(why) = units.requirement_filters_conflict() {
+            return Err(StemError(why));
+        }
         // Adopter-surface Y2: refused before anything is declared, so a refused stem has advertised nothing.
         if !units.schedules.is_empty() {
             return Err(StemError("[[schedule]] is run by the application that embeds the node (mycelium::GossipAgent::run_schedule), which supplies the work: a stem has none to run".into()));
@@ -1061,6 +1066,28 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!watch.has_changed().unwrap_or(true), "nothing was written under the unit's capability, not even a tombstone");
         assert!(node.capabilities().resolve(&CapFilter::new("ledger", "closer")).is_empty(), "nothing was advertised");
+        node.shutdown().await;
+    }
+
+    /// **R21, two editions (ER10):** a stem whose unit requires one capability under two schemas refuses to start, by
+    /// name, before it declares anything — a node publishes one requirement record per name, so the fleet snapshot and
+    /// the diagnosis saw one edition and left the other's gap out. Seen failing first: the stem started and declared
+    /// both.
+    #[tokio::test]
+    async fn two_editions_of_one_requirement_are_refused_by_a_stem() {
+        let units = NodeCapabilityConfig::from_toml_str(concat!(
+            "[[requirement]]\nns=\"library\"\nname=\"hours\"\nschema_id=\"v1\"\n",
+            "[[requirement]]\nns=\"library\"\nname=\"hours\"\nschema_id=\"v2\"\n",
+        )).unwrap();
+        let node = agent(alloc_port(), None).await;
+        let watch = node.kv().subscribe_prefix(format!("req/{}/library/", node.node_id()));
+        let err = match Stem::start(Arc::clone(&node), &units, stem_opts(&scratch("editions"))) {
+            Ok(stem) => { stem.stop().await; panic!("a stem must refuse two editions of one requirement") }
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("library/hours") && err.contains("different filter"), "{err}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!watch.has_changed().unwrap_or(true), "nothing was declared");
         node.shutdown().await;
     }
 

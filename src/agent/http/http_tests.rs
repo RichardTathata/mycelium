@@ -469,6 +469,15 @@ async fn test_gateway_units_declare_one_handle_for_a_whole_unit() {
     let r = client.post(format!("{base}/gateway/units/declare"))
         .json(&serde_json::json!({ "toml": "[[capability]]\nns = \"schedule\"\nname = \"close\"\n" })).send().await.unwrap();
     assert_eq!(r.status(), 400, "the loader refuses the reserved namespace");
+    // ER10 (R21): two editions of one requirement are refused by name — a node publishes one record per name.
+    let r = client.post(format!("{base}/gateway/units/declare"))
+        .json(&serde_json::json!({ "toml": "[[requirement]]\nns = \"library\"\nname = \"hours\"\nschema_id = \"v1\"\n[[requirement]]\nns = \"library\"\nname = \"hours\"\nschema_id = \"v2\"\n" }))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 422, "two editions of one requirement are refused");
+    let body = r.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(body["error"], "requirement declared twice");
+    assert!(body["detail"].as_str().unwrap_or("").contains("library/hours"), "{body}");
+    assert!(agent.kv().get(&format!("req/{node}/library/hours")).is_none(), "nothing was declared");
     let r = client.post(format!("{base}/gateway/units/declare"))
         .json(&serde_json::json!({ "toml": "not = [toml" })).send().await.unwrap();
     assert_eq!(r.status(), 400);

@@ -474,11 +474,24 @@ pub(super) async fn run_consolidated_opacity_watcher(
         let mut i = 0;
         while i < local.len() {
             if local[i].cancelled.load(Ordering::Acquire) {
+                // Two requirements of one name share one opacity key (ER10): drop only the cancelled registrations
+                // of it, and while another of the name is live, track that one under the same key instead of
+                // clearing it. Until ER10 this removed every registration of the key, so dropping one of two
+                // requirements of a model stopped the other's opacity being tracked at all.
+                let successor = {
+                    let mut entries = registry.entries.lock().unwrap_or_else(|e| e.into_inner());
+                    entries.retain(|e| !(e.opacity_key == local[i].opacity_key && e.cancelled.load(Ordering::Acquire)));
+                    entries.iter().rev().find(|e| e.opacity_key == local[i].opacity_key)
+                        .map(|e| (Arc::clone(&e.filter), Arc::clone(&e.cancelled)))
+                };
+                if let Some((filter, cancelled)) = successor {
+                    local[i].filter = filter;
+                    local[i].cancelled = cancelled;
+                    continue;
+                }
                 if local[i].opaque_written {
                     clear_opacity_key(&ctx, &local[i].opacity_key);
                 }
-                registry.entries.lock().unwrap_or_else(|e| e.into_inner())
-                    .retain(|e| e.opacity_key != local[i].opacity_key);
                 local.swap_remove(i);
                 continue;
             }

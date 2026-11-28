@@ -1172,6 +1172,27 @@ pub struct PresenceDecl {
 pub const MAX_TIMER_PERIOD_SECS: u64 = 3_600;
 
 impl NodeCapabilityConfig {
+    /// **Two `[[requirement]]`s of one `ns/name` with different filters**, named — `None` when there are none (ER10,
+    /// R21 "two editions"). A node publishes one requirement record per capability name (`req/{node}/{ns}/{name}`),
+    /// which carries one filter, so a node that declared both would show the fleet one edition, and a gap in the
+    /// other would go unreported. The doors that **declare** a unit on a node refuse it with this sentence — a stem's
+    /// `Stem::start` and `POST /gateway/units/declare`. The loader does not: `wire-check` reads such a file as a
+    /// statement of shapes, and checks each filter on its own. The same filter twice is one requirement.
+    pub fn requirement_filters_conflict(&self) -> Option<String> {
+        let filters: Vec<Option<CapFilter>> = self.requirements.iter().map(|r| r.to_filter().ok()).collect();
+        for (i, r) in self.requirements.iter().enumerate() {
+            if let Some(j) = self.requirements[..i].iter().enumerate()
+                .position(|(j, q)| q.ns == r.ns && q.name == r.name && filters[j] != filters[i])
+            {
+                return Some(format!(
+                    "requirement [{i}] {}/{} is declared at [{j}] with a different filter — a node publishes one requirement per capability name (req/{{node}}/{}/{}), so only one filter would be seen; declare one [[requirement]] per name on a node",
+                    r.ns, r.name, r.ns, r.name
+                ));
+            }
+        }
+        None
+    }
+
     /// Every refusal the loader makes, by name. Called by [`load_from_file`](Self::load_from_file)
     /// after parsing; call it yourself on a config built in code.
     pub fn validate(&self) -> Result<(), GossipError> {
@@ -1721,6 +1742,25 @@ name = "optimize"
 min_providers = 2
 max_providers = 4
 "#;
+
+    /// **R21, two editions (ER10):** a unit that requires one capability under two different filters is named, in
+    /// both declaration orders — the sentence a stem and `units/declare` refuse it with, since a node publishes one
+    /// requirement record per name. The loader still loads it (`wire-check` reads it as shapes). The same filter twice
+    /// is one requirement; distinct names are not a conflict. Seen failing first: no such check existed, and a stem
+    /// declared both editions.
+    #[test]
+    fn two_editions_of_one_requirement_are_named_for_the_declaring_doors() {
+        let req = |schema: &str| format!("[[requirement]]\nns = \"library\"\nname = \"hours\"\nschema_id = \"{schema}\"\n");
+        for (a, b) in [("v1", "v2"), ("v2", "v1")] {
+            let cfg = NodeCapabilityConfig::from_toml_str(&format!("{}{}", req(a), req(b))).expect("the loader loads it");
+            let why = cfg.requirement_filters_conflict().unwrap_or_else(|| panic!("{a}/{b}: two editions of library/hours not named"));
+            assert!(why.contains("library/hours") && why.contains("different filter"), "{a}/{b}: {why}");
+        }
+        let same = NodeCapabilityConfig::from_toml_str(&format!("{}{}", req("v1"), req("v1"))).unwrap();
+        assert_eq!(same.requirement_filters_conflict(), None, "the same filter twice is one requirement");
+        let distinct = NodeCapabilityConfig::from_toml_str(&format!("{}[[requirement]]\nns = \"library\"\nname = \"missing\"\n", req("v1"))).unwrap();
+        assert_eq!(distinct.requirement_filters_conflict(), None, "distinct names");
+    }
 
     /// The plan's §3 example loads, and its requirement — through `CapFilter::matches`, the
     /// mesh's own rule — accepts the capability it names and refuses the ones it does not.
