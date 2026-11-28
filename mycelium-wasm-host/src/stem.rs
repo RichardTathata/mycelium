@@ -1330,7 +1330,7 @@ mod tests {
         next.stop().await;
         node.shutdown().await;
         assert_eq!(String::from_utf8_lossy(&reply), r#"{"tonnes":2.0}"#, "the current build answers");
-        assert_eq!(receipt_now.as_deref(), Some(&control[..]), "the retired build ran the call too");
+        assert_eq!(receipt_now.as_deref(), Some(&control[..]), "the retired build must not run the call: its receipt changed");
     }
 
     /// ER5 (R14-01): a stem dropped without [`Stem::stop`] stops serving what it installed — its ticker is aborted, and

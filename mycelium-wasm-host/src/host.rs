@@ -281,6 +281,9 @@ pub struct WasmHost {
     /// How many instances this host has made (a store plus the guest's start-up code). A
     /// diagnostic: the review's gate that an uninstalled install never makes another.
     instantiations: AtomicU64,
+    /// How many guest calls a serve loop has begun on this host (counted as each enters its blocking
+    /// thread, before the guest runs). Lets a test wait for a call to be in flight rather than sleep.
+    serve_calls_begun: AtomicU64,
 }
 
 /// Errors from host setup / instantiation / invocation.
@@ -365,7 +368,7 @@ impl WasmHost {
         cfg.epoch_interruption(true);
         let engine = Engine::new(&cfg).map_err(|e| WasmHostError::Engine(e.to_string()))?;
         spawn_epoch_ticker(&engine)?;
-        Ok(Self { engine, metered, fuel_per_call, call_deadline: Some(DEFAULT_CALL_DEADLINE), compiles: AtomicU64::new(0), instantiations: AtomicU64::new(0) })
+        Ok(Self { engine, metered, fuel_per_call, call_deadline: Some(DEFAULT_CALL_DEADLINE), compiles: AtomicU64::new(0), instantiations: AtomicU64::new(0), serve_calls_begun: AtomicU64::new(0) })
     }
 
     /// Bound each call into an instance this host makes — and each instantiation, which runs the
@@ -392,6 +395,17 @@ impl WasmHost {
     /// How many instances this host has made (each runs the guest's start-up code).
     pub fn instantiations(&self) -> u64 {
         self.instantiations.load(Ordering::Relaxed)
+    }
+
+    /// A serve loop begins a guest call on this host.
+    pub(crate) fn note_serve_call_begun(&self) {
+        self.serve_calls_begun.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many guest calls serve loops have begun on this host.
+    #[cfg(test)]
+    pub(crate) fn serve_calls_begun(&self) -> u64 {
+        self.serve_calls_begun.load(Ordering::Relaxed)
     }
 
     /// Compile `component_bytes` for this host's engine — the expensive half of instantiation (a

@@ -118,9 +118,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and kept its receiver: a stem started again on the same node ran one call on the retired build and the current one.
   `Provisioner::shutdown` and `Drop for Provisioner` now withdraw every advertisement and retire every install (it
   stops serving and keeps placed bytes; a withdraw still removes them), and an install in flight at the shutdown is
-  neither advertised nor served when it finishes. A serve loop stops by a retire channel ahead of its next request
-  instead of an abort, so a call running when its install is withdrawn or retired is answered; calls queued behind it
-  are dropped unanswered (a timeout, never a negative). `Installed` gains a defaulted `retire`. Not yet: a dropped
+  neither advertised nor served when it finishes, and its `{ns}/loading` tier is withdrawn at the shutdown. A serve
+  loop stops by a retire channel ahead of its next request instead of an abort, so a call running when its install is
+  withdrawn or retired is answered; of the calls still queued, one awaiting a deferred provider check is refused
+  `authority_not_established`, a bridged MCP call gets an immediate error, and a queued mesh request is not answered
+  (a timeout, never a negative). `Installed` gains a defaulted `retire`. Not yet: a dropped
   stem's re-probe, `[[serve]]` and peer-serve tasks (ER5 PR 2). Upgrade note: deprecations §TBD-ER5.
 
 - **A gateway sends an unanswered cancel-forward again** (unreleased code: I4's cancel-forward; identity-and-lifecycle

@@ -330,6 +330,7 @@ impl Served {
     /// replace the poisoned instance. `None` for the instance ⇒ it could not be replaced and the
     /// serve task stops (the provisioner's probe withdraws and reinstalls).
     fn call(&self, agent: &GossipAgent, mut instance: Instance, payload: Vec<u8>) -> (Option<Instance>, Vec<u8>, InvocationOutcome) {
+        self.again.host.note_serve_call_begun();
         let (result, outcome): (Vec<u8>, InvocationOutcome) = match instance.invoke("invoke", payload) {
             Ok(Ok(out)) => (out, InvocationOutcome::Completed),
             Ok(Err(e)) => (format!("component-error: {e}").into_bytes(), InvocationOutcome::ComponentError(e)),
@@ -496,8 +497,13 @@ async fn serve_one(agent: &Arc<GossipAgent>, served: &Arc<Served>, slot: &mut Op
 /// **It stops by `retire`, never by an abort** (ER5): before each request the loop checks the install's retire
 /// channel, `biased` ahead of the receiver, and returns once it resolves — the install's sender sent or dropped, by
 /// `uninstall`, `retire` or a plain drop. A call already running is awaited inside [`serve_one`], so it finishes and
-/// is answered; requests queued behind it are dropped with the receiver, unanswered (their callers time out). Returning
-/// drops the receiver, so the kind has no receiver here any more.
+/// is answered. Returning drops the receiver, so the kind has no receiver here any more, and what was still queued is
+/// answered three ways (D5c):
+/// - a request still awaiting a deferred provider check (`gateway` with `tls`) is refused
+///   `authority_not_established` by the receiver's drop (`Drop for RpcRequestRx`);
+/// - a bridged MCP tool call gets an immediate error, *the component is no longer served* (its reply channel closes);
+/// - a mesh request already in the receiver's channel, or held by the `recv` the retire arm drops, is not answered:
+///   its caller times out — `DeliveryUnknown`, never a negative.
 ///
 /// **Two ways in, and only one of them is a door.** A request off the mesh arrives through `rpc_rx`, which verifies
 /// its caller and — at an enforcing provider — decides it (`cap.invoke/…` is protected work there, 2026-11-14)

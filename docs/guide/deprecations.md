@@ -6024,11 +6024,17 @@ was true of the advertisement only.
 - `Provisioner::shutdown(&mut self)` and `impl Drop for Provisioner`: every advertisement is withdrawn and every
   install is **retired** (`Installed::retire`: it stops serving and keeps placed bytes). A round after `shutdown`
   starts nothing. The stem's ticker ends in `prov.shutdown()`.
-- An install in flight at the shutdown is not waited for; when it finishes it is not advertised and not served, it is
-  retired (its placed bytes are kept), and its `prov.install` record says `superseded`.
+- An install in flight at the shutdown is not waited for. Its `{ns}/loading` tier is withdrawn at the shutdown (a
+  withdraw of an in-flight install ends it the same way) and the rest of the pull advertises no further step; when it
+  finishes it is not advertised and not served, it is retired (its placed bytes are kept), and its `prov.install`
+  record says `superseded`. **Not built:** the install itself is not stopped (install tasks are not aborted, D5a),
+  so a late blob install still runs its activation command — an `ollama create`, say — after the shutdown.
 - A WASM install's serve loop stops by a retire channel checked ahead of each request, never by an abort: a call
-  already running is answered; requests queued behind it are dropped unanswered (their callers time out,
-  `DeliveryUnknown`). `uninstall` (a withdraw, a shed, a probe failure) no longer aborts the serve task mid-call.
+  already running is answered. What was still queued is answered three ways: a request awaiting a deferred provider
+  check (`gateway` with `tls`) is refused `authority_not_established` as the receiver drops; a bridged MCP tool call
+  gets an immediate error, *the component is no longer served*; a mesh request already queued at the receiver is not
+  answered, and its caller times out (`DeliveryUnknown`, never a negative). `uninstall` (a withdraw, a shed, a probe
+  failure) no longer aborts the serve task mid-call.
 - `Installed` gains `fn retire(self: Box<Self>)`, defaulted to dropping the install. `uninstall` stays *stop and remove
   placed bytes*. The trait's doc now says a dropped `Installed` must stop serving.
 
@@ -6045,4 +6051,5 @@ placed state it wants removed on a stop should override `retire` to do so.
   `a_dropped_stem_stops_serving_its_installs`, `a_stopped_stem_keeps_its_placed_blob_and_a_withdraw_removes_it`
   (`stem.rs`); `a_dropped_provisioner_stops_its_serve_loops`,
   `an_install_that_finishes_after_shutdown_is_not_advertised_or_served`,
-  `a_call_in_flight_when_its_install_retires_is_answered` (`provisioner.rs`).
+  `a_call_in_flight_when_its_install_retires_is_answered`,
+  `a_blob_pulling_at_shutdown_stops_its_loading_tier_and_keeps_its_file` (`provisioner.rs`).

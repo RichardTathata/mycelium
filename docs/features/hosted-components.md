@@ -67,8 +67,11 @@ installs a WASM component that arrives over the mesh, and the component is bridg
 - **A retired install stops serving, and a call it is running is answered** (ER5, R14-01). Each install's serve loop
   holds the receiving end of a retire channel, checked ahead of the next request; `Installed::uninstall`,
   `Installed::retire` and dropping the install all close it, and nothing aborts the loop. The call already running
-  finishes (bounded by the deadline) and is answered; requests queued behind it are dropped unanswered, so their
-  callers time out (`DeliveryUnknown`). `retire` is what a stop or a dropped provisioner does — stop serving, keep
+  finishes (bounded by the deadline) and is answered. What was still queued is answered three ways: a request
+  awaiting a deferred provider check (`gateway` with `tls`) is refused `authority_not_established` as the receiver
+  drops; a bridged MCP tool call gets an immediate error, *the component is no longer served*; a mesh request
+  already queued at the receiver is not answered, so its caller times out (`DeliveryUnknown`, never a negative).
+  `retire` is what a stop or a dropped provisioner does — stop serving, keep
   placed bytes; `uninstall` is a withdraw — stop serving and remove them. An `Installed` written outside this crate
   must stop serving when dropped (the trait's doc); `retire` defaults to dropping it.
 - **Not built:** a component's resource use beyond memory, fuel and the deadline; a guest-to-guest boundary beyond the

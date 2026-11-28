@@ -69,11 +69,18 @@ signed echo component, invoked by discovery, and recover when one goes. CI runs 
   - **Placed bytes are kept on a stop**, so the next start reuses a placed blob; they are removed only on a withdraw,
     a shed or a probe failure (`a_stopped_stem_keeps_its_placed_blob_and_a_withdraw_removes_it`).
   - **A call already running when its install retires finishes and is answered**, bounded by the host's call deadline.
-    **Calls queued behind it at the retiring install are dropped unanswered**: their callers time out —
-    `DeliveryUnknown`, never a negative — and may ask again (D5c).
-  - **An install still in flight at the stop is not waited for** (D5a): when it finishes it is not advertised and not
-    served, and its placed bytes are kept (`an_install_that_finishes_after_shutdown_is_not_advertised_or_served`, in
+    What was still queued at the retiring install is answered three ways (D5c): a request still awaiting a deferred
+    provider check (a `gateway` build with `tls`) is refused `authority_not_established`; a bridged MCP tool call gets
+    an immediate error, *the component is no longer served*; a mesh request already queued at the receiver is not
+    answered, and its caller times out — `DeliveryUnknown`, never a negative — and may ask again.
+  - **An install still in flight at the stop is not waited for** (D5a): its `{ns}/loading` tier is withdrawn at the
+    stop and the rest of its pull advertises nothing; when it finishes it is not advertised and not served, and a
+    blob keeps the file it placed (`an_install_that_finishes_after_shutdown_is_not_advertised_or_served`,
+    `a_blob_pulling_at_shutdown_stops_its_loading_tier_and_keeps_its_file`, in
     [`provisioner.rs`](../../mycelium-wasm-host/src/provisioner.rs)).
+  - **Not built:** an install in flight at the stop runs to its end — install tasks are not aborted (a blocking pull
+    cannot be stopped, and an abort would leak its temp file) — so a late blob install still runs its activation
+    command (an `ollama create`, say) after the stop, before it is retired.
   - **Not built (ER5's second PR):** a dropped stem's re-probe, `[[serve]]` and peer-serve tasks still detach rather
     than stop; only `stop()` aborts them.
 - **Not built:** the catalogue is the supply chain, so `[hosts].trusted_publishers` is the posture to review; a stem's
