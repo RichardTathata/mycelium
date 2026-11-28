@@ -5795,7 +5795,7 @@ floor used to saturate at `u64::MAX`).
 
 - A consumer that dropped an entry whose stamp was not above the last one seen now drops real entries: dedupe on
   what you have handled (the stamp *and* the value, or an id in the value), not on a rising stamp.
-- **Resume from `entry.hlc`, inclusive, and expect that stamp's entries again** — `since` is a floor, not a resume
+- **Resume from the highest `entry.hlc` handled, inclusive, and expect that stamp's entries again** — `since` is a floor, not a resume
   token. `entry.hlc + 1`, which the SDK docstrings advised until this release, skips a sibling at that stamp. An
   entry stamped below `since` is not delivered by a new subscription; a lossless resume reads the gap with
   `scan_log` first.

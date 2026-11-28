@@ -122,14 +122,16 @@ pub fn rows_after(kv: &KvState, stream: &str, pos: &LogPosition) -> Vec<LogRow> 
 /// and each later batch are in `(hlc, key)` order; an entry that arrives late — a same-stamp sibling from a peer,
 /// or an entry stamped *below* the last one handed on, from a lagging writer or a healed partition — is handed on
 /// when it arrives, so across batches the order is **arrival order** and a subscriber may see a stamp lower than
-/// the previous one. `since` is a floor, not a resume token: a resumed subscription is opened at the last stamp
-/// it saw, inclusive, and gets that stamp's entries again.
+/// the previous one. `since` is a floor, not a resume token: a resumed subscription is opened at the highest
+/// stamp it saw, inclusive, and gets that stamp's entries again.
 ///
 /// A [`LogPosition`] cannot do this: a single position skips whatever sorts before it, which is right for a
 /// group's persisted offset and wrong for a live stream. **Memory** is one key suffix per live entry of the
 /// stream at or after `since`; [`compact_log`](crate::KvHandle::compact_log) shrinks it, as each
-/// [`pending`](Self::pending) forgets a suffix that is no longer live. A key deleted and written again is a new
-/// entry and is handed on again; an entry's value rewritten in place under the same key is not. Comparisons
+/// [`pending`](Self::pending) forgets a suffix that is no longer live. A key deleted and written again is
+/// handed on again only if a rescan saw it absent in between; a delete and a re-write that both land between
+/// two rescans are suppressed, as is a value rewritten in place under the same key (each needs a crafted
+/// write: `append` never reuses a key). Comparisons
 /// only, so a crafted `ffff…` stamp neither overflows nor moves the floor.
 #[derive(Debug)]
 pub struct LiveCursor {

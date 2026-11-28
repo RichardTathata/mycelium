@@ -518,6 +518,23 @@ async fn since_is_a_floor() {
     a.shutdown().await;
 }
 
+/// The core twin of the gateway's crafted-stamp test: a `log/{stream}/ffffffffffffffff/x` key (any member can
+/// write one). Before ER8 the core never overflowed on it — its scan was `scan_log(.., last_seen, u64::MAX)`,
+/// whose exclusive upper bound left the entry out — so it was never delivered (seen failing first: no entry
+/// within 5 s). It is an entry like any other now, delivered once, and the stream goes on without a repeat.
+#[tokio::test]
+async fn a_crafted_max_stamp_entry_does_not_end_or_reset_a_live_subscription() {
+    let a = make_started_agent(alloc_port()).await;
+    assert!(a.kv().set("log/er8.max/ffffffffffffffff/x", b"crafted".to_vec()));
+    let mut rx = a.kv().subscribe_log("er8.max", 0);
+    assert_eq!(next_value(&mut rx).await, (u64::MAX, "crafted".into()));
+    put_log(&a, "er8.max", 0x100, "n", "after");
+    assert_eq!(next_value(&mut rx).await, (0x100, "after".into()), "the subscription goes on");
+    put_log(&a, "er8.max", 0x101, "n", "after-2");
+    assert_eq!(next_value(&mut rx).await, (0x101, "after-2".into()), "and does not re-send what it sent");
+    a.shutdown().await;
+}
+
 /// R8-09: the task awaited only the prefix watcher, so a dropped receiver was noticed by the next failed
 /// send — on a quiet stream, never — and its watch receiver stayed registered. It now ends on the drop.
 #[tokio::test]

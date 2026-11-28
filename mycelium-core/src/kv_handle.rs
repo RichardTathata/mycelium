@@ -535,8 +535,9 @@ impl KvHandle {
     /// this node late — a peer's append at the same stamp, or one stamped *below* the last delivered, from a
     /// lagging writer or a healed partition — is delivered when it arrives, so across batches the order is
     /// **arrival order** and a stamp can be lower than the one before it. `since_hlc` is a floor, not a
-    /// resume token: a resumed subscription opens at the last stamp it handled, inclusive, and sees that
-    /// stamp's entries again. The subscription keeps one key suffix per live entry at or after `since_hlc`
+    /// resume token: a resumed subscription opens at the highest stamp it handled, inclusive, and sees that
+    /// stamp's entries again; an entry stamped below it is not delivered (a lossless resume scans the gap).
+    /// The subscription keeps one key suffix per live entry at or after `since_hlc`
     /// ([`LiveCursor`](crate::log_cursor::LiveCursor)); [`compact_log`](Self::compact_log) shrinks it.
     ///
     /// A background task re-scans on every write under `log/{stream}/`. It ends when the returned receiver

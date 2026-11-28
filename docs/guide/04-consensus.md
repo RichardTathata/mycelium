@@ -834,7 +834,7 @@ A live subscription hands on **every entry at or after `since` once**. The backl
 is in `(hlc, key)` order; an entry that arrives late — a peer's append at the same stamp, or one stamped below
 the last delivered, from a lagging writer or a healed partition — is delivered when it arrives, so across batches
 the order is arrival order and a stamp can be lower than the one before (engineering review ER8; until it, both
-were skipped). `since` is a floor, not a resume token: resume from the last stamp you handled, inclusive, and
+were skipped). `since` is a floor, not a resume token: resume from the highest stamp you handled, inclusive, and
 expect its entries again. The subscription ends when its receiver is dropped or the node shuts down; it holds one
 key suffix per live entry at or after `since`, which `compact_log` shrinks. A group consumer has a persisted
 position instead and does not deliver a late entry that sorts before it

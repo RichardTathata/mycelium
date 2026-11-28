@@ -28,7 +28,8 @@ This feature is turned on in code: every node has it, from `agent.kv()`.
   `/log/group/subscribe` (SSE, a consensus claim) on the [HTTP gateway](http-gateway.md)
   ([`src/agent/http/overlay.rs`](../../src/agent/http/overlay.rs)); the SDKs' `append`, `scan_log` / `scanLog`,
   `subscribe_log` / `subscribeLog` and `subscribe_log_group` / `subscribeLogGroup` call them. A stream under `cn/`,
-  `wiki/` or `reason/` belongs to a component and is refused at every door.
+  `wiki/` or `reason/` belongs to a component and is refused at every HTTP route and SDK verb; the in-process
+  `KvHandle` methods do not refuse it.
 - `test_subscribe_log_receives_live_append`, in [`src/agent/kv_handle_tests.rs`](../../src/agent/kv_handle_tests.rs):
   an entry appended after the subscription opened is delivered.
 
