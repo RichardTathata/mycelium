@@ -10,7 +10,8 @@ export interface Signal {
 
 /** A single entry in an ordered log stream. */
 export interface LogEntry {
-  /** HLC timestamp — use as a cursor for range scans. */
+  /** HLC timestamp — a bound for range scans and an inclusive floor for `subscribeLog`, not a resume token
+   * (entries can share a stamp; a live subscription can yield a lower one after a higher). */
   hlc: bigint;
   value: Buffer;
 }

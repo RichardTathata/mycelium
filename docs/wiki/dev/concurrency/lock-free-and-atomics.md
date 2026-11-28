@@ -38,7 +38,10 @@ closure), `ShardedSeen::evict_below` (conditional remove), `kv_quorum::{install_
 remove_tracker}` (copy-on-write + identity-checked removal), `helpers::merge_peer_keys`
 (union recomputed inside `compute` — the prior get-clone-modify-insert lost ~87% of retained
 keys under concurrent rotation merges; gate:
-`concurrent_merges_for_one_node_never_drop_a_key`).
+`concurrent_merges_for_one_node_never_drop_a_key`). `store::subscribe_prefix_watch` (a read-then-subscribe confirmed by
+re-inserting the same `Arc` in a `compute`, so the subscriber's CAS and an evictor's conditional remove
+serialise; gate: `a_prefix_subscriber_racing_an_eviction_is_still_notified`, a test hook forcing the window —
+ER8's review, 2026-11-27).
 
 The same shape reappears **outside papaya** wherever a check and its effect straddle an
 await or a lock release — the `AgentStateMachine::transition` budget race (Run 28) was

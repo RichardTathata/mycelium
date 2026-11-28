@@ -686,6 +686,25 @@ async fn a_durable_proposal_uses_the_existing_append_verb_and_the_reserved_names
     );
 }
 
+/// Engineering review ER8 (R8-09): a live log subscription's task awaited only its prefix watcher, so a
+/// node's shutdown left it — and its receiver open — until the next write under the prefix. It ends at
+/// shutdown now, with the receiver still held: `recv` answers `None`.
+#[tokio::test]
+async fn a_log_subscription_ends_at_shutdown() {
+    let port = alloc_port();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+    agent.start().await.unwrap();
+    let mut rx = agent.kv().subscribe_log("er8.shutdown", 0);
+    agent.kv().append("er8.shutdown", Bytes::from_static(b"ready"));
+    let first = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap();
+    assert_eq!(first.map(|e| e.value), Some(Bytes::from_static(b"ready")));
+    agent.shutdown().await;
+    let after = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
+    assert!(matches!(after, Ok(None)), "the subscription's task must end at shutdown (got {after:?})");
+}
+
 // ── Agent API ─────────────────────────────────────────────────────────────
 
 /// WS-C M8 G-C2: a cluster deployed with `GossipConfig::auto()` (no hand-set tuning

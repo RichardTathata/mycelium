@@ -22,6 +22,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   most one fold, which may start after it asked, and then runs the fold itself. Before, it returned at once. A call
   made from inside a fold, on the thread running it, only records a request. No `deprecations.md` section: no answer
   changes, and no ticketed caller is answered later than before.
+- **A live log subscription delivers every entry once, a late one included** (engineering review ER8: R8-01, R8-09;
+  decisions D10, D10a–D10c). `KvHandle::subscribe_log` and `GET /gateway/overlay/log/subscribe` moved their floor to
+  the last entry's stamp plus one, so a peer's append at the same stamp, or one stamped below it (a lagging writer, a
+  healed partition), that reached the node after the scan was never delivered to a running subscription. Each now
+  keeps the key suffixes it has handed on (`log_cursor::LiveCursor`): every live entry at or after `since` once, each
+  batch in `(hlc, key)` order, a late entry when it arrives — so out of stamp order. Both loops end when the receiver
+  is dropped or the client disconnects, and at shutdown, not at the next write; the gateway's `saturating_add` is
+  gone, and a crafted `ffff…` stamp no longer stalls its stream. In process such an entry is now delivered like
+  any other: the core's scan had an exclusive `u64::MAX` upper bound, so it was silently left out (it never reached
+  the `entry.hlc + 1`). The SDKs' resume advice is corrected (resume from
+  `entry.hlc`, inclusive). A feature page, [the log overlay](docs/features/log-overlay.md); the group consumer's
+  remaining late-entry limit is a ledger row (`what-is-proven.md#log-group-skips-a-late-row`). Upgrade note:
+  `deprecations.md` §128.
+- **A prefix subscription opened while its watcher is evicted is notified** (engineering review ER8's review; the
+  plan's §14 question, pre-existing and made reachable by ER8, whose subscriptions now drop their receivers at
+  disconnect). `subscribe_prefix` read the registered sender, then subscribed to it; if the last other receiver
+  dropped and a write evicted the closed sender in between, the new receiver sat on an orphan no write notifies.
+  Once papaya reclaimed the removed entry its sender dropped and `changed()` returned `Err`, so a reconnecting
+  log subscriber on a busy stream was ended spuriously (`recv()` returned `None`, the SSE stream closed); a
+  caller that only `borrow()`s the receiver instead went stale. After subscribing it now re-inserts the same
+  sender in a `compute`, which papaya's CAS serialises against the evictor's conditional remove, and loops if it
+  lost. The three copies (`KvHandle::subscribe_prefix`, `ops::kv_subscribe_prefix`, the gateway's
+  `subscribe_prefix_on_kv`) are one function, `mycelium_core::store::subscribe_prefix_watch`.
 - **A gateway sends an unanswered cancel-forward again** (unreleased code: I4's cancel-forward; identity-and-lifecycle
   §9 O13, the maintainer's decision of 2026-11-22; found on #824, where behind about 12 000 concurrent mints the
   provider's stop came about 25 s after the cancel in 4 runs of 9). The forward is a best-effort signal on the

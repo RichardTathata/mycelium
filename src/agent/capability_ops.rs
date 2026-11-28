@@ -346,31 +346,13 @@ pub(super) fn aggregate_fill(kv_state: &crate::store::KvState, node: &NodeId) ->
 }
 
 /// Free-function flavour of `GossipAgent::subscribe_prefix` for callers that
-/// only hold a `&KvState`. Lazy-creates the prefix watcher entry if absent.
+/// only hold a `&KvState`. Lazy-creates the prefix watcher entry if absent. One implementation with
+/// the core's ([`subscribe_prefix_watch`](mycelium_core::store::subscribe_prefix_watch)); this was its twin.
 pub(crate) fn subscribe_prefix_on_kv(
     kv_state: &crate::store::KvState,
     prefix:   Arc<str>,
 ) -> watch::Receiver<u64> {
-    loop {
-        let guard = kv_state.prefix_watchers.pin();
-        if let Some(tx) = guard.get(&prefix)
-            && !tx.is_closed() {
-                return tx.subscribe();
-            }
-        let (new_tx, rx) = watch::channel(0u64);
-        let new_tx_arc = Arc::new(new_tx);
-        let mut slot = Some(new_tx_arc);
-        let result = guard.compute(Arc::clone(&prefix), |existing| match existing {
-            Some((_, tx)) if !tx.is_closed() => papaya::Operation::Abort(()),
-            _ => match slot.take() {
-                Some(tx) => papaya::Operation::Insert(tx),
-                None => papaya::Operation::Abort(()),
-            },
-        });
-        if matches!(result, papaya::Compute::Inserted(..) | papaya::Compute::Updated { .. }) {
-            return rx;
-        }
-    }
+    mycelium_core::store::subscribe_prefix_watch(kv_state, prefix)
 }
 
 /// Background task for the Phase-3 `declare_requirement` opacity coupling.

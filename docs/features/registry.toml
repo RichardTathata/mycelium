@@ -162,6 +162,13 @@ example_watch = ["span_export", "otel_spans", "trace_export"]
 ids = ["concept:span-export", "guarantee:trace.spans_not_evidence"]
 links = ["concept:decision-trace", "concept:causal-records", "cargo:mycelium/otel"]
 
+[[feature]]
+name = "Log overlay"
+page = "log-overlay.md"
+example = "three_node_demo"
+ids = []
+links = []
+
 # ------------------------------------------------------------------------------- pages to write (row F3)
 
 # Authority and evidence

@@ -13,11 +13,16 @@
 //! entry's key suffix after `log/{stream}/` (`{hlc:016x}/{node}`). A reader takes the cursor when it is
 //! at least as far as the offset, and otherwise the offset, read as *every entry at or before this HLC*
 //! — which is what an older writer meant by it.
+//!
+//! **A live subscription is not a group** (engineering review ER8). [`LiveCursor`] keeps no position: it
+//! holds the key suffixes it has handed on, so an entry that arrives after a later one was delivered is
+//! still delivered. The group's single position cannot, and a late entry that sorts before it is not
+//! delivered to the group (`docs/operations/what-is-proven.md#log-group-skips-a-late-row`).
 
 use crate::context::CoreCtx;
 use crate::store::{scan_kv_prefix, KvState};
 use bytes::Bytes;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 /// Where a consumer group stands in a stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,6 +115,56 @@ pub fn rows_after(kv: &KvState, stream: &str, pos: &LogPosition) -> Vec<LogRow> 
     rows
 }
 
+/// A **live** subscription's place in a stream (engineering review ER8, R8-01): the floor it was opened at and
+/// the entries it has handed on, by key suffix — not a position.
+///
+/// **The contract.** Every live entry at or after `since` is handed on **once per subscription**. The backlog
+/// and each later batch are in `(hlc, key)` order; an entry that arrives late — a same-stamp sibling from a peer,
+/// or an entry stamped *below* the last one handed on, from a lagging writer or a healed partition — is handed on
+/// when it arrives, so across batches the order is **arrival order** and a subscriber may see a stamp lower than
+/// the previous one. `since` is a floor, not a resume token: a resumed subscription is opened at the highest
+/// stamp it saw, inclusive, and gets that stamp's entries again.
+///
+/// A [`LogPosition`] cannot do this: a single position skips whatever sorts before it, which is right for a
+/// group's persisted offset and wrong for a live stream. **Memory** is one key suffix per live entry of the
+/// stream at or after `since`; [`compact_log`](crate::KvHandle::compact_log) shrinks it, as each
+/// [`pending`](Self::pending) forgets a suffix that is no longer live. A key deleted and written again is
+/// handed on again only if a rescan saw it absent in between; a delete and a re-write that both land between
+/// two rescans are suppressed, as is a value rewritten in place under the same key (each needs a crafted
+/// write: `append` never reuses a key). Comparisons
+/// only, so a crafted `ffff…` stamp neither overflows nor moves the floor.
+#[derive(Debug)]
+pub struct LiveCursor {
+    since: u64,
+    delivered: HashSet<Arc<str>>,
+}
+
+impl LiveCursor {
+    /// A cursor that hands on every entry at or after `since`.
+    pub fn new(since: u64) -> Self {
+        Self { since, delivered: HashSet::new() }
+    }
+
+    /// Live rows at or after `since` not yet handed on, in `(hlc, key)` order. Forgets delivered suffixes
+    /// that are no longer live.
+    pub fn pending(&mut self, kv: &KvState, stream: &str) -> Vec<LogRow> {
+        let rows: Vec<LogRow> = rows_after(kv, stream, &LogPosition::Start)
+            .into_iter()
+            .filter(|r| r.hlc >= self.since)
+            .collect();
+        if !self.delivered.is_empty() {
+            let live: HashSet<&str> = rows.iter().map(|r| &*r.suffix).collect();
+            self.delivered.retain(|s| live.contains(&**s));
+        }
+        rows.into_iter().filter(|r| !self.delivered.contains(&r.suffix)).collect()
+    }
+
+    /// Record that `row` was handed on — after its send succeeded.
+    pub fn mark(&mut self, row: &LogRow) {
+        self.delivered.insert(Arc::clone(&row.suffix));
+    }
+}
+
 /// Record that `row` was handed on: the cursor, then the legacy offset. Through the ordinary KV write
 /// path (applied, logged to the WAL when one is configured, gossiped).
 ///
@@ -163,5 +218,43 @@ mod tests {
         // An older node advanced the offset past the cursor: the offset wins.
         put(offset_key("s", "g"), &format!("{:016x}", 0x300));
         assert_eq!(read_position(&kv, "s", "g"), LogPosition::ThroughHlc(0x300));
+    }
+
+    /// ER8: a live cursor hands on a late sibling and a late lower stamp, never repeats an entry, and its
+    /// delivered set shrinks when entries are compacted away — memory is bounded by the live stream.
+    #[test]
+    fn the_delivered_set_forgets_compacted_entries() {
+        let kv = KvState::new(0);
+        let hlc = crate::hlc::Hlc::new();
+        let id = crate::node_id::NodeId::new("127.0.0.1", 1).unwrap();
+        let write = |h: u64, node: &str, tomb: bool| {
+            let key = format!("log/s/{h:016x}/{node}");
+            crate::store::apply_and_notify(&kv, &crate::framing::make_gossip_update(&id, 60, Arc::from(key.as_str()), Bytes::from_static(b"v"), tomb, &hlc));
+        };
+        let suffixes = |rows: &[LogRow]| rows.iter().map(|r| r.suffix.to_string()).collect::<Vec<_>>();
+        for h in [0x100, 0x200, 0x300] { write(h, "a", false); }
+        let mut cursor = LiveCursor::new(0x200);
+        let first = cursor.pending(&kv, "s");
+        assert_eq!(suffixes(&first), [format!("{:016x}/a", 0x200), format!("{:016x}/a", 0x300)], "the floor is inclusive");
+        for r in &first { cursor.mark(r); }
+        assert!(cursor.pending(&kv, "s").is_empty(), "nothing is handed on twice");
+        // Late arrivals: a same-stamp sibling and a lower stamp above the floor; one below it is never pending.
+        write(0x300, "b", false);
+        write(0x250, "c", false);
+        write(0x1ff, "d", false);
+        let late = cursor.pending(&kv, "s");
+        assert_eq!(suffixes(&late), [format!("{:016x}/c", 0x250), format!("{:016x}/b", 0x300)]);
+        for r in &late { cursor.mark(r); }
+        assert_eq!(cursor.delivered.len(), 4);
+        // Compaction tombstones the older entries; the set forgets them on the next pass.
+        write(0x200, "a", true);
+        write(0x250, "c", true);
+        assert!(cursor.pending(&kv, "s").is_empty());
+        assert_eq!(cursor.delivered.len(), 2, "only the live entries' suffixes are kept");
+        // A crafted maximum stamp is an entry like any other and moves nothing.
+        write(u64::MAX, "x", false);
+        write(0x400, "a", false);
+        let next = cursor.pending(&kv, "s");
+        assert_eq!(suffixes(&next), [format!("{:016x}/a", 0x400), format!("{:016x}/x", u64::MAX)]);
     }
 }

@@ -475,8 +475,9 @@ class MailboxEvent:
 class LogEntry:
     """A single entry in an ordered durable log stream.
 
-    :attr:`hlc` is the HLC timestamp — use as a cursor for
-    :meth:`MyceliumAgent.scan_log` and :meth:`MyceliumAgent.subscribe_log`.
+    :attr:`hlc` is the HLC timestamp — a bound for :meth:`MyceliumAgent.scan_log` and an
+    inclusive floor for :meth:`MyceliumAgent.subscribe_log`, not a resume token: entries can share a
+    stamp, and a live subscription can yield a lower stamp after a higher one.
     """
 
     hlc:    int    # u64 Hybrid Logical Clock timestamp
@@ -1842,6 +1843,14 @@ class MyceliumAgent:
 
             async for entry in agent.subscribe_log("events"):
                 print(entry.hlc, entry.value)
+
+        Every entry at or after ``since_hlc`` is yielded once per subscription, including one that arrives
+        late (a peer's entry at the same stamp, or one stamped below the last yielded), so stamps are not
+        always increasing. ``since_hlc`` is a floor, not a resume token: to resume, pass the **highest**
+        ``entry.hlc`` handled — not the most recent, which can be lower, and not ``entry.hlc + 1``, which
+        skips a late sibling at that stamp — and expect that stamp's entries again. An entry stamped below
+        ``since_hlc`` is not yielded, so one still in flight when the stream dropped is lost to the resumed
+        stream: a lossless resume reads the gap with :meth:`scan_log` first and drops what it has handled.
 
         Raises :class:`ProtectedStreamError` for a stream under ``cn/``, ``wiki/`` or ``reason/``, before any
         entry is yielded.

@@ -489,3 +489,107 @@ async fn the_group_projector_skips_a_definition_whose_names_are_not_key_segments
     assert!(bad.is_empty(), "the projector wrote keys for a definition whose names are not key segments: {bad:?}");
     agent.shutdown().await;
 }
+
+// ── Engineering review ER8: the live log stream (`GET /gateway/overlay/log/subscribe`) ──────────
+//
+// The route filtered `hlc >= last_seen` and advanced `last_seen` to `hlc + 1`, as the core did: a same-stamp
+// sibling or a lower-stamped entry that arrived after the scan was never sent (R8-01), and the task awaited
+// only the prefix watcher, so a disconnected client on a quiet stream kept its watch receiver (R8-09). The
+// sibling keys are written directly, as a peer's append arrives; a sentinel after the late entry is the
+// progress marker.
+
+fn put_live_log(agent: &GossipAgent, stream: &str, hlc: u64, node: &str, value: &str) {
+    assert!(agent.kv().set(format!("log/{stream}/{hlc:016x}/{node}"), value.as_bytes().to_vec()));
+}
+
+/// An open SSE response and the text read from it so far.
+struct LiveLog { response: reqwest::Response, text: String }
+
+async fn open_live_log(client: &reqwest::Client, base: &str, stream: &str) -> LiveLog {
+    let response = client.get(format!("{base}/gateway/overlay/log/subscribe?stream={stream}")).send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    LiveLog { response, text: String::new() }
+}
+
+impl LiveLog {
+    /// The next `data:` event as `(hlc, value)`, within 5 s.
+    async fn next(&mut self) -> (u64, String) {
+        use base64::Engine as _;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(end) = self.text.find("\n\n") {
+                let event: String = self.text.drain(..end + 2).collect();
+                if let Some(line) = event.lines().find_map(|l| l.strip_prefix("data:")) {
+                    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+                    let value = base64::engine::general_purpose::STANDARD.decode(v["value_b64"].as_str().unwrap()).unwrap();
+                    return (v["hlc"].as_u64().unwrap(), String::from_utf8(value).unwrap());
+                }
+                continue; // a keep-alive comment
+            }
+            let chunk = tokio::time::timeout_at(deadline, self.response.chunk()).await
+                .expect("an event within 5 s").unwrap().expect("the stream is open");
+            self.text.push_str(&String::from_utf8_lossy(&chunk));
+        }
+    }
+}
+
+fn live_log_watchers(agent: &GossipAgent, stream: &str) -> usize {
+    agent.task_ctx.kv_state.prefix_watchers.pin()
+        .get(format!("log/{stream}/").as_str())
+        .map_or(0, |tx| tx.receiver_count())
+}
+
+/// R8-01 at the gateway: the same-stamp sibling and the lower-stamped late entry both arrive, each before
+/// the sentinel written after it.
+#[tokio::test]
+async fn the_live_log_stream_delivers_a_late_sibling_and_a_late_lower_stamp() {
+    let (agent, base, client) = gateway_agent().await;
+    put_live_log(&agent, "er8.gw", 0x200, "aa", "first");
+    let mut sse = open_live_log(&client, &base, "er8.gw").await;
+    assert_eq!(sse.next().await, (0x200, "first".into()));
+    put_live_log(&agent, "er8.gw", 0x200, "zz", "sibling");
+    put_live_log(&agent, "er8.gw", 0x201, "aa", "sentinel-1");
+    assert_eq!(sse.next().await, (0x200, "sibling".into()), "the same-stamp sibling");
+    assert_eq!(sse.next().await, (0x201, "sentinel-1".into()));
+    put_live_log(&agent, "er8.gw", 0x1ff, "bb", "lower");
+    put_live_log(&agent, "er8.gw", 0x202, "aa", "sentinel-2");
+    assert_eq!(sse.next().await, (0x1ff, "lower".into()), "the late, lower-stamped entry");
+    assert_eq!(sse.next().await, (0x202, "sentinel-2".into()));
+    drop(sse);
+    agent.shutdown().await;
+}
+
+/// A crafted `log/{stream}/ffffffffffffffff/x` entry (the key is any-node-writable) is delivered like any
+/// other, and the stream goes on: before ER8 it pinned the floor at `u64::MAX` (the `saturating_add`), so
+/// every later entry was below it and the stream stalled.
+#[tokio::test]
+async fn a_crafted_max_stamp_entry_does_not_reset_or_stall_the_live_log_stream() {
+    let (agent, base, client) = gateway_agent().await;
+    assert!(agent.kv().set("log/er8.max/ffffffffffffffff/x", b"crafted".to_vec()));
+    let mut sse = open_live_log(&client, &base, "er8.max").await;
+    assert_eq!(sse.next().await, (u64::MAX, "crafted".into()));
+    put_live_log(&agent, "er8.max", 0x100, "n", "after");
+    put_live_log(&agent, "er8.max", 0x101, "n", "after-2");
+    assert_eq!(sse.next().await, (0x100, "after".into()), "the stream did not stall");
+    assert_eq!(sse.next().await, (0x101, "after-2".into()), "nor reset: the crafted entry is not sent again");
+    drop(sse);
+    agent.shutdown().await;
+}
+
+/// R8-09 at the gateway: a client that disconnects from a quiet stream releases the route's watch receiver
+/// with no further append.
+#[tokio::test]
+async fn a_disconnected_idle_log_stream_releases_its_watcher() {
+    let (agent, base, client) = gateway_agent().await;
+    let mut sse = open_live_log(&client, &base, "er8.gone").await;
+    agent.kv().append("er8.gone", bytes::Bytes::from_static(b"ready"));
+    assert_eq!(sse.next().await.1, "ready");
+    assert_eq!(live_log_watchers(&agent, "er8.gone"), 1, "the stream holds its watch receiver");
+    drop(sse);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while live_log_watchers(&agent, "er8.gone") > 0 {
+        assert!(tokio::time::Instant::now() < deadline, "the route's task kept its watcher after the client left");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    agent.shutdown().await;
+}

@@ -1315,7 +1315,8 @@ export class MyceliumAgent {
 
   /**
    * Appends `value` to the named log stream.
-   * Returns the HLC timestamp (use as cursor for `scanLog` or `subscribeLog`).
+   * Returns the entry's HLC timestamp — a bound for `scanLog` and an inclusive floor for `subscribeLog`,
+   * not a resume token (entries can share a stamp; a live subscription can yield a lower one later).
    */
   async append(stream: string, value: Buffer | Uint8Array = Buffer.alloc(0)): Promise<bigint> {
     const data = await this._post("/gateway/overlay/log/append", {
@@ -1357,8 +1358,14 @@ export class MyceliumAgent {
   }
 
   /**
-   * Live SSE subscription. Yields entries with `hlc >= sinceHlc` (inclusive), then new ones as they
-   * arrive. To resume after an entry you have handled, pass `entry.hlc + 1n`.
+   * Live SSE subscription. Yields every entry with `hlc >= sinceHlc` (inclusive) once, then each new
+   * one as it arrives — including one that arrives late (a peer's entry at the same stamp, or one stamped
+   * below the last yielded), so stamps are not always increasing. `sinceHlc` is a floor, not a resume
+   * token: to resume, pass the **highest** `entry.hlc` you handled — not the most recent, which can be
+   * lower, and not `+ 1n`, which skips a late sibling at that stamp — and expect that stamp's entries
+   * again. An entry stamped below `sinceHlc` is not yielded, so one that was still in flight when the
+   * stream dropped is lost to the resumed stream: a lossless resume reads the gap with `scanLog` first
+   * and drops what it has handled.
    * Throws `ProtectedStreamError` for a stream under `cn/`, `wiki/` or `reason/`, before any entry.
    */
   async *subscribeLog(stream: string, options: { sinceHlc?: bigint } = {}): AsyncGenerator<LogEntry> {
