@@ -304,9 +304,8 @@ pub(super) async fn gw_schedule_last(
         .into_iter()
         .filter_map(|(k, v)| {
             let node = k.strip_prefix(prefix.as_str())?.to_string();
-            let text = std::str::from_utf8(&v).ok()?;
-            let mut parts = text.split_whitespace().map(|p| p.parse::<u64>().ok());
-            Some(json!({ "node": node, "slot": parts.next()??, "period_ms": parts.next()??, "phase_ms": parts.next()?? }))
+            let (slot, period_ms, phase_ms) = crate::schedule::parse_last(&v)?;
+            Some(json!({ "node": node, "slot": slot, "period_ms": period_ms, "phase_ms": phase_ms }))
         })
         .collect();
     Json(json!({ "schedule": q.id, "last": last })).into_response()

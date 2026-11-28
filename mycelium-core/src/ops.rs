@@ -350,14 +350,24 @@ fn reject_oversized_write(key: &str, value_len: usize) -> bool {
 /// [`MAX_KV_WRITE_BYTES`](crate::framing::MAX_KV_WRITE_BYTES) — such a write cannot be
 /// encoded into one gossip frame and would otherwise diverge silently.
 pub fn kv_set(ctx: &CoreCtx, key: Arc<str>, value: Bytes) -> bool {
+    kv_set_reporting(ctx, key, value).0
+}
+
+/// [`kv_set`], also answering the **local-application** rung of the write: `Applied`, or `Superseded`
+/// when the key already held a value with a newer stamp and LWW kept it (an entry stamped ahead of
+/// this node's clock). `None` when the write was refused before anything was applied (oversized). The
+/// same path as `kv_set` — no await, no extra draw — for a caller that must not say it replaced a value
+/// it did not replace (the schedule's `last` entry, ER2). It claims no rung above local application.
+#[must_use]
+pub fn kv_set_reporting(ctx: &CoreCtx, key: Arc<str>, value: Bytes) -> (bool, Option<crate::receipt::LocalApplication>) {
     if reject_oversized_write(&key, value.len()) {
-        return false;
+        return (false, None);
     }
     let update = make_gossip_update(&ctx.node_id, ctx.default_ttl, key, value, false, &ctx.hlc);
     // Apply first, then persist: the store is never behind the WAL, so a writer-side
     // snapshot scan always contains every record the writer has been handed
     // (persistence.rs durability invariant 1).
-    apply_and_notify(&ctx.kv_state, &update);
+    let application = crate::store::apply_and_notify_reporting(&ctx.kv_state, &update);
     if let Some(wal) = ctx.wal.get() {
         wal.append_try(sync_entry_from(&update));
     }
@@ -365,10 +375,11 @@ pub fn kv_set(ctx: &CoreCtx, key: Arc<str>, value: Bytes) -> bool {
     metrics::counter!("gossip_kv_writes_total").increment(1);
     let tls = ctx.tls.get().map(Arc::as_ref);
     let msg = make_kv_wire_msg(update, ctx.node_id.id_hash(), tls);
-    dispatch_gossip_try_send(
+    let queued = dispatch_gossip_try_send(
         &ctx.gossip_txs, msg,
         ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
-    )
+    );
+    (queued, Some(application))
 }
 
 /// Writes `value` under `key`, applies locally, appends to WAL, awaits gossip capacity.

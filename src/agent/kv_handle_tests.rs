@@ -34,6 +34,29 @@ fn set_get() {
     assert_eq!(a.kv().get("hello"), Some(Bytes::from_static(b"world")));
 }
 
+/// `ops::kv_set_reporting` (ER2) answers the local-application rung of `kv_set`'s own write: `Applied` for a fresh
+/// key, `Superseded` when the key holds a newer stamp (LWW keeps it), and nothing applied for an oversized write.
+#[test]
+fn kv_set_reporting_answers_applied_superseded_and_oversized() {
+    use mycelium_core::receipt::LocalApplication;
+    let a = make_agent();
+    let core = &a.task_ctx.core;
+    let (queued, applied) = mycelium_core::ops::kv_set_reporting(core, Arc::from("r/fresh"), Bytes::from_static(b"v"));
+    assert_eq!((queued, applied), (true, Some(LocalApplication::Applied)));
+    assert_eq!(a.kv().get("r/fresh"), Some(Bytes::from_static(b"v")));
+
+    let ahead = mycelium_core::hlc::pack(mycelium_core::sim_seam::wall_now_ms() + 3_600_000, 0);
+    let newer = mycelium_core::framing::make_gossip_update_stamped(a.node_id(), 3, Arc::from("r/held"), Bytes::from_static(b"newer"), false, ahead);
+    crate::store::apply_and_notify(&a.task_ctx.kv_state, &newer);
+    let (_, applied) = mycelium_core::ops::kv_set_reporting(core, Arc::from("r/held"), Bytes::from_static(b"older"));
+    assert_eq!(applied, Some(LocalApplication::Superseded));
+    assert_eq!(a.kv().get("r/held"), Some(Bytes::from_static(b"newer")), "LWW kept the newer stamp");
+
+    let big = Bytes::from(vec![0u8; mycelium_core::framing::MAX_KV_WRITE_BYTES + 1]);
+    assert_eq!(mycelium_core::ops::kv_set_reporting(core, Arc::from("r/big"), big), (false, None), "refused before anything is applied");
+    assert_eq!(a.kv().get("r/big"), None);
+}
+
 #[test]
 fn set_returns_true_when_channel_has_capacity() {
     assert!(make_agent().kv().set("k", b"v".to_vec()));

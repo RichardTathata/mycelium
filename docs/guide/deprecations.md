@@ -84,6 +84,7 @@ the notice.
 | 130 | code or dashboards that assume a governed or electorate group's members never project into `gcap/` or write group-requirement opacity, or that a node left by hand keeps projecting | unreleased (engineering review ER9) | read group providers from `gcap/` as members' own projections; under `abstain_when_opaque` or `count_opaque_as_absent`, expect such members' opacity to count | **No** — a behaviour change only ([§130](#130-a-governed-groups-member-projects-its-provides-and-tracks-its-requires-a-drained-member-stops-an-ineligible-member-does-not-project-unreleased-engineering-review-er9-r10-01)) |
 | 131 | code, tests or dashboards that expect a fresh tuple space or blackboard's ids to start at 0, or to be small | unreleased (engineering review ER3) | treat ids as opaque `u64`s (they stay below 2^53); assert relative to the first id | **No** — a behaviour change only ([§131](#131-a-fresh-tuple-space-or-blackboard-does-not-start-its-ids-at-0-unreleased-engineering-review-er3-r4-01)) |
 | 132 | an `Installed` implementation whose `Drop` does not stop serving; code that drops a `Provisioner` (or a stem) and expects its installs to keep serving | unreleased (engineering review ER5, PR 1) | stop serving on drop, or override `Installed::retire`; keep the `Provisioner` alive for as long as its installs should serve | **No** — `retire` is defaulted; the change is behaviour ([§132](#132-a-dropped-or-shut-down-provisioner-stops-what-it-installed-installedretire-defaulted-an-installed-must-stop-serving-when-dropped-unreleased-er5-pr-1-r14-01)) |
+| 133 | code or dashboards that read a schedule's `sched/{id}/last/{node}` entry and expect it never to go down; a destination that keys a schedule's effect by slot across a phase change | unreleased (engineering review ER2) | expect a replaced entry when no reader would count it; `mycelium_core::ops::kv_set_reporting` is new | **No** — a behaviour change and one additive function ([§133](#133-a-schedules-own-last-entry-is-replaced-when-no-reader-would-count-it-never-lowered-holds-within-one-declaration-unreleased-the-engineering-review-of-2026-11-26-er2)) |
 | 134 | code or dashboards that expect a second `put_keyed` / `complete_keyed` under one key to replace the first, `taken <= admitted`, or `waiters` to exclude `take_by_key` workers | unreleased (engineering review ER7) | expect a FIFO queue per key; read `taken` as deliveries (redeliveries included); `waiters` now counts keyed waiters | **No** — a behaviour change only ([§134](#134-tuple-space-items-and-workers-under-one-correlation-key-queue-in-arrival-order-taken-counts-each-delivery-once-keyed-workers-count-in-waiters-unreleased-engineering-review-er7--r11-03-r11-10-r11-11)) |
 | 135 | a node, or code driving `Provisioner::provision_round`, that ran two builds of one capability name side by side (two catalogue lines for one `{ns}/{name}`, each a different artifact); a decision-trace reader matching `already_started_this_round` | unreleased (engineering review ER4, R12-01) | one line per name, or expect the second line to wait — it installs once the first build's entry leaves the map (a withdraw, a shed, a probe failure, a failed install, a stop); read `capability_already_held` | **No** — behaviour and trace reasons ([§135](#135-one-capability-name-runs-one-build-per-provisioner-a-second-catalogue-line-for-the-name-waits-unreleased-er4-r12-01)) |
 | 136 | code that calls `BoardStore::discard` or `post_with_id` directly and relies on an absent id being forgotten, on a re-post of a held id being logged again, or on a post of an acked id being applied | unreleased (engineering review ER6) | read `remembers_acked` / `refused_acked`; a board that must take an id again needs a new id, which is the rule | **No** — a behaviour change only ([§136](#136-a-blackboard-remembers-the-ids-it-acked-and-a-mirror-acts-on-them-unreleased-engineering-review-er6-r11-01-r11-04)) |
@@ -6170,3 +6171,55 @@ given a unit with two editions of one requirement refuses to start, with the nam
   (`capability_config.rs`); `two_editions_of_one_requirement_are_refused_by_a_stem` (`stem.rs`);
   `a_second_install_of_a_tool_survives_the_first_ones_retirement` (`mycelium-wasm-host/src/runtime.rs`);
   `the_newest_holds_and_only_the_last_withdraws_the_key`, `keys_are_independent` (`kv_persist.rs`).
+## 133. A schedule's own `last` entry is replaced when no reader would count it: "never lowered" holds within one declaration (unreleased, the engineering review of 2026-11-26, ER2)
+
+This applies to every `[[schedule]]` run by `GossipAgent::run_schedule` or through `GET /gateway/schedules/run`.
+
+**Before.** After a run's work succeeded, the node wrote `sched/{id}/last/{node}` as the larger of the slot it ran
+and its entry's slot, **whatever period and phase the entry was written under**, then stamped the result with the
+current period and phase. The reader (`fleet_last`) counts only entries under the schedule's own period and phase and
+leaves out any more than `MAX_AHEAD_SLOTS` (64) ahead of its slot. So after a period was lengthened, a phase moved,
+or another member wrote a far-ahead value to the node's own key, the writer kept a slot the reader refused: the slot
+due ran again every check interval (lengthening, a far-ahead value), or the next slot was skipped (a phase change).
+
+**Now.** The reader and the writer share one rule (`schedule::counted`): the writer keeps its entry's slot only when
+the reader would count it — same period and phase, at most 64 slots ahead of the tick's slot — and otherwise records
+the slot it ran. **An entry is never lowered within one declaration; an entry no reader counts is replaced.** An entry
+already poisoned — by the old writer, or by another member writing a far-ahead value to this node's key — is
+replaced by the node's next successful run; the run's trace effect says what it replaced and why. A node replaces
+only its own entry; another node's poisoned entry stays left out by every reader, as before. **A phase change is
+fixed for slot numbers only:** a run's key is `sched/{id}/{slot}`, which names no period or phase, so after a phase
+change a slot number the old phase already used is the same key, and a deduplicating destination reads that run as a
+repeat of the old phase's.
+
+**Not fixed: a clock since corrected.** A node that ran with its clock ahead and comes back with it corrected gets its
+entry back **with its original stamp** — from its store (replay, then the HLC observes the highest stamp) or from a
+peer. Within `max_clock_drift_ms` (five minutes by default) its clock is carried up to that stamp, so its own
+advertisements read as from the future and the schedule is **silent on that node** until the clock catches up; the
+entry is then counted as any entry of its declaration. Past the drift bound the entry holds its key under LWW
+against the node's writes, and the slot runs every check interval until the wall clock passes the stamp — the
+general limit [`what-is-proven.md#far-future-stamp-holds-its-key`](../operations/what-is-proven.md#far-future-stamp-holds-its-key),
+which needs a Layer I change. The run's trace then says *superseded by a newer stamp; the entry stays uncounted*:
+the writer reads its write's local-application rung (new: `mycelium_core::ops::kv_set_reporting`) and claims no
+replacement it did not make.
+
+**What did not change.** No wire, key or value format; one new public function, `mycelium_core::ops::kv_set_reporting`
+(`kv_set`, also answering `Option<LocalApplication>`). A same-declaration entry within the bound —
+a clock ahead by up to 64 slots — is still kept, and still makes a slower holder say `last_ahead`. In a mixed fleet a
+node on an older release still writes the old way, and its entry is left out by new readers as before.
+
+**The trace.** `sched.run` and `sched.missed` are at revision 2. A failed late or gap run's effect now reads *the
+runs after it go on; the slot is run again only if no later run of this tick completes* (it said *not retried*,
+which was not so when every later run of the tick failed too). A consumer that matched the old sentence, or pinned
+revision 1 of either rule, updates.
+
+- ***Check:*** after a schedule is stopped and restarted with another period or phase, `GET /gateway/schedules/last`
+  (a client's schedule) or the node's `sched/{id}/last/{node}` shows the new declaration's `period_ms`/`phase_ms`
+  and the slot last run under it, and each slot's key appears once in the work's log.
+- **Code:** `src/schedule.rs` (`parse_last`, `counted`, `recorded`, `fleet_last`, `Runner::tick`). Tests:
+  `src/schedule_tests.rs` (`recorded_*`, `lengthening_a_period_runs_each_slot_once`,
+  `a_poisoned_entry_is_replaced_by_the_next_run`, `stopping_and_restarting_with_a_longer_period_runs_each_slot_once`,
+  `a_phase_change_does_not_skip_a_slot`, `a_replacement_that_loses_to_a_newer_stamp_is_traced_superseded_not_replaced`,
+  `a_clock_corrected_within_the_drift_bound_leaves_the_node_silent_until_it_catches_up`,
+  `a_failed_late_run_is_run_again_when_nothing_after_it_completes_and_the_trace_says_so`),
+  `src/agent/http/schedule_run_tests.rs` (`a_clients_schedule_over_a_poisoned_entry_is_handed_one_run_per_slot`).

@@ -152,6 +152,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (a timeout, never a negative). `Installed` gains a defaulted `retire`. Not yet: a dropped
   stem's re-probe, `[[serve]]` and peer-serve tasks (ER5 PR 2). Upgrade note: deprecations §132.
 
+- **A schedule whose declaration changes runs each slot once** (the engineering review of 2026-11-26, R6-02 with
+  R6-05; `docs/plans/engineering-review-urgent-fixes.md` §4, ER2). The writer of `sched/{id}/last/{node}` kept its own
+  entry's slot whatever period and phase it was written under, and wrote it under the new declaration: after the
+  documented rollout — stop a schedule, start it again with a longer period — the entry was about 9e8 slots ahead,
+  every reader left it out, and the slot due ran again every check interval, for as long as the node held. The reader
+  and the writer now share one rule (`schedule::parse_last`, `counted`, `recorded`): **the writer never keeps an entry
+  the reader would leave out** — another period or phase, or more than `MAX_AHEAD_SLOTS` ahead of the tick's slot — so
+  the first run under a new declaration records the slot it ran, and an entry already poisoned this way — by the old
+  writer, or by another member writing a far-ahead value to this node's key — heals on the node's next run, its trace
+  saying what it replaced. The same rule fixes **a phase change**, which skipped the new phase's next slot (decision
+  D14b) — for slot numbers: a run's key is `sched/{id}/{slot}`, with no period or phase, so after a phase change a
+  slot number the old phase used is the same key at a deduplicating destination. Under one declaration, within the
+  bound, an entry is still never lowered. The trace says what the write did: when the entry carries a newer stamp
+  and keeps its key under LWW, it says *superseded by a newer stamp; the entry stays uncounted*, not *replacing*
+  (new: `mycelium_core::ops::kv_set_reporting`, `kv_set` with its local-application rung). **Not fixed — a clock
+  since corrected** (the design's second trigger): a node that ran with its clock ahead and comes back corrected gets
+  its entry back with its original stamp, from its store or a peer. Within `max_clock_drift_ms` its clock is carried
+  up to that stamp, its advertisements read as from the future, and the schedule is silent on that node until the
+  clock catches up; past the bound the entry holds its key against the node's writes and the slot runs every check
+  interval until the clock passes the stamp — the general limit in `what-is-proven.md`
+  (`#far-future-stamp-holds-its-key`). No new clock read: the replay corpus's trace is unchanged, and its
+  `decisions.jsonl` was re-recorded for the two revisions alone.
+  The trace of a failed late or gap run said *not retried*, which was not so when no later run of its tick completed:
+  it now says *the runs after it go on; the slot is run again only if no later run of this tick completes* (R6-05, a
+  sentence corrected, not the loop). `sched.run` and `sched.missed` are at revision 2. Upgrade notes:
+  `deprecations.md` §133.
 - **A gateway sends an unanswered cancel-forward again** (unreleased code: I4's cancel-forward; identity-and-lifecycle
   §9 O13, the maintainer's decision of 2026-11-22; found on #824, where behind about 12 000 concurrent mints the
   provider's stop came about 25 s after the cancel in 4 runs of 9). The forward is a best-effort signal on the
@@ -723,6 +749,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`mycelium_core::ops::kv_set_reporting`** (ER2): `kv_set`'s own write path, which `kv_set` now delegates to,
+  also answering its local-application rung — `Some(Applied)`, `Some(Superseded)` when the key held a newer stamp,
+  `Some(Refused)` at the store's entry cap, `None` for a write refused as oversized. No await and no extra draw; it claims no rung above local application.
+  The schedule's writer reads it so its trace never claims a replacement LWW refused.
 - **The control lane, the mechanism** (B1, PR 1 of 2; `docs/design/control-lane.md`; `deprecations.md` §126;
   [feature page](docs/features/signal-mesh.md)). A second connection per peer, beside the data connection, with its own
   writer, its own 64-frame channel and its own reader at the receiver, for the closed set

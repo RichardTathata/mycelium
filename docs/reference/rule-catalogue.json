@@ -1791,7 +1791,7 @@
     },
     {
       "id": "sched.missed",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "mycelium::schedule",
       "responsibilities": [
         "response"
@@ -1801,7 +1801,7 @@
         {
           "source": "the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase)",
           "scope": "the fleet as this node sees it",
-          "freshness": "as gossiped; never lowered; read only after the loop's warm-up"
+          "freshness": "as gossiped; never lowered within one declaration (revision 2: an entry no reader counts is replaced by its writer's next run, unless its stamp is newer); read only after the loop's warm-up"
         },
         {
           "source": "the wall clock through the seam, and the slot it falls in",
@@ -1848,6 +1848,7 @@
         "a_missed_run_is_a_decision_in_the_trace_with_its_reason",
         "run_late_catches_up_at_most_the_cap_and_counts_the_rest",
         "a_failed_late_run_is_traced_and_the_runs_after_it_go_on",
+        "a_failed_late_run_is_run_again_when_nothing_after_it_completes_and_the_trace_says_so",
         "slots_missed_while_no_client_held_are_a_decision_with_its_reason"
       ],
       "trace": "instrumented",
@@ -1855,7 +1856,7 @@
     },
     {
       "id": "sched.run",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "mycelium::schedule",
       "responsibilities": [
         "response"
@@ -1870,7 +1871,7 @@
         {
           "source": "the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase, an entry more than 64 slots ahead of this clock left out)",
           "scope": "the fleet as this node sees it",
-          "freshness": "as gossiped; never lowered"
+          "freshness": "as gossiped; never lowered within one declaration — revision 2: a node's own entry that no reader would count (another period or phase, or more than 64 slots ahead) is replaced by the slot it runs, unless its stamp is newer: LWW keeps it and the run's trace says superseded"
         },
         {
           "source": "the wall clock through the seam, and the slot it falls in",
@@ -1947,7 +1948,14 @@
         "a_client_copying_an_applications_declaration_cannot_take_its_slots",
         "two_principals_schedules_of_one_id_run_independently",
         "a_sole_candidate_does_not_stand_down_for_one_missed_answer",
-        "one_token_through_two_gateways_sharing_an_issuer_is_one_schedule"
+        "one_token_through_two_gateways_sharing_an_issuer_is_one_schedule",
+        "lengthening_a_period_runs_each_slot_once",
+        "a_poisoned_entry_is_replaced_by_the_next_run",
+        "stopping_and_restarting_with_a_longer_period_runs_each_slot_once",
+        "a_phase_change_does_not_skip_a_slot",
+        "a_clock_corrected_within_the_drift_bound_leaves_the_node_silent_until_it_catches_up",
+        "a_replacement_that_loses_to_a_newer_stamp_is_traced_superseded_not_replaced",
+        "a_clients_schedule_over_a_poisoned_entry_is_handed_one_run_per_slot"
       ],
       "trace": {
         "partial": "every run, failure and overrun; a change to not_holder, not_eligible, warming_up, last_ahead, ignored_last_far_ahead, stood_down or declaration_mismatch, once; a tick that changes nothing records nothing"
