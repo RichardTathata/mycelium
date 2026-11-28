@@ -5867,7 +5867,8 @@ filter does not project (it stays a member). When an intent evaporates, a node t
 it was projecting — by `leave_group`, by `DELETE /gateway/govern/group`, or because a peer tombstoned its `grp/`
 entry — kept projecting it (and re-asserted the projection every 60 s), so dispatch reported `Emitted` to a group it
 was not in. Now the watcher drops the projection when it sees the membership gone and does not rejoin the group until
-the node is a member again (a `join_group`, a route, a peer's write) or the filter or the definition goes. This
+the node is a member again (a `join_group`, a route, a peer's write) or the filter or the definition goes, or the node
+restarts (the set is not persisted, so a restart rejoins a group left by hand, as before). This
 includes a group governed fleet-wide by an intent `target`ed at another node, which this node reads as emergent.
 
 At shutdown the watcher writes a departure only for the groups that are emergent for this node at that moment — it

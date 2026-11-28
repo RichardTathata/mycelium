@@ -38,7 +38,9 @@
 //! **A projection never outlives the membership**, emergent groups included: an emergent group
 //! this node is seen to leave while projecting it (`leave_group`, `DELETE /gateway/govern/group`,
 //! a peer's tombstone) stops being projected and is not rejoined (`left`) until the node is a
-//! member again or the filter or the definition goes.
+//! member again or the filter or the definition goes, or the node restarts (the set is not
+//! persisted, so a restart rejoins a group left by hand, as before ER9 — and heals a node a
+//! forged tombstone kept out).
 
 use crate::capability::{CapEntry, Capability, CapFilter, CapabilityGroupDef, WiringStatus};
 use crate::node_id::NodeId;
@@ -258,7 +260,20 @@ fn reconcile_emergent_groups(
         if left.contains(group.as_ref()) { continue; }
         let evaporated = was_governed.contains(group.as_ref()) && !member;
         if !member && joined.contains_key(group.as_ref()) && !evaporated {
-            left.insert(Arc::clone(group)); // seen to leave: stop projecting, do not rejoin
+            // Seen to leave: stop projecting, do not rejoin — unless it is a drain. `governed` was
+            // read at the top of the pass and the membership here, so an intent that arrived in
+            // between, and a governor that drained this node on it, would read as a hand leave and
+            // later lose the evaporation rejoin. The intents are read again for this group before it
+            // goes into `left`, under the pass's one wall reading (an intent that new is fresh by it;
+            // no second read, so a recording holds the reads it held before). Governed now: the
+            // projection is dropped and the next pass treats the group as governed. Not tested: the
+            // window lies between two reads of one pass and no test can place a write inside it
+            // deterministically.
+            if !super::membership_governor::is_governed(
+                ctx, group, now, super::membership_governor::GovernedFor::Node(own),
+            ) {
+                left.insert(Arc::clone(group));
+            }
             continue;
         }
         if !member { to_join.push(Arc::clone(group)); }

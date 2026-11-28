@@ -116,7 +116,6 @@ pub(crate) fn governed_groups(ctx: &Arc<TaskCtx>, now_ms: u64, for_: GovernedFor
 }
 
 /// Whether `group` is governed — [`governed_groups`]'s definition, for one group.
-#[cfg(feature = "gateway")]
 pub(crate) fn is_governed(ctx: &Arc<TaskCtx>, group: &str, now_ms: u64, for_: GovernedFor<'_>) -> bool {
     super::electorate::view(ctx, group).is_some() || fresh_intent_groups(ctx, now_ms, for_).any(|g| g == group)
 }
