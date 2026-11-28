@@ -84,6 +84,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   starts of one namespace whose clocks read within *N*/1024 ms of each other can overlap
   (`what-is-proven.md#fresh-id-space-not-reissued`). Wire, RPC and WAL unchanged. *Behaviour change:* a fresh space's
   ids are large and do not start at 0 (`deprecations.md` §131).
+- **Tuple space: two outputs under one correlation key are both claimable** (engineering review ER7: R11-03, with
+  R11-10 and R11-11). The keyed index held one item per key, so a second `put_keyed` or `complete_keyed` under a live
+  key hid the first — not takeable, its depth never returned (puts refused early), back only after a WAL reopen; a
+  mirror's apply, a requeue and WAL replay overwrote the same way, and a second worker parked on a key evicted the
+  first. Items and workers under one key are now FIFO queues (an expired item re-queued at the back). A hand-off to a
+  parked worker is counted once in `taken`/`take_total`, not twice; `waiters` includes workers parked on
+  `take_by_key`; a timed-out take closes its receiver before its last drain, so an item handed to it in that instant
+  stays queued. `deprecations.md` §134.
 - **A gateway sends an unanswered cancel-forward again** (unreleased code: I4's cancel-forward; identity-and-lifecycle
   §9 O13, the maintainer's decision of 2026-11-22; found on #824, where behind about 12 000 concurrent mints the
   provider's stop came about 25 s after the cancel in 4 runs of 9). The forward is a best-effort signal on the

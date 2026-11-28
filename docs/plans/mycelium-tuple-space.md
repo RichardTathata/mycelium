@@ -643,7 +643,7 @@ Background task on every TupleSpace node: every 10 s, write the following KV key
 ```
 sys/tuple/{node_id}/role                         → "primary" | "secondary" | "candidate"
 sys/tuple/{node_id}/stage/{stage}/depth          → u32  (items waiting in queue)
-sys/tuple/{node_id}/stage/{stage}/waiters        → u32  (workers parked on take)
+sys/tuple/{node_id}/stage/{stage}/waiters        → u32  (workers parked on take or take_by_key)
 sys/tuple/{node_id}/stage/{stage}/inflight       → u32  (taken, not yet acked)
 sys/tuple/{node_id}/stage/{stage}/put_total      → u64  (monotonic put counter)
 sys/tuple/{node_id}/stage/{stage}/take_total     → u64  (monotonic take counter)
@@ -665,6 +665,8 @@ sys/tuple/{node_id}/wal_bytes                    → u64  (WAL file size, 0 if t
   distribution and hide true queueing latency.
 
 Operator interpretation: `hot_total / take_total` ≈ fraction of demand met instantly.
+(`take_total` counts deliveries, once each where an item enters in flight — a redelivery after an
+expired lease counts again — so it is not bounded by `put_total`; ER7, 2026-11-27.)
 `queue_p99_us` rising → workers not keeping up with producers → scale workers or check
 for a slow stage upstream.
 

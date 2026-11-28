@@ -12,7 +12,18 @@ Design: `docs/plans/mycelium-tuple-space.md`. Key facts:
   atomic lane-to-lane move; per-lane depth is the pressure signal; content-style routing is
   encoded in lane names (`stage-b.high`). **Fan-in joins** are expressible via keyed
   exact-match take (M13): `put_keyed`/`take_by_key`/`complete_keyed` — O(1) keyed index +
-  keyed-waiter map, WAL v2 records, gateway + py/ts SDKs. Template matching stays the
+  keyed-waiter map, WAL v2 records, gateway + py/ts SDKs. **A FIFO queue per key, for items and
+  for waiters** (ER7, 2026-11-27; `store.rs` `StageInner`): every keyed insert (put, complete,
+  mirror apply, requeue, WAL replay) pushes, a take pops, an empty entry is removed; a
+  keyed take that times out or is **dropped** (a cancelled task, a gateway client gone) has its
+  registration pruned under the stage lock by the `KeyedWait` drop guard (a cold per-job key
+  leaves nothing). Keyed waiters count in `waiters`. An undone hand-off (a failed send)
+  re-queues at the **front**; order is arrival order except that concurrent undone hand-offs may
+  come back reversed relative to each other (no sequence number, by choice). The per-key order is the live primary's: a
+  requeue is not logged, so replay and `state_chunk` give id order. `take_total` is counted once,
+  where an item enters in flight (`dispatch`/`dispatch_keyed` on a successful send, and the
+  buffered pops after their `Take` is logged) — never by the woken taker; `metrics_snapshot`
+  loads `hot_total` (Acquire, against Release increments) before `take_total`. Template matching stays the
   blackboard's territory.
 - **Roles** (`TupleRole`): `Primary` serves; `Secondary` mirrors (replicate RPCs +
   heartbeat) and promotes when the primary's capability evaporates — the ring *is* the

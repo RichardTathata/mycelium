@@ -39,7 +39,8 @@ per key. (ROADMAP M13; the WAL is the real work.)
 - Per-`StageState`: a keyed index (`key → item_id`) alongside the FIFO, and a **keyed-waiter map**
   (`key → oneshot`). `put` with a key registers it and wakes a parked keyed waiter; `take_by_key`
   does an O(1) lookup, claiming the item (into in-flight) or parking a keyed waiter on miss.
-- Per-lane depth / waiters / in-flight accounting stays intact (keyed waiters count too).
+- Per-lane depth / waiters / in-flight accounting stays intact (keyed waiters count too — built only in
+  ER7, 2026-11-27: until then `take_by_key` parked no count in `waiters`).
 - Public API: `TupleSpace::put_keyed(stage, key, payload)` and `take_by_key(stage, key, timeout)`;
   `complete` gains a keyed variant for the next stage.
 - **Gate G-G1a:** a keyed two-stream join — `take_by_key("po", id)` parks until `put_keyed("po", id, …)`
