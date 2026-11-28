@@ -92,7 +92,7 @@ signed echo component, invoked by discovery, and recover when one goes. CI runs 
   filters (two schema editions) is refused at start, by name, before anything is declared — the node publishes one
   `req/` record per name, so the fleet would see one edition only. `wire-check` still reads such a file. Two installs
   of one `tool/{name}` on the node (two stems, or a stopped stem's late install) no longer withdraw each other's
-  `tools/{name}/{node}` entry ([§TBD-ER10](../guide/deprecations.md)).
+  `tools/{name}/{node}` entry ([§137](../guide/deprecations.md)).
 - **Not built:** the catalogue is the supply chain, so `[hosts].trusted_publishers` is the posture to review; a stem's
   placement is decided at runtime, never by the file; a stem built without `llm` refuses a unit file with a `[[serve]]`.
 - **Evidence:** the ledger row

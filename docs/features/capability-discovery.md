@@ -23,13 +23,13 @@ This feature is turned on in code, on the agent's [`capabilities`](../../src/age
 - [`advertise_capability`](../../src/agent/capability_handle.rs): advertise a [`Capability`](../../src/capability.rs)
   on an interval; dropping the returned handle retracts it with a tombstone — unless another handle on this node
   advertises the same name: the key carries the newest live registration's value, and only the last handle's drop
-  tombstones it ([§TBD-ER10](../guide/deprecations.md)).
+  tombstones it ([§137](../guide/deprecations.md)).
 - [`resolve`](../../src/agent/capability_handle.rs) with a [`CapFilter`](../../src/capability.rs): the providers this
   node sees; [`watch_capabilities`](../../src/agent/capability_handle.rs) streams changes.
 - [`declare_requirement`](../../src/agent/capability_handle.rs): publish an unmet need, which a stem's
   demand-driven provisioning can answer. Two requirements of one name on a node publish one record: it stays, with its
   opacity, until the last of them drops; with different filters it carries the newest one's, and a unit that gives
-  one name two different filters is refused by a stem and by `units/declare` ([§TBD-ER10](../guide/deprecations.md)).
+  one name two different filters is refused by a stem and by `units/declare` ([§137](../guide/deprecations.md)).
 - A unit file's `[[capability]]` declares the same advertisement for `wire-check` and a stem.
 - `test_wsd_capability_authz_routes_around_unauthorized_advertiser`, in [`src/lib_tests.rs`](../../src/lib_tests.rs):
   a second node resolves both providers' advertisements across the mesh before a policy narrows them.

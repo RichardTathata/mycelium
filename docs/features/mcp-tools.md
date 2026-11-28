@@ -29,7 +29,7 @@ This feature is turned on in code; `/mcp` needs `gateway` and an `http_port`.
 - `/mcp` under `mcp:invoke` — a scope checked only in a build with `compliance` (the published node has it); without it
   any valid bearer reaches `/mcp` — with an [action evaluator](action-authorisation.md) to decide which tools a caller
   may run.
-- **Replacing a tool** ([§TBD-ER10](../guide/deprecations.md)): register the new version under the same name before
+- **Replacing a tool** ([§137](../guide/deprecations.md)): register the new version under the same name before
   dropping the old handle. On one node the newest registration's schema is the one `tools/{name}/{node}` carries and
   its handler the only one that serves the name; dropping the old handle writes nothing, dropping the newest writes the
   older one's schema back, and only the last tombstones the key. A bridged server's tools take part in the same way.

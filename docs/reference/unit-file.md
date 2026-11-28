@@ -105,7 +105,7 @@ name = "intake"
   order     = "descending"
 ```
 
-**One filter per name on a node** (ER10, R21; [deprecations §TBD-ER10](../guide/deprecations.md)). A node publishes one
+**One filter per name on a node** (ER10, R21; [deprecations §137](../guide/deprecations.md)). A node publishes one
 requirement record per capability name (`req/{node}/{ns}/{name}`), which carries one filter. A unit with two
 `[[requirement]]`s of one `ns`/`name` and **different** filters — two schema editions, say — is refused where it would be
 declared on a node: a stem refuses to start, and `POST /gateway/units/declare` answers **422** `requirement declared

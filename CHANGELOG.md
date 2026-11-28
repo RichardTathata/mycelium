@@ -126,7 +126,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prompt-skill backends take part. The opacity watcher keeps tracking a live requirement when another of its name
   drops. A unit with two `[[requirement]]`s of one name and different filters is refused by name where it would be
   declared — a stem's start and `POST /gateway/units/declare` (422) — while `wire-check` still reads it (R21).
-  Node-local; Layer I unchanged. `CoreCtx` gains `soft_state_holders` ([§TBD-ER10](docs/guide/deprecations.md)).
+  Node-local; Layer I unchanged. `CoreCtx` gains `soft_state_holders` ([§137](docs/guide/deprecations.md)).
 - **One capability name runs one build** (ER4, R12-01; `docs/plans/engineering-review-urgent-fixes.md` §6). The guard
   against two builds of one `{ns}/{name}` lasted one provisioning round, and an install advertises only once it
   resolves, so while a first build installed the next round (500 ms later on a stem) started a second catalogue line

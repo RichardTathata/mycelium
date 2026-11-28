@@ -2,8 +2,8 @@
 #
 # A statement of shapes for `wire-check`, not a unit to declare on one node: it requires `compute/gpu` under three
 # filters, and a node publishes one requirement record per name (`req/{node}/compute/gpu`), so a stem refuses to start
-# with it and `POST /gateway/units/declare` answers 422 (ER10, R21; docs/guide/deprecations.md §TBD-ER10). The example
-# binary declares the three shapes in code, where the record carries the newest one's filter.
+# with it and `POST /gateway/units/declare` answers 422 (ER10, R21; docs/guide/deprecations.md §137). The example
+# binary only matches the three shapes against offers (`CapFilter::matches`); it declares none of them.
 principal = "agent-b"
 
 [[capability]]
