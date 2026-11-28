@@ -113,6 +113,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   parked worker is counted once in `taken`/`take_total`, not twice; `waiters` includes workers parked on
   `take_by_key`; a timed-out take closes its receiver before its last drain, so an item handed to it in that instant
   stays queued. `deprecations.md` §134.
+- **Two registrations of one name on a node no longer withdraw each other** (ER10; R6-06, R10-03, R21, R22; decision
+  D3). Every node-local registration of a name wrote one key and each handle's task tombstoned it when it ended,
+  whoever else still held it: the first of two `require_model` handles to drop hid the model's demand until the other's
+  refresh; a replacement prompt skill lost its advertisement — and its backend, when the two shared one backend object —
+  when the old handle dropped; retiring an MCP tool after installing a replacement left the name undiscoverable for
+  good (`tools/` is written once; ER5-F1's stem path), while both tools' loops answered every call. Each node now keeps
+  the live registrations of each such key, newest last (`mycelium_core::kv_persist::Registrations`, `HeldKey`;
+  lock-order row 83): the key carries the newest's value, a handle that drops writes nothing under a newer one, writes
+  the older one's value back at once when it held the key, and tombstones only as the last. Every
+  `run_kv_persist_task` caller, MCP tools (native and bridged; only the newest registration serves the name) and
+  prompt-skill backends take part. The opacity watcher keeps tracking a live requirement when another of its name
+  drops. A unit with two `[[requirement]]`s of one name and different filters is refused by name where it would be
+  declared — a stem's start and `POST /gateway/units/declare` (422) — while `wire-check` still reads it (R21).
+  Node-local; Layer I unchanged. `CoreCtx` gains `soft_state_holders` ([§137](docs/guide/deprecations.md)).
 - **One capability name runs one build** (ER4, R12-01; `docs/plans/engineering-review-urgent-fixes.md` §6). The guard
   against two builds of one `{ns}/{name}` lasted one provisioning round, and an install advertises only once it
   resolves, so while a first build installed the next round (500 ms later on a stem) started a second catalogue line

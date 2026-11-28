@@ -241,6 +241,10 @@ pub struct CoreCtx {
     /// The gate every soft-state re-assert passes through; shutdown closes it before sweeping the
     /// node's own soft state, so no tick re-writes a swept key (#627's review).
     pub soft_state_gate: Arc<crate::kv_persist::SoftStateGate>,
+    /// The live registrations of each soft-state key this node writes for a handle, newest last (ER10): the key
+    /// carries the newest one's value, and a withdrawn registration writes only what it leaves — see
+    /// [`Registrations`](crate::kv_persist::Registrations) and [`HeldKey`](crate::kv_persist::HeldKey).
+    pub soft_state_holders: Arc<crate::kv_persist::Registrations<Option<bytes::Bytes>>>,
 
     // ── Lifecycle ────────────────────────────────────────────────────────────────
     /// Shutdown broadcast — sending `true` cancels all background tasks.

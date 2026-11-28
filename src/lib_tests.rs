@@ -182,6 +182,7 @@ fn spawn_handler_with(
         reply_interceptor: None,
         soft_state_advertised: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         soft_state_gate:       Arc::default(),
+        soft_state_holders:    Arc::default(),
         shutdown_tx: Arc::new(shutdown_tx_inner),
         task_handles: Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new())),
         hot: Arc::new(mycelium_core::context::HotConfig::from_config(&opts.config)),
@@ -350,6 +351,8 @@ fn spawn_handler_with(
         tuning_governor: Arc::new(crate::agent::TuningGovernor::default()),
         #[cfg(feature = "llm")]
         llm_skills: std::sync::Arc::new(papaya::HashMap::new()),
+        #[cfg(feature = "llm")]
+        llm_skill_holders: Arc::default(),
         #[cfg(feature = "llm")]
         llm_dispatch_spawned: std::sync::atomic::AtomicBool::new(false),
         mailbox_in_flight: Default::default(),
@@ -4849,6 +4852,7 @@ async fn test_subscribe_notified_via_gossip() {
             reply_interceptor: None,
             soft_state_advertised: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             soft_state_gate:       Arc::default(),
+            soft_state_holders:    Arc::default(),
             shutdown_tx: Arc::new(shutdown_tx_inner2),
             task_handles: Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new())),
             config: Arc::new(crate::config::GossipConfig::default()),
@@ -5017,6 +5021,8 @@ async fn test_subscribe_notified_via_gossip() {
             tuning_governor: Arc::new(crate::agent::TuningGovernor::default()),
             #[cfg(feature = "llm")]
             llm_skills: std::sync::Arc::new(papaya::HashMap::new()),
+            #[cfg(feature = "llm")]
+            llm_skill_holders: Arc::default(),
             #[cfg(feature = "llm")]
             llm_dispatch_spawned: std::sync::atomic::AtomicBool::new(false),
             mailbox_in_flight: Default::default(),

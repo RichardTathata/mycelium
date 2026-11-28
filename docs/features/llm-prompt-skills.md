@@ -23,6 +23,11 @@ is your own code.
 
 - [`register_prompt_skill`](../../src/agent/llm_handle.rs) with a `PromptTemplate` and a backend: the template is
   written, the `llm.invoke` receiver registered, and the capability advertised last; dropping the handle retracts it.
+  Registered again under the same name while the first handle lives — a replacement, with the same backend object or
+  a new one — the newest registration's backend serves; dropping the older handle changes nothing, dropping the
+  newest restores the older one's backend and advertisement, and only the last removes them
+  ([§137](../guide/deprecations.md)). The template is cluster configuration, not a registration's: the newest
+  write stays.
 - [`call_prompt_skill`](../../src/agent/llm_handle.rs) from any node; over HTTP, `POST /gateway/llm/call` under
   `llm:invoke` — a scope checked only in a build with `compliance` (the published node has it); without it any valid
   bearer reaches the route.

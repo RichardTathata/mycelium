@@ -21,11 +21,15 @@ reads its trail ([opacity](opacity.md)).
 This feature is turned on in code, on the agent's [`capabilities`](../../src/agent/mod.rs) handle.
 
 - [`advertise_capability`](../../src/agent/capability_handle.rs): advertise a [`Capability`](../../src/capability.rs)
-  on an interval; dropping the returned handle retracts it with a tombstone.
+  on an interval; dropping the returned handle retracts it with a tombstone — unless another handle on this node
+  advertises the same name: the key carries the newest live registration's value, and only the last handle's drop
+  tombstones it ([§137](../guide/deprecations.md)).
 - [`resolve`](../../src/agent/capability_handle.rs) with a [`CapFilter`](../../src/capability.rs): the providers this
   node sees; [`watch_capabilities`](../../src/agent/capability_handle.rs) streams changes.
 - [`declare_requirement`](../../src/agent/capability_handle.rs): publish an unmet need, which a stem's
-  demand-driven provisioning can answer.
+  demand-driven provisioning can answer. Two requirements of one name on a node publish one record: it stays, with its
+  opacity, until the last of them drops; with different filters it carries the newest one's, and a unit that gives
+  one name two different filters is refused by a stem and by `units/declare` ([§137](../guide/deprecations.md)).
 - A unit file's `[[capability]]` declares the same advertisement for `wire-check` and a stem.
 - `test_wsd_capability_authz_routes_around_unauthorized_advertiser`, in [`src/lib_tests.rs`](../../src/lib_tests.rs):
   a second node resolves both providers' advertisements across the mesh before a policy narrows them.
@@ -44,7 +48,16 @@ CI compiles it and checks its declaration, and does not run it. That a retired a
   skips an advertisement older than three refresh intervals (revision 3, rule
   [`kv.expiry`](../reference/rule-catalogue.md#kvexpiry)), so a crashed provider is not resolved, routed to, listed
   on the A2A card or counted eligible.
-- **Held:** a capability name is one key segment at every door.
+- **Held:** a capability name is one key segment at every door. **One name, several handles on one node** (ER10): a
+  handle withdraws only its own registration — nothing while a newer one is live, the older one's value at once when
+  it held the key, a tombstone only as the last (`registration_tests`, in
+  [`src/agent/registration_tests.rs`](../../src/agent/registration_tests.rs)). Node-local; another member's write to
+  the key is not refused (detection, not prevention). Two advertisements of one name with different values are not
+  refused either: the key carries the newest. So a gateway client with `cap:write` that advertises a name this node
+  already advertises in process — or a librarian and a stem's cache on one node — replaces the node's own value until
+  its handle drops, and the node's value returns at once. Each is the newer promise of the same node; what a caller
+  may run is still decided where the work runs ([provider enforcement](provider-enforcement.md)). Across nodes
+  nothing changes: `cap-group/{group}` is not node-scoped, so two nodes defining one group still withdraw each other.
 - **Not built:** an advertisement is a claim, not proof the provider serves it or is authorised to — authority is
   checked where the work runs ([provider enforcement](provider-enforcement.md)); resolution is per node and can
   differ between nodes while gossip settles, and a crashed provider stays resolvable for up to three refresh

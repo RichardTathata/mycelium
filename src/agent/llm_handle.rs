@@ -55,9 +55,13 @@ impl LlmHandle {
             .map_err(|e| prompt::PromptSkillError::LlmError(e.to_string()))?;
         kv_set(&self.ctx, Arc::from(kv_key.as_str()), Bytes::from(bytes));
 
-        // 3. Register backend in the shared registry.
+        // 3. Register backend in the shared registry, as this skill's newest registration (ER10): the registry
+        // holds the newest registration's backend, set under the registrations' lock so it follows their order.
         let skill_id = format!("{}/{}", ns, name);
-        self.ctx.llm_skills.pin().insert(skill_id.clone(), Arc::clone(&backend));
+        let skill_key: Arc<str> = Arc::from(skill_id.as_str());
+        let (reg_id, ()) = self.ctx.llm_skill_holders.register(&skill_key, Arc::clone(&backend), |b| {
+            self.ctx.llm_skills.pin().insert(skill_id.clone(), Arc::clone(b));
+        });
 
         // 4. Spawn the dispatch loop exactly once. An `is_empty()` check
         // before the insert was a check-then-act: two first registrations
@@ -75,20 +79,21 @@ impl LlmHandle {
         let cap_handle = CapabilitiesHandle { ctx: Arc::clone(&self.ctx) }
             .advertise_capability(Capability::new(ns, name), Duration::from_secs(30));
 
-        // 5. Create cancellation channel for this skill's registry entry.
-        // The removal is conditional on Arc identity: if the skill was
-        // re-registered under the same id while this handle was alive,
-        // dropping the OLD handle must not delete the NEW backend.
+        // 5. Create cancellation channel for this skill's registry entry. The removal is this registration's
+        // withdrawal (ER10), not a comparison of backend objects: until ER10 it removed the entry when the registry
+        // held the same `Arc` it registered, so a replacement that reused the backend object lost its backend when
+        // the OLD handle dropped (R10-03), and dropping the NEW handle removed the backend an older live handle
+        // still advertised. Now: a newer registration holds it — nothing; this one held it — the older one's
+        // backend back; the last — removed.
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
-        let registry   = Arc::clone(&self.ctx.llm_skills);
-        let skill_id2  = skill_id.clone();
-        let registered = Arc::clone(&backend);
+        let registry = Arc::clone(&self.ctx.llm_skills);
+        let holders  = Arc::clone(&self.ctx.llm_skill_holders);
         tokio::spawn(async move {
             let _ = cancel_rx.await;
-            registry.pin().compute(skill_id2, |existing| match existing {
-                Some((_, current)) if Arc::ptr_eq(current, &registered) =>
-                    papaya::Operation::Remove,
-                _ => papaya::Operation::Abort(()),
+            holders.withdraw(&skill_key, reg_id, |w| match w {
+                mycelium_core::kv_persist::Withdrawal::NotHolder => {}
+                mycelium_core::kv_persist::Withdrawal::Successor(b) => { registry.pin().insert(skill_id, Arc::clone(b)); }
+                mycelium_core::kv_persist::Withdrawal::Last => { registry.pin().remove(&skill_id); }
             });
         });
 

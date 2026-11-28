@@ -87,6 +87,7 @@ the notice.
 | 134 | code or dashboards that expect a second `put_keyed` / `complete_keyed` under one key to replace the first, `taken <= admitted`, or `waiters` to exclude `take_by_key` workers | unreleased (engineering review ER7) | expect a FIFO queue per key; read `taken` as deliveries (redeliveries included); `waiters` now counts keyed waiters | **No** — a behaviour change only ([§134](#134-tuple-space-items-and-workers-under-one-correlation-key-queue-in-arrival-order-taken-counts-each-delivery-once-keyed-workers-count-in-waiters-unreleased-engineering-review-er7--r11-03-r11-10-r11-11)) |
 | 135 | a node, or code driving `Provisioner::provision_round`, that ran two builds of one capability name side by side (two catalogue lines for one `{ns}/{name}`, each a different artifact); a decision-trace reader matching `already_started_this_round` | unreleased (engineering review ER4, R12-01) | one line per name, or expect the second line to wait — it installs once the first build's entry leaves the map (a withdraw, a shed, a probe failure, a failed install, a stop); read `capability_already_held` | **No** — behaviour and trace reasons ([§135](#135-one-capability-name-runs-one-build-per-provisioner-a-second-catalogue-line-for-the-name-waits-unreleased-er4-r12-01)) |
 | 136 | code that calls `BoardStore::discard` or `post_with_id` directly and relies on an absent id being forgotten, on a re-post of a held id being logged again, or on a post of an acked id being applied | unreleased (engineering review ER6) | read `remembers_acked` / `refused_acked`; a board that must take an id again needs a new id, which is the rule | **No** — a behaviour change only ([§136](#136-a-blackboard-remembers-the-ids-it-acked-and-a-mirror-acts-on-them-unreleased-engineering-review-er6-r11-01-r11-04)) |
+| 137 | code that registered one name twice on one node — two `declare_requirement`s of one filter, a replacement `advertise_capability`, `register_prompt_skill` or `register_mcp_tool` before dropping the old handle — and relied on the first drop withdrawing the name; a stem or `units/declare` given a unit with two `[[requirement]]`s of one name and different filters; a `CoreCtx` literal | unreleased (engineering review ER10; R6-06, R10-03, R21, R22) | drop every handle of the name to withdraw it; one filter per name in a unit file; add `soft_state_holders` to the literal; build `run_kv_persist_task`'s future where you spawn it | **No** — behaviour, and a refusal by name at the declaring doors; **yes** for the literal ([§137](#137-a-handle-withdraws-only-its-own-registration-of-a-name-the-last-one-tombstones-it-unreleased-er10)) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -6104,3 +6105,68 @@ and the new line deferred `capability_already_held` until the old build goes. A 
   `two_names_from_two_artifacts_both_install`, `a_start_after_shutdown_reserves_nothing`,
   `a_floor_tries_another_digest_when_its_cheapest_is_hosted_as_another_capability`,
   `the_demand_pass_names_an_artifact_hosted_as_another_capability` (`provisioner.rs`).
+
+## 137. A handle withdraws only its own registration of a name; the last one tombstones it (unreleased, ER10)
+
+*Numbered by the release: rows of `docs/plans/engineering-review-urgent-fixes.md` land in parallel.*
+
+**Before.** Every node-local registration of a name wrote one KV key — `cap/{node}/{ns}/{name}`,
+`req/{node}/{ns}/{name}`, `svc/{kind}/{node}`, `cap-group/{group}`, `tools/{name}/{node}` — and each handle's task
+tombstoned that key when it ended, whoever else on the node still held it. So the first of two `require_model`
+handles to drop made the model's demand read zero until the other's next refresh (R6-06); dropping a prompt skill's
+old handle after registering a replacement withdrew the replacement's advertisement, and removed its backend when the
+two shared one backend object (R10-03); retiring an MCP tool after installing a replacement under its name left the
+name undiscoverable for good, since `tools/` is written once (R22) — the path ER5-F1 reaches at a stem restart —
+while both tools' loops answered every call. Two requirements of one name also shared one opacity key, and dropping
+the first stopped the other's opacity being tracked. A unit file could require one capability under two filters
+(two schema editions); the node published one record for the name, so the fleet saw one edition and a gap in the
+other went unreported (R21).
+
+**Now.**
+- Each node keeps the live registrations of each such key, newest last
+  (`mycelium_core::kv_persist::Registrations`, `HeldKey`; lock-order row 83). The key carries the **newest**
+  registration's value; an older one stands by and writes nothing. When a handle drops: under a newer registration,
+  nothing is written; when it held the key and an older one remains, that one's value is written at once; only the
+  last tombstones. Registrations are ordered as their handles were made (`run_kv_persist_task` registers when it is
+  called, not when its task first runs), and a registration whose task never ran withdraws on drop.
+- Every `run_kv_persist_task` caller takes part: `advertise_capability`, `declare_requirement`,
+  `define_capability_group`, `advertise_persistent`, the gateway's client advertisement. So do MCP tools, native and
+  bridged: only the newest registration's loop serves the name.
+- A prompt skill's backend follows its registrations the same way, whether or not they share a backend object; the
+  `Arc::ptr_eq` removal is gone. The template is cluster configuration and is unchanged by any drop.
+- The opacity watcher drops only the cancelled registrations of a requirement's opacity key and keeps tracking a live
+  one of the same name.
+- A unit with two `[[requirement]]`s of one `ns/name` and different filters is refused where it would be declared on a
+  node — `Stem::start` (a `StemError`) and `POST /gateway/units/declare` (422, `requirement declared twice`) —
+  naming both (`requirement [i] ns/name is declared at [j] with a different filter …`;
+  `NodeCapabilityConfig::requirement_filters_conflict`). The loader still loads it: `wire-check` reads such a file
+  as shapes and checks each filter. The same filter twice is one requirement.
+
+**What changed for an adopter of the API.** No KV key, value or wire change. `CoreCtx` gains a field
+(`soft_state_holders`). `Registrations`, `HeldKey` and `Withdrawal` are new public items of
+`mycelium_core::kv_persist`. **`run_kv_persist_task` is now a plain `fn` that registers when it is called** and
+returns the future: code that builds the future and spawns it later has, from the call on, a registration that
+holds the key (an older writer of the key stops refreshing it) — build it where you spawn it.
+
+**What did not change.** Node-local and above Layer I: `apply_and_notify` accepts what it accepted, and another
+member's write to the key is neither refused nor looked at (detection, not prevention). **Across nodes nothing
+changes**: `cap-group/{group}` is not node-scoped, so two nodes defining one group still withdraw each other's
+definition. Two different filters for one name declared in code still publish one record — the newest's — and the
+requirement's opacity now follows that same filter (review round 1). Two `[[capability]]`s or two `[[group]]`s of one
+name with different values are not refused: the key now steadily carries the newest one's value, where before the
+two refreshers alternated. A gateway client with `cap:write` that advertises a name the node already advertises in
+process (or a librarian and a stem's cache on one node) now replaces the node's own value until the client's handle
+drops — newest wins; authority is still checked where the work runs. A call that arrives at the instant a replacement is registered or dropped may be served by the
+outgoing registration, or by neither. `tools/` keys are still written once and not refreshed.
+
+***Check:*** a node that runs two workflows needing one model keeps its demand visible until the last releases it;
+a replacement prompt skill or MCP tool stays discoverable and callable after its predecessor's handle drops; a stem
+given a unit with two editions of one requirement refuses to start, with the name in the message.
+- **Code:** `mycelium-core/src/kv_persist.rs` (`Registrations`, `HeldKey`, `run_kv_persist_task`),
+  `mycelium-core/src/context.rs` (`soft_state_holders`), `src/agent/mcp_handle.rs`, `src/agent/mcp.rs`,
+  `src/agent/llm_handle.rs`, `src/agent/capability_ops.rs` (the opacity watcher), `src/capability_config.rs`
+  (`requirement_filters_conflict`), `mycelium-wasm-host/src/stem.rs`, `src/agent/http/caps.rs`. Tests:
+  `src/agent/registration_tests.rs`; `two_editions_of_one_requirement_are_named_for_the_declaring_doors`
+  (`capability_config.rs`); `two_editions_of_one_requirement_are_refused_by_a_stem` (`stem.rs`);
+  `a_second_install_of_a_tool_survives_the_first_ones_retirement` (`mycelium-wasm-host/src/runtime.rs`);
+  `the_newest_holds_and_only_the_last_withdraws_the_key`, `keys_are_independent` (`kv_persist.rs`).

@@ -173,6 +173,8 @@ pub(crate) mod confinement;
 // schema_handle moved to mycelium-core (v2 M3); the GossipAgent-driven tests stay here.
 #[cfg(test)]
 mod schema_handle_tests;
+#[cfg(test)]
+mod registration_tests;
 #[cfg(feature = "a2a")]
 pub(crate) mod a2a;
 #[cfg(feature = "llm")]
@@ -940,6 +942,11 @@ pub(crate) struct TaskCtx {
     /// invocation; only the backend reference is cached here.
     #[cfg(feature = "llm")]
     pub(crate) llm_skills: llm::LlmSkillRegistry,
+    /// The live registrations of each prompt skill's backend on this node, newest last (ER10): `llm_skills` holds
+    /// the newest one's backend, and dropping a handle restores the older one's — so a handle withdraws only the
+    /// registration it made, whether or not the two share one backend object.
+    #[cfg(feature = "llm")]
+    pub(crate) llm_skill_holders: Arc<mycelium_core::kv_persist::Registrations<Arc<dyn llm::LlmBackend>>>,
     /// First-registration gate for the `llm.invoke` dispatch loop. `swap(true)`
     /// so exactly one loop spawns even when two `register_prompt_skill` calls
     /// race (a `was_empty` check-then-act could spawn two loops, each receiving
@@ -1762,6 +1769,7 @@ impl GossipAgent {
             }),
             soft_state_advertised: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             soft_state_gate:       Arc::default(),
+            soft_state_holders:    Arc::default(),
             shutdown_tx:         Arc::clone(&shutdown_tx_arc),
             task_handles:        Arc::clone(&task_handles_arc),
         });
@@ -1935,6 +1943,8 @@ impl GossipAgent {
             tuning_governor:     Arc::new(tuning_governor::TuningGovernor::default()),
             #[cfg(feature = "llm")]
             llm_skills: std::sync::Arc::new(papaya::HashMap::new()),
+            #[cfg(feature = "llm")]
+            llm_skill_holders: Arc::default(),
             #[cfg(feature = "llm")]
             llm_dispatch_spawned: std::sync::atomic::AtomicBool::new(false),
             mailbox_in_flight: Default::default(),

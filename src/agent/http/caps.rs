@@ -255,6 +255,10 @@ pub(super) async fn gw_units_declare(
     if let Some((c, problem)) = units.capabilities.iter().find_map(|c| crate::capability::reserved_capability_namespace(&c.ns).map(|p| (c, p))) {
         return refuse_reserved(&c.ns, &c.name, problem);
     }
+    // ER10 (R21): a node publishes one requirement record per name, so two filters for one name are refused by name.
+    if let Some(why) = units.requirement_filters_conflict() {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": "requirement declared twice", "detail": why}))).into_response();
+    }
     // Convert everything before declaring anything: a refusal leaves nothing half-declared.
     let filters = match units.requirements.iter().map(|r| r.to_filter()).collect::<Result<Vec<_>, _>>() {
         Ok(f) => f,

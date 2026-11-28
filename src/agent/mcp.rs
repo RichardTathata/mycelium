@@ -9,11 +9,9 @@
 //! tools into the Mycelium mesh. Discovered tools are written to KV under the
 //! same `tools/` namespace and calls are proxied outbound to the remote server.
 
-use crate::framing::{dispatch_gossip_send, make_gossip_update, ForwardHint};
 use crate::signal::Signal;
 use super::rpc::{RpcRequest, rpc_respond_ctx};
 use super::gateway_caller::{self, RequestPrincipal};
-use crate::store::apply_and_notify;
 use bytes::Bytes;
 use serde_json::json;
 use std::sync::Arc;
@@ -24,8 +22,10 @@ use super::TaskCtx;
 
 /// Handle returned by [`McpHandle::register_mcp_tool`].
 ///
-/// Dropping this handle tombstones the tool's KV entry (`tools/{name}/{node_id}`)
-/// and stops the handler task. While the handle is live the tool is discoverable
+/// Dropping this handle withdraws this registration of the tool's KV entry
+/// (`tools/{name}/{node_id}`) and stops the handler task. Of two registrations of one name on this node, the
+/// newest's schema is the one the key carries and its handler the one that serves; dropping it writes the older
+/// one's schema back, dropping the older writes nothing, and the last tombstones the key (ER10). While the handle is live the tool is discoverable
 /// via `scan_prefix("tools/")` and callable through the signal mesh or the
 /// HTTP `/mcp` endpoint.
 #[must_use = "dropping McpToolHandle immediately retracts the tool"]
@@ -103,7 +103,7 @@ pub(super) async fn run_mcp_tool_task<F, Fut>(
     ctx:             Arc<TaskCtx>,
     mut cancel_rx:   oneshot::Receiver<()>,
     mut shutdown_rx: watch::Receiver<bool>,
-    kv_key:          Arc<str>,
+    held:            mycelium_core::kv_persist::HeldKey,
     tool_name:       Arc<str>,
     mut rx:          mpsc::Receiver<Signal>,
     handler:         F,
@@ -158,7 +158,9 @@ where
         };
 
         let req_name = rpc_req["params"]["name"].as_str().unwrap_or("");
-        if req_name != tool_name.as_ref() {
+        // Only the newest registration of the name on this node serves it (ER10): two loops on `mcp.invoke` that
+        // both answered gave the caller whichever reply came first, from a tool the key no longer advertised.
+        if req_name != tool_name.as_ref() || !held.holds() {
             continue;
         }
 
@@ -210,20 +212,10 @@ where
         refuse_mcp_call(&ctx, &tool_name, &req, &rpc_req, &super::provider_enforcement::withdrawn());
     }
 
-    // Tombstone the KV entry whether we exited via cancel or shutdown.
-    let tombstone = make_gossip_update(
-        &ctx.node_id, ctx.default_ttl, kv_key, Bytes::new(), true, &ctx.hlc,
-    );
-    // Signed before the local apply, as `kv_persist`'s tombstone is (#611): this runs at shutdown.
-    let msg = crate::framing::local_kv_wire_msg(&ctx, tombstone.clone());
-    apply_and_notify(&ctx.kv_state, &tombstone);
-    dispatch_gossip_send(
-        &ctx.gossip_txs,
-        msg,
-        ctx.node_id.id_hash(),
-        ForwardHint::All,
-    )
-    .await;
+    // Withdraw this registration whether we exited via cancel or shutdown (ER10): nothing while a newer registration
+    // of the name holds the key, the older one's schema when this one held it, a tombstone when it was the last —
+    // signed before its apply, as `kv_persist`'s is (#611).
+    held.withdraw().await;
 }
 
 /// Answer a call the provider check refused.
@@ -437,7 +429,7 @@ pub(super) async fn run_mcp_client_task(
     ctx:             Arc<TaskCtx>,
     mut cancel_rx:   oneshot::Receiver<()>,
     mut shutdown_rx: watch::Receiver<bool>,
-    kv_keys:         Vec<Arc<str>>,
+    held:            Vec<mycelium_core::kv_persist::HeldKey>,
     tool_names:      Vec<Arc<str>>,
     mut rx:          mpsc::Receiver<Signal>,
     server_url:      String,
@@ -489,7 +481,8 @@ pub(super) async fn run_mcp_client_task(
         };
 
         let req_name = rpc_req["params"]["name"].as_str().unwrap_or("");
-        if !tool_names.iter().any(|n| n.as_ref() == req_name) {
+        // A bridged name is served here only while this bridge's registration of it is the newest (ER10).
+        if !tool_names.iter().zip(&held).any(|(n, h)| n.as_ref() == req_name && h.holds()) {
             continue;
         }
 
@@ -535,20 +528,9 @@ pub(super) async fn run_mcp_client_task(
         refuse_bridged(&ctx, &req, &rpc_req, &super::provider_enforcement::withdrawn());
     }
 
-    // Tombstone all KV entries for bridged tools.
-    for kv_key in kv_keys {
-        let tombstone = make_gossip_update(
-            &ctx.node_id, ctx.default_ttl, kv_key, Bytes::new(), true, &ctx.hlc,
-        );
-        let msg = crate::framing::local_kv_wire_msg(&ctx, tombstone.clone());
-        apply_and_notify(&ctx.kv_state, &tombstone);
-        dispatch_gossip_send(
-            &ctx.gossip_txs,
-            msg,
-            ctx.node_id.id_hash(),
-            ForwardHint::All,
-        )
-        .await;
+    // Withdraw every bridged tool's registration (ER10): each writes only what it leaves.
+    for h in held {
+        h.withdraw().await;
     }
 }
 

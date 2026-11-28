@@ -1185,6 +1185,62 @@ mod tests {
         agent.shutdown().await;
     }
 
+    /// **ER5-F1's mechanism, at the runtime (ER10):** two installs of one `tool/{name}` on one node — a new stem's
+    /// build and a stopped stem's install that finished late — each register `tools/{name}/{node}`. Retiring the
+    /// first must leave the other's tool discoverable and callable; until ER10 its `McpToolHandle` drop tombstoned
+    /// the key for both, and `tools/` is written once, so the live tool stayed undiscoverable. The last retirement
+    /// removes it. Seen failing first: "the first install's retirement withdrew the live install's tool".
+    #[cfg(feature = "gateway")]
+    #[tokio::test]
+    async fn a_second_install_of_a_tool_survives_the_first_ones_retirement() {
+        const ECHO_COMPONENT: &[u8] = include_bytes!("../tests/fixtures/echo_component.wasm");
+        let mut agent = None;
+        for _ in 0..16 {
+            let port = mycelium::test_util::alloc_port();
+            let id = mycelium::NodeId::new("127.0.0.1", port).unwrap();
+            let a = Arc::new(GossipAgent::new(id, {
+                let mut cfg = mycelium::GossipConfig::default();
+                cfg.bind_port = port;
+                cfg
+            }));
+            if a.start().await.is_ok() {
+                agent = Some(a);
+                break;
+            }
+        }
+        let agent = agent.expect("a gossip port");
+        let host = Arc::new(WasmHost::new().expect("engine"));
+        let runtime = WasmComponentRuntime::new(Arc::clone(&host));
+        let mut source = crate::InMemorySource::new();
+        let id = source.insert(ECHO_COMPONENT.to_vec());
+        let source: Arc<dyn ArtifactSource + Send + Sync> = Arc::new(source);
+        let entry = InstallableEntry::new(Capability::new("tool", "echo"), id);
+        let ctx = |token| RuntimeCtx { agent: Arc::clone(&agent), trace: None, install_token: token, shadow: false };
+        let first = runtime.install(entry.clone(), Arc::clone(&source), ctx(1), Arc::new(|_, _| {})).await.expect("first install");
+        let second = runtime.install(entry, Arc::clone(&source), ctx(2), Arc::new(|_, _| {})).await.expect("second install");
+        let key = format!("tools/echo/{}", agent.node_id());
+        assert!(agent.kv().get(&key).is_some(), "the tool is registered");
+        first.retire();
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert!(agent.kv().get(&key).is_some(), "the first install's retirement withdrew the live install's tool");
+        let call = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"kg": 5000.0}},
+        });
+        let reply = agent.service()
+            .rpc_call(agent.node_id().clone(), mycelium::signal_kind::MCP_INVOKE, call.to_string().into_bytes(), std::time::Duration::from_secs(10))
+            .await.expect("the live install answers");
+        assert!(String::from_utf8_lossy(&reply).contains("5000"), "the live install served the call");
+        second.retire();
+        let mut gone = false;
+        for _ in 0..200 {
+            if agent.kv().get(&key).is_none() { gone = true; break; }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(gone, "the last retirement removes the tool");
+        agent.shutdown().await;
+    }
+
     #[tokio::test]
     async fn blob_install_streams_places_activates_probes_and_uninstalls() {
         let lib_dir = scratch_dir("lib");

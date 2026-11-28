@@ -7,7 +7,6 @@ use bytes::Bytes;
 use tokio::sync::oneshot;
 
 use super::TaskCtx;
-use super::helpers::kv_set;
 use super::mcp::{McpToolHandle, run_mcp_tool_task};
 #[cfg(feature = "gateway")]
 use {
@@ -163,10 +162,14 @@ impl McpHandle {
         // The marker first: a gateway must never see this tool before it can see that this node enforces the caller
         // context (#794's review, K2).
         super::gateway_caller::publish_caller_context_marker(&self.ctx);
-        kv_set(&self.ctx, Arc::clone(&kv_key), Bytes::from(schema.to_string().into_bytes()));
+        // One registration of the name on this node (ER10): the key carries the newest registration's schema, only
+        // the newest one's loop serves the name, and dropping this handle withdraws only what this one promised.
+        let held = mycelium_core::kv_persist::HeldKey::register_written(
+            &self.ctx.core, kv_key, Bytes::from(schema.to_string().into_bytes()),
+        );
 
         self.ctx.spawn_task(run_mcp_tool_task(
-            ctx, cancel_rx, shutdown_rx, kv_key, name, rx, handler, stops,
+            ctx, cancel_rx, shutdown_rx, held, name, rx, handler, stops,
         ));
         McpToolHandle { _cancel: cancel_tx }
     }
@@ -244,7 +247,7 @@ impl McpHandle {
         let node_id = self.ctx.node_id.clone();
         // The marker before any bridged tool's entry (#794's review, K2).
         super::gateway_caller::publish_caller_context_marker(&self.ctx);
-        let mut kv_keys: Vec<Arc<str>>   = Vec::with_capacity(tools.len());
+        let mut held: Vec<mycelium_core::kv_persist::HeldKey> = Vec::with_capacity(tools.len());
         let mut tool_names: Vec<Arc<str>> = Vec::with_capacity(tools.len());
 
         for tool in &tools {
@@ -254,12 +257,14 @@ impl McpHandle {
             };
             let schema = tool.get("inputSchema").cloned().unwrap_or(json!({}));
             let kv_key: Arc<str> = Arc::from(format!("tools/{name}/{node_id}").as_str());
-            kv_set(&self.ctx, Arc::clone(&kv_key), Bytes::from(schema.to_string().into_bytes()));
-            kv_keys.push(kv_key);
+            // A registration of the name, as a native tool's is (ER10).
+            held.push(mycelium_core::kv_persist::HeldKey::register_written(
+                &self.ctx.core, kv_key, Bytes::from(schema.to_string().into_bytes()),
+            ));
             tool_names.push(Arc::from(name));
         }
 
-        if kv_keys.is_empty() {
+        if held.is_empty() {
             tracing::warn!(url = %server_url, "MCP server advertised no tools");
         }
 
@@ -273,7 +278,7 @@ impl McpHandle {
             ctx,
             cancel_rx,
             shutdown_rx,
-            kv_keys,
+            held,
             tool_names,
             rx,
             server_url,
