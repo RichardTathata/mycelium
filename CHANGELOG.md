@@ -749,6 +749,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`mycelium_core::ops::kv_set_reporting`** (ER2): `kv_set`'s own write path, which `kv_set` now delegates to,
+  also answering its local-application rung — `Some(Applied)`, `Some(Superseded)` when the key held a newer stamp,
+  `Some(Refused)` at the store's entry cap, `None` for a write refused as oversized. No await and no extra draw; it claims no rung above local application.
+  The schedule's writer reads it so its trace never claims a replacement LWW refused.
 - **The control lane, the mechanism** (B1, PR 1 of 2; `docs/design/control-lane.md`; `deprecations.md` §126;
   [feature page](docs/features/signal-mesh.md)). A second connection per peer, beside the data connection, with its own
   writer, its own 64-frame channel and its own reader at the receiver, for the closed set

@@ -358,6 +358,7 @@ pub fn kv_set(ctx: &CoreCtx, key: Arc<str>, value: Bytes) -> bool {
 /// this node's clock). `None` when the write was refused before anything was applied (oversized). The
 /// same path as `kv_set` — no await, no extra draw — for a caller that must not say it replaced a value
 /// it did not replace (the schedule's `last` entry, ER2). It claims no rung above local application.
+#[must_use]
 pub fn kv_set_reporting(ctx: &CoreCtx, key: Arc<str>, value: Bytes) -> (bool, Option<crate::receipt::LocalApplication>) {
     if reject_oversized_write(&key, value.len()) {
         return (false, None);

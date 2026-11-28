@@ -685,6 +685,24 @@ async fn a_clock_corrected_within_the_drift_bound_leaves_the_node_silent_until_i
     let data = std::env::temp_dir().join(format!("mycelium-schedule-clock-{}-{port}", std::process::id()));
     assert!(data.starts_with(std::env::temp_dir()) && data.file_name().is_some());
     let _ = std::fs::remove_dir_all(&data);
+    /// Removes the persistence directory however the test ends, a panic included.
+    struct RemoveOnDrop(std::path::PathBuf);
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            if self.0.starts_with(std::env::temp_dir()) && self.0.file_name().is_some() {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+    }
+    let _cleanup = RemoveOnDrop(data.clone());
+    /// Sets the wall-clock step back to zero however the test ends.
+    struct Unstep;
+    impl Drop for Unstep {
+        fn drop(&mut self) {
+            mycelium_core::sim_seam::step_wall_clock_for_test(0);
+        }
+    }
+    let _unstep = Unstep;
     let persisted = || {
         let mut cfg = GossipConfig::auto();
         cfg.bind_port = port;
@@ -722,7 +740,6 @@ async fn a_clock_corrected_within_the_drift_bound_leaves_the_node_silent_until_i
     drop(h);
     let still = b.kv().get(&format!("{}{}", last_prefix("close"), b.node_id()));
     b.shutdown().await;
-    let _ = std::fs::remove_dir_all(&data);
     assert_eq!(runs, 0, "silent until the clock catches up: {:?}", slots(&seen));
     assert_eq!(still.as_deref(), Some(&entry[..]), "the entry is untouched");
 }
@@ -732,6 +749,11 @@ async fn a_clock_corrected_within_the_drift_bound_leaves_the_node_silent_until_i
 /// node's write (LWW: the ledger row `what-is-proven.md#far-future-stamp-holds-its-key`). The run's trace says the
 /// write was superseded and the entry stays uncounted, not that it was replaced; the entry holds, and the slot is run
 /// again each check interval until the clock passes the stamp — the general far-future-stamp limit, not fixed here.
+///
+/// **The entry is applied straight to the store**, so this node's HLC never observes it. A real peer frame would be
+/// observed first, carrying the HLC up to the drift bound (now + `max_clock_drift_ms`, five minutes by default): the
+/// node's own advertisements would read as from the future and it would be silent for those five minutes before the
+/// run this test traces.
 #[tokio::test]
 async fn a_replacement_that_loses_to_a_newer_stamp_is_traced_superseded_not_replaced() {
     let (a, sink, _band) = banded(vec![], alloc_port()).await;

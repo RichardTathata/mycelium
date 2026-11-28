@@ -552,7 +552,7 @@ A gap is decided, not replayed: skipped, run late each under its own key (at mos
 
 - **Trigger:** a holder's tick that finds slots after the last recorded run and before the one due
 - **Reads:**
-  - the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase) — scope: the fleet as this node sees it; freshness: as gossiped; never lowered within one declaration (revision 2: an entry no reader counts is replaced by its writer's next run); read only after the loop's warm-up
+  - the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase) — scope: the fleet as this node sees it; freshness: as gossiped; never lowered within one declaration (revision 2: an entry no reader counts is replaced by its writer's next run, unless its stamp is newer); read only after the loop's warm-up
   - `the wall clock through the seam, and the slot it falls in` — scope: this node; freshness: the decision clock
   - the schedule's `on_missed` policy and the catch-up cap — scope: the declaration; freshness: fixed at load
 - **Outcomes:**
@@ -572,7 +572,7 @@ After a warm-up, the rendezvous winner among the live candidates that declare th
 - **Trigger:** a schedule's tick, through the timer seam (`sched/{id}`)
 - **Reads:**
   - the schedule's candidates (`cap/*/schedule/{id}`, each carrying its period and phase) and this node's own capabilities against the `holders` filter — scope: the fleet as this node sees it; freshness: as gossiped; an advertisement times out at three of its refreshes; read only after the loop's warm-up
-  - the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase, an entry more than 64 slots ahead of this clock left out) — scope: the fleet as this node sees it; freshness: as gossiped; never lowered within one declaration — revision 2: a node's own entry that no reader would count (another period or phase, or more than 64 slots ahead) is replaced by the slot it runs
+  - the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase, an entry more than 64 slots ahead of this clock left out) — scope: the fleet as this node sees it; freshness: as gossiped; never lowered within one declaration — revision 2: a node's own entry that no reader would count (another period or phase, or more than 64 slots ahead) is replaced by the slot it runs, unless its stamp is newer: LWW keeps it and the run's trace says superseded
   - `the wall clock through the seam, and the slot it falls in` — scope: this node; freshness: the decision clock
 - **Outcomes:**
   - Action: `ran`, `ran_late`, `ran_for_gap`

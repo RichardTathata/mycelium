@@ -1801,7 +1801,7 @@
         {
           "source": "the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase)",
           "scope": "the fleet as this node sees it",
-          "freshness": "as gossiped; never lowered within one declaration (revision 2: an entry no reader counts is replaced by its writer's next run); read only after the loop's warm-up"
+          "freshness": "as gossiped; never lowered within one declaration (revision 2: an entry no reader counts is replaced by its writer's next run, unless its stamp is newer); read only after the loop's warm-up"
         },
         {
           "source": "the wall clock through the seam, and the slot it falls in",
@@ -1871,7 +1871,7 @@
         {
           "source": "the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase, an entry more than 64 slots ahead of this clock left out)",
           "scope": "the fleet as this node sees it",
-          "freshness": "as gossiped; never lowered within one declaration — revision 2: a node's own entry that no reader would count (another period or phase, or more than 64 slots ahead) is replaced by the slot it runs"
+          "freshness": "as gossiped; never lowered within one declaration — revision 2: a node's own entry that no reader would count (another period or phase, or more than 64 slots ahead) is replaced by the slot it runs, unless its stamp is newer: LWW keeps it and the run's trace says superseded"
         },
         {
           "source": "the wall clock through the seam, and the slot it falls in",

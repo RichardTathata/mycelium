@@ -171,7 +171,7 @@ pub static RULES: &[RuleDescriptor] = &[
         trigger: "a schedule's tick, through the timer seam (`sched/{id}`)",
         inputs: &[
             Input { source: "the schedule's candidates (`cap/*/schedule/{id}`, each carrying its period and phase) and this node's own capabilities against the `holders` filter", scope: "the fleet as this node sees it", freshness: "as gossiped; an advertisement times out at three of its refreshes; read only after the loop's warm-up" },
-            Input { source: "the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase, an entry more than 64 slots ahead of this clock left out)", scope: "the fleet as this node sees it", freshness: "as gossiped; never lowered within one declaration — revision 2: a node's own entry that no reader would count (another period or phase, or more than 64 slots ahead) is replaced by the slot it runs" },
+            Input { source: "the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase, an entry more than 64 slots ahead of this clock left out)", scope: "the fleet as this node sees it", freshness: "as gossiped; never lowered within one declaration — revision 2: a node's own entry that no reader would count (another period or phase, or more than 64 slots ahead) is replaced by the slot it runs, unless its stamp is newer: LWW keeps it and the run's trace says superseded" },
             Input { source: "the wall clock through the seam, and the slot it falls in", scope: "this node", freshness: "the decision clock" },
         ],
         outcomes: &[Outcome { kind: Action, reasons: &["ran", "ran_late", "ran_for_gap"] }, Outcome { kind: NoAction, reasons: &["not_holder", "not_eligible", "not_due", "already_ran", "last_ahead", "ignored_last_far_ahead", "stood_down"] }, Outcome { kind: Deferral, reasons: &["warming_up", "work_failed", "work_overran", "unacknowledged"] }, Outcome { kind: Refusal, reasons: &["declaration_mismatch"] }],
@@ -185,7 +185,7 @@ pub static RULES: &[RuleDescriptor] = &[
         id: "sched.missed", revision: 2, subsystem: "mycelium::schedule", responsibilities: &[Response],
         trigger: "a holder's tick that finds slots after the last recorded run and before the one due",
         inputs: &[
-            Input { source: "the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase)", scope: "the fleet as this node sees it", freshness: "as gossiped; never lowered within one declaration (revision 2: an entry no reader counts is replaced by its writer's next run); read only after the loop's warm-up" },
+            Input { source: "the last slot the fleet ran (the highest `sched/{id}/last/{node}` under this period and phase)", scope: "the fleet as this node sees it", freshness: "as gossiped; never lowered within one declaration (revision 2: an entry no reader counts is replaced by its writer's next run, unless its stamp is newer); read only after the loop's warm-up" },
             Input { source: "the wall clock through the seam, and the slot it falls in", scope: "this node", freshness: "the decision clock" },
             Input { source: "the schedule's `on_missed` policy and the catch-up cap", scope: "the declaration", freshness: "fixed at load" },
         ],

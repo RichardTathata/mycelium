@@ -29,9 +29,10 @@
 //! last run is the highest entry under the same period and phase, so a holder that ran an older slot later cannot pull
 //! it back and a restarted node's stale entry does not count against the fleet's. **The reader and the writer share
 //! one rule** (`counted`): a node keeps its entry's slot only while a reader would count it, and otherwise records the
-//! slot it ran — so an entry written under another period or phase, or one too far ahead (a clock since corrected), is
-//! replaced by the node's next run, and its trace says what it replaced. **A clock ahead** runs its slots early and
-//! records them: a holder whose clock is behind that record runs nothing until it reaches it, and says so once
+//! slot it ran — so an entry written under another period or phase, or one too far ahead (a far-ahead value another
+//! member wrote to this node's key), is replaced by the node's next run and its trace says what it replaced — unless
+//! the entry's stamp is newer than the node's write: LWW keeps it, and the trace says `superseded`. **A clock ahead**
+//! runs its slots early and records them: a holder whose clock is behind that record runs nothing until it reaches it, and says so once
 //! (`last_ahead`) — for at most [`MAX_AHEAD_SLOTS`] slots: an entry further ahead is left out and that is said once
 //! (`ignored_last_far_ahead`). There is one entry per node that ever ran the schedule, kept for good: no route
 //! clears one (the raw KV routes refuse `sched/`), and the bound is what limits a stale one's reach.
