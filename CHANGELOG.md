@@ -113,6 +113,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   parked worker is counted once in `taken`/`take_total`, not twice; `waiters` includes workers parked on
   `take_by_key`; a timed-out take closes its receiver before its last drain, so an item handed to it in that instant
   stays queued. `deprecations.md` §134.
+- **One capability name runs one build** (ER4, R12-01; `docs/plans/engineering-review-urgent-fixes.md` §6). The guard
+  against two builds of one `{ns}/{name}` lasted one provisioning round, and an install advertises only once it
+  resolves, so while a first build installed the next round (500 ms later on a stem) started a second catalogue line
+  for the same name, and every call ran on both. The presence pass and the demand pass each started a sibling of the
+  other's install, and two proposals for one name both loaded as `{name}.shadow`. The name an entry serves is now held
+  in the provisioner's map under its one lock, checked with `closed` and the artifact in the reservation's hold, and
+  released where the entry leaves the map (withdraw, shed, probe failure, failed install, shutdown). The round records
+  `capability_already_held` with the holder (`prov.demand_response` rev 2, replacing `already_started_this_round`;
+  `prov.presence_floor` rev 4). With it (D4b, R17-01 named): a line whose artifact is hosted as another capability is
+  refused `artifact_hosted_as` in place of `already_hosted`, and a presence floor tries another digest for its name.
+  Per provisioner; no upgrade path is built (retire-then-replace is a separate PR). Upgrade note: deprecations
+  §TBD-ER4.
+
 - **A stopped or dropped stem stops what it installed** (ER5 PR 1, R14-01; `docs/plans/engineering-review-urgent-fixes.md`
   §7). A stem's ticker ended with `drop(prov)` and `Provisioner` had no `Drop`, so a WASM install's serve task detached
   and kept its receiver: a stem started again on the same node ran one call on the retired build and the current one.

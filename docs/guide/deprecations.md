@@ -86,6 +86,7 @@ the notice.
 | 132 | an `Installed` implementation whose `Drop` does not stop serving; code that drops a `Provisioner` (or a stem) and expects its installs to keep serving | unreleased (engineering review ER5, PR 1) | stop serving on drop, or override `Installed::retire`; keep the `Provisioner` alive for as long as its installs should serve | **No** — `retire` is defaulted; the change is behaviour ([§132](#132-a-dropped-or-shut-down-provisioner-stops-what-it-installed-installedretire-defaulted-an-installed-must-stop-serving-when-dropped-unreleased-er5-pr-1-r14-01)) |
 | 134 | code or dashboards that expect a second `put_keyed` / `complete_keyed` under one key to replace the first, `taken <= admitted`, or `waiters` to exclude `take_by_key` workers | unreleased (engineering review ER7) | expect a FIFO queue per key; read `taken` as deliveries (redeliveries included); `waiters` now counts keyed waiters | **No** — a behaviour change only ([§134](#134-tuple-space-items-and-workers-under-one-correlation-key-queue-in-arrival-order-taken-counts-each-delivery-once-keyed-workers-count-in-waiters-unreleased-engineering-review-er7--r11-03-r11-10-r11-11)) |
 | 136 | code that calls `BoardStore::discard` or `post_with_id` directly and relies on an absent id being forgotten, on a re-post of a held id being logged again, or on a post of an acked id being applied | unreleased (engineering review ER6) | read `remembers_acked` / `refused_acked`; a board that must take an id again needs a new id, which is the rule | **No** — a behaviour change only ([§136](#136-a-blackboard-remembers-the-ids-it-acked-and-a-mirror-acts-on-them-unreleased-engineering-review-er6-r11-01-r11-04)) |
+| TBD-ER4 | a node, or code driving `Provisioner::provision_round`, that ran two builds of one capability name side by side (two catalogue lines for one `{ns}/{name}`, each a different artifact); a decision-trace reader matching `already_started_this_round` | unreleased (engineering review ER4, R12-01) | one line per name, or expect the second line to wait — it installs once the first build's entry leaves the map (a withdraw, a shed, a probe failure, a failed install, a stop); read `capability_already_held` | **No** — behaviour and trace reasons ([§TBD-ER4](#tbd-er4-one-capability-name-runs-one-build-per-provisioner-a-second-catalogue-line-for-the-name-waits-unreleased-er4-r12-01)) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -6054,3 +6055,52 @@ placed state it wants removed on a stop should override `retire` to do so.
   `an_install_that_finishes_after_shutdown_is_not_advertised_or_served`,
   `a_call_in_flight_when_its_install_retires_is_answered`,
   `a_blob_pulling_at_shutdown_stops_its_loading_tier_and_keeps_its_file` (`provisioner.rs`).
+
+
+## §TBD-ER4. One capability name runs one build per provisioner; a second catalogue line for the name waits (unreleased, ER4, R12-01)
+
+*Numbered by the release: rows of `docs/plans/engineering-review-urgent-fixes.md` land in parallel.*
+
+**Before.** A provisioner's lasting reservation was keyed by artifact only; the guard against two builds of one name
+(`started_caps`) was a local of one round. While a first build installed — demand still unmet, since an install
+advertises only once it resolves — the next round (a stem ticks every 500 ms) found a second catalogue line for the
+same `{ns}/{name}`, with another digest, not hosted, and started it. Both registered a receiver on
+`cap.invoke/{ns}/{name}`, and every call ran on both builds. The presence pass, guarded only by *a candidate's
+artifact is hosted*, did the same against a demand-started build and the reverse; the shadow lane deduplicated by
+artifact only, so two proposals for one name both served `{name}.shadow`. The fix recorded in the audit of
+2026-07-15 held for one round only.
+
+**Now.**
+- The name each entry serves is held in the provisioner's map, under its one lock (lock-order row 21):
+  `HostedState::Installing` carries it, `LiveHosted.provides` already did. The reservation checks `closed`, the
+  artifact and the name, and inserts, in one hold, so a held name refuses the start for the demand, shadow and
+  presence passes alike. A shadow holds `{name}.shadow`, so it never blocks the incumbent, nor the incumbent it.
+- The round says why: the demand pass defers a line whose name is held, recorded `capability_already_held` on
+  `prov.demand_response` (revision 2; it replaces `already_started_this_round`) with the holder's artifact as an
+  input, and spends no self-election draw on it. The presence pass treats a held name as answering its floor:
+  `already_hosted` when the holder is one of the floor's candidates, as before, `capability_already_held` when it is
+  not (`prov.presence_floor` revision 4).
+- The name is released where the entry leaves the map: a withdraw, a shed, a probe failure, a failed install (the
+  token-ours removal), a shutdown. The waiting line installs the round after.
+- **D4b (R17-01, named now):** a line whose artifact this node already hosts as *another* capability is refused
+  `artifact_hosted_as`, with the capability it is hosted as, in place of `already_hosted`; the presence pass drops
+  such a candidate and tries another digest for the name. One placed file is not served under two names (aliasing
+  needs a reference count, a later decision).
+
+**What did not change.** No KV key, wire, unit-file or public API change. `NameHeld` is per provisioner: two
+provisioners on one node (two stems) can still each run a build of one name. No upgrade path is built: a live build
+stays live while its line is in the catalogue or not, and a replacement line waits until something withdraws the old
+build (retire-then-replace is a separate PR, D4a).
+
+***Check:*** an operator who staged a new build of a capability beside the old line and saw both run now sees one,
+and the new line deferred `capability_already_held` until the old build goes. A trace consumer that matched
+`already_started_this_round` reads `capability_already_held`.
+- **Code:** `mycelium-wasm-host/src/provisioner.rs` (`HostedState::Installing { serves }`, `name_holder`,
+  `StartOutcome::NameHeld`, the demand and presence passes), `mycelium-wasm-host/src/rules.rs`. Tests:
+  `a_sibling_build_does_not_start_on_the_next_round_while_the_first_installs`,
+  `a_presence_started_install_blocks_a_demand_sibling_next_round`, `a_demand_started_install_blocks_a_presence_sibling`,
+  `two_proposals_for_one_name_load_one_shadow`, `a_failed_install_releases_the_name_and_the_sibling_then_starts`,
+  `a_withdrawn_build_releases_the_name`, `the_trace_names_the_holder_when_a_name_is_held`,
+  `two_names_from_two_artifacts_both_install`, `a_start_after_shutdown_reserves_nothing`,
+  `a_floor_tries_another_digest_when_its_cheapest_is_hosted_as_another_capability`,
+  `the_demand_pass_names_an_artifact_hosted_as_another_capability` (`provisioner.rs`).

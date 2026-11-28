@@ -45,17 +45,23 @@ provider goes is `the_stem_fleet_fills_a_presence_floor_and_reheals`, in
 ## What it guarantees, and what it does not
 
 - **Rules:** [`prov.presence_floor`](../reference/rule-catalogue.md#provpresence_floor) — `below_floor` starts an install
-  here, `floor_met`, deferred `self_election_declined`, or refused `already_hosted`, `provenance_rejected`, `ineligible`,
-  `no_loadable_candidate` or `rights_refused`, rev 3 (earlier revisions chose the cheapest line before checking it, so a
-  cheaper line any member gossiped stalled the floor); [`prov.shed`](../reference/rule-catalogue.md#provshed) — `above_ceiling` withdraws the
+  here, `floor_met`, deferred `self_election_declined` or `capability_already_held`, or refused `already_hosted`,
+  `artifact_hosted_as`, `provenance_rejected`, `ineligible`, `no_loadable_candidate` or `rights_refused`, rev 4 (rev 3
+  let the floor start a second build of a name this host already held; earlier revisions chose the cheapest line before
+  checking it, so a cheaper line any member gossiped stalled the floor); [`prov.shed`](../reference/rule-catalogue.md#provshed) — `above_ceiling` withdraws the
   hosts ranked beyond it, rev 2 (rev 1 drew per host, and every host could withdraw at once).
 - **Not built:** a cardinality guarantee — a count sits outside the band while installs and withdrawals settle, and a
   wrong view of the providers costs at most its own wrong entries; a fleet-wide band — each host fills only the bands
   it declares; placement — which host fills a gap is the self-election's roll; feeding an install's failure back into
   the choice — a trusted line whose install always fails is chosen again every round, and the floor is not filled here.
-  Two lines still hold a floor at `already_hosted`: a line signed by a trusted publisher that names an artifact this host
-  already hosts for something else, and — on a host with `accept_unsigned = true`, where every line passes provenance —
-  any member's line that does the same.
+  A line naming an artifact this host already hosts as another capability (signed by a trusted publisher, or any
+  member's line on a host with `accept_unsigned = true`) no longer holds the floor at `already_hosted` (ER4, D4b): it is
+  dropped and another digest for the name is tried, and when none is left the floor is refused `artifact_hosted_as`;
+  serving one placed file under two names is not built.
+- **One build per name** (ER4, R12-01): a name this host already holds — reserved or live, started by the floor or
+  by demand — answers the floor here (`already_hosted` when the holder is one of the floor's candidates,
+  `capability_already_held` when it is another line, rev 4), so the floor never starts a second build beside it. The
+  holder need not match the floor's attributes: a held name still answers it.
 - **Evidence:** the ledger row
   [every artifact-shaped co-op demo reaches the same outcome as stem nodes](../operations/what-is-proven.md#coop-demos-same-outcome-as-stems).
 
