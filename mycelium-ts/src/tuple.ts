@@ -177,8 +177,8 @@ export class TupleSpace {
   }
 
   /**
-   * Blocking keyed claim (M13): claims the item on `stage` whose correlation key
-   * is `key`, or parks until it arrives. Resolves with `[itemId, payload]` or
+   * Blocking keyed claim (M13): claims the oldest item on `stage` whose correlation key
+   * is `key`, or parks until one arrives. Resolves with `[itemId, payload]` or
    * throws on timeout. `timeoutSecs` rounds up to whole seconds, as {@link take} does.
    * `causal` (adopter-surface Y11) rides in the body's `_meta`: read only when an exposure rule on the node
    * selects this door, onto its decision record — work naming an unresolved effect as its parent is then held (403).

@@ -172,8 +172,8 @@ class TupleSpace(PoolOwner):
         self, stage: str, key: str, timeout_secs: float = 30.0,
         *, correlation: Optional[str] = None, parent: Optional[str] = None,
     ) -> tuple[int, bytes]:
-        """Blocking keyed claim (M13): claims the item on ``stage`` whose
-        correlation key is ``key``, or parks until it arrives. Returns
+        """Blocking keyed claim (M13): claims the oldest item on ``stage`` whose
+        correlation key is ``key``, or parks until one arrives. Returns
         ``(item_id, payload)``; raises :class:`TimeoutError` on timeout. ``timeout_secs``
         rounds up to whole seconds, as :meth:`take` does. ``correlation`` and ``parent`` ride in
         ``_meta``, as :meth:`take`'s do."""

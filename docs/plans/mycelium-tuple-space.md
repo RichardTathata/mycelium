@@ -643,7 +643,7 @@ Background task on every TupleSpace node: every 10 s, write the following KV key
 ```
 sys/tuple/{node_id}/role                         → "primary" | "secondary" | "candidate"
 sys/tuple/{node_id}/stage/{stage}/depth          → u32  (items waiting in queue)
-sys/tuple/{node_id}/stage/{stage}/waiters        → u32  (workers parked on take)
+sys/tuple/{node_id}/stage/{stage}/waiters        → u32  (workers parked on take or take_by_key)
 sys/tuple/{node_id}/stage/{stage}/inflight       → u32  (taken, not yet acked)
 sys/tuple/{node_id}/stage/{stage}/put_total      → u64  (monotonic put counter)
 sys/tuple/{node_id}/stage/{stage}/take_total     → u64  (monotonic take counter)

@@ -8,8 +8,9 @@ next lane. Nobody predicts which worker is free — readiness announces itself. 
 mirrored to a secondary, with an optional write-ahead log; when the primary dies, the secondary promotes itself by the
 same capability-freshness election any provider uses, with no coordinator. An item taken and never completed is
 re-queued after a timeout, so delivery is at least once. Keyed puts and takes add joins on a key: a key need not be
-unique — items under one key are claimed in arrival order (a re-queued one at the back), and workers parked on one key
-are served in arrival order and counted in the stage's `waiters`.
+unique — items under one key are claimed in arrival order (a re-queued one at the back, on the primary that re-queued
+it: a requeue is not logged, so after a restart or a failover a key's items are in id order), and workers parked on one
+key are served in arrival order and counted in the stage's `waiters`.
 
 ## When to use it, and when not
 

@@ -52,11 +52,13 @@ struct StageInner {
     ///
     /// **A FIFO queue per key** (ER7): items under one key are claimed in arrival order, a re-queued
     /// item at the back, as in the FIFO lane. A key is not unique — two outputs under one correlation
-    /// are both kept. The map entry is removed when its queue empties.
+    /// are both kept. The map entry is removed when its queue empties. The order is this process's:
+    /// a requeue writes no WAL record, so after a restart or a failover (WAL replay, `state_chunk`)
+    /// a key's items are in id order.
     keyed_entries: HashMap<Arc<str>, VecDeque<(u64, Bytes, std::time::Instant)>>,
     /// Workers parked on a specific key, served in arrival order (ER7: a second waiter on a key no
-    /// longer evicts the first). A timed-out or dropped waiter's closed sender is pruned when its own
-    /// take times out and when another waiter registers on the key; the entry is removed when empty.
+    /// longer evicts the first). A timed-out or dropped take's registration is pruned by its
+    /// `KeyedWait` guard (and on the key's next registration); the entry is removed when empty.
     keyed_waiters: HashMap<Arc<str>, VecDeque<oneshot::Sender<(u64, Bytes)>>>,
 }
 
@@ -76,9 +78,8 @@ pub(crate) struct StageState {
     /// lock. The plain timeout path deliberately does not touch it — the dead
     /// sender is still in the deque until a dispatch skips it, so the count
     /// may transiently include timed-out waiters but can never underflow. A
-    /// keyed waiter prunes its own dead sender on timeout, so only a dropped
-    /// (cancelled) keyed take lingers, until the key's next registration or
-    /// dispatch. (Run-17 probe `metrics_accounting_identity` caught the
+    /// keyed waiter's registration is removed however its take ends — timed
+    /// out or dropped — by `KeyedWait`'s drop, so keyed waiters are exact. (Run-17 probe `metrics_accounting_identity` caught the
     /// previous double-decrement wrapping this to ~4.29e9.)
     pub(crate) waiters_count: AtomicU32,
     pub(crate) put_total: AtomicU64,
@@ -139,6 +140,30 @@ pub(crate) struct Inflight {
     /// M13 / WS-G: the correlation key if this item was put keyed, so a crash-requeue or compaction
     /// snapshot re-queues it under its key (not the FIFO). `None` for ordinary FIFO items.
     pub(crate) key: Option<Arc<str>>,
+}
+
+/// A parked `take_by_key`'s registration (ER7). Dropped however the take ends: while armed it
+/// closes the receiver and, under the stage lock, prunes the key's closed senders and removes an
+/// empty entry, keeping `waiters_count` exact — so a dropped future on a key nobody touches again
+/// leaves nothing. Disarmed when a dispatcher has taken the sender (an item was received). The
+/// stage lock is a synchronous `parking_lot` lock and the prune does no I/O, so this is safe in
+/// `Drop`; nothing drops a take future while holding a stage lock.
+struct KeyedWait {
+    state: Arc<StageState>,
+    key: Arc<str>,
+    rx: oneshot::Receiver<(u64, Bytes)>,
+    armed: bool,
+}
+
+impl Drop for KeyedWait {
+    fn drop(&mut self) {
+        if self.armed {
+            // Close first, so our sender reads as closed to the prune (the receiver is still alive).
+            // An item a dispatcher sent before the close stays in flight and re-queues at its lease.
+            self.rx.close();
+            TupleStore::prune_keyed_waiters(&self.state, &mut self.state.inner.lock(), &self.key);
+        }
+    }
 }
 
 // ─── TupleStore ──────────────────────────────────────────────────────────────
@@ -280,10 +305,16 @@ impl TupleStore {
         mut payload: Bytes,
     ) -> Result<bool, TupleError> {
         let mut g = state.inner.lock();
+        let mut undone = false;
         loop {
             match g.waiters.pop_front() {
                 None => {
-                    g.entries.push_back((id, payload, std::time::Instant::now()));
+                    // After an undone hand-off, at the front: the lock was released for the send, and
+                    // anything queued since arrived after this item (an item is queued only while no
+                    // waiter is parked, and this one had found a waiter) — so the front keeps arrival
+                    // order. Its queue wait is measured from here, not from its put.
+                    let item = (id, payload, std::time::Instant::now());
+                    if undone { g.entries.push_front(item) } else { g.entries.push_back(item) }
                     state.depth.fetch_add(1, Ordering::Relaxed);
                     return Ok(false);
                 }
@@ -313,6 +344,7 @@ impl TupleStore {
                             // Receiver timed out — undo, try next waiter or store.
                             self.inflight.lock().remove(&id);
                             payload = p.1;
+                            undone = true;
                             g = state.inner.lock();
                         }
                     }
@@ -342,11 +374,12 @@ impl TupleStore {
                         key: None,
                     },
                 );
-                state.take_total.fetch_add(1, Ordering::Relaxed);
                 drop(g);
                 if let Some(wal) = &self.wal {
                     wal.append(&Record::Take { id, taken_at_ms: now_ms() })?;
                 }
+                // Counted once the take is logged: a refused append returns `Err`, not the item.
+                state.take_total.fetch_add(1, Ordering::Relaxed);
                 return Ok((id, payload));
             }
             let (tx, rx) = oneshot::channel();
@@ -417,6 +450,7 @@ impl TupleStore {
         mut payload: Bytes,
     ) -> Result<bool, TupleError> {
         let mut g = state.inner.lock();
+        let mut undone = false;
         loop {
             let next = match g.keyed_waiters.get_mut(&key) {
                 Some(q) => {
@@ -430,7 +464,10 @@ impl TupleStore {
             };
             match next {
                 None => {
-                    g.keyed_entries.entry(key).or_default().push_back((id, payload, std::time::Instant::now()));
+                    // After an undone hand-off, at the front of the key's queue, as in `dispatch`.
+                    let item = (id, payload, std::time::Instant::now());
+                    let q = g.keyed_entries.entry(key).or_default();
+                    if undone { q.push_front(item) } else { q.push_back(item) }
                     state.depth.fetch_add(1, Ordering::Relaxed);
                     return Ok(false);
                 }
@@ -454,6 +491,7 @@ impl TupleStore {
                             // The keyed waiter timed out or was dropped — undo, try the next or store.
                             self.inflight.lock().remove(&id);
                             payload = p.1;
+                            undone = true;
                             g = state.inner.lock();
                         }
                     }
@@ -491,7 +529,7 @@ impl TupleStore {
     ) -> Result<(u64, Bytes), TupleError> {
         let state = self.stage(stage);
         let key: Arc<str> = Arc::from(key);
-        let mut rx = {
+        let rx = {
             let mut g = state.inner.lock();
             let popped = match g.keyed_entries.get_mut(&key) {
                 Some(q) => {
@@ -510,36 +548,43 @@ impl TupleStore {
                     id,
                     Inflight { stage: Arc::from(stage), payload: payload.clone(), taken_at_ms: now_ms(), key: Some(Arc::clone(&key)) },
                 );
-                state.take_total.fetch_add(1, Ordering::Relaxed);
                 drop(g);
                 if let Some(wal) = &self.wal {
                     wal.append(&Record::Take { id, taken_at_ms: now_ms() })?;
                 }
+                // Counted once the take is logged: a refused append returns `Err`, not the item.
+                state.take_total.fetch_add(1, Ordering::Relaxed);
                 return Ok((id, payload));
             }
-            // Join the back of the key's waiter queue, pruning dead senders (dropped takes) first.
+            // Join the back of the key's waiter queue, pruning dead senders first.
             Self::prune_keyed_waiters(&state, &mut g, &key);
             let (tx, rx) = oneshot::channel();
             g.keyed_waiters.entry(Arc::clone(&key)).or_default().push_back(tx);
             state.waiters_count.fetch_add(1, Ordering::Relaxed);
             rx
         };
+        // From here, however this future ends — served, timed out, or dropped (a cancelled task, a
+        // gateway handler whose client went away) — the guard's drop removes our registration unless
+        // a dispatcher already took it.
+        let mut wait = KeyedWait { state: Arc::clone(&state), key, rx, armed: true };
         tokio::select! {
-            // The dispatcher counted the hand-off in `take_total` when it sent.
-            item = &mut rx => item.map_err(|_| TupleError::Timeout), // sender dropped: store shutdown
+            // The dispatcher counted the hand-off in `take_total` when it sent, and took our sender.
+            item = &mut wait.rx => {
+                if item.is_ok() {
+                    wait.armed = false;
+                }
+                item.map_err(|_| TupleError::Timeout) // sender dropped: store shutdown
+            }
             _ = tokio::time::sleep(timeout) => {
                 // Close, then drain (as in `take`): a dispatcher holding our sender now fails its send
-                // and keeps the item; one that sent before the close handed it to us.
-                rx.close();
-                match rx.try_recv() {
-                    Ok(item) => Ok(item),
-                    Err(_) => {
-                        // Prune our closed sender — and any other dead one — not whichever waiter is
-                        // present; a live waiter on the key stays. The entry goes when it empties.
-                        Self::prune_keyed_waiters(&state, &mut state.inner.lock(), &key);
-                        Err(TupleError::Timeout)
-                    }
+                // and keeps the item; one that sent before the close handed it to us. On `Err` the
+                // guard prunes our closed sender — not whichever waiter is present.
+                wait.rx.close();
+                let item = wait.rx.try_recv();
+                if item.is_ok() {
+                    wait.armed = false;
                 }
+                item.map_err(|_| TupleError::Timeout)
             }
         }
     }
@@ -763,8 +808,10 @@ impl TupleStore {
                 depth: state.depth.load(Ordering::Relaxed),
                 waiters: state.waiters_count.load(Ordering::Relaxed),
                 put_total: state.put_total.load(Ordering::Relaxed),
-                take_total: state.take_total.load(Ordering::Relaxed),
+                // `hot_total` first: each hot hand-off bumps `take_total` before `hot_total`, so this
+                // order keeps `hot_total <= take_total` in every snapshot.
                 hot_total: state.hot_total.load(Ordering::Relaxed),
+                take_total: state.take_total.load(Ordering::Relaxed),
                 rejected_total: state.rejected_total.load(Ordering::Relaxed),
                 queue_p99_us: state.queue_p99_us(),
                 stage,
@@ -1999,6 +2046,22 @@ mod tests {
         let cold = store.stage("cold");
         assert!(cold.inner.lock().keyed_waiters.is_empty(), "a timed-out waiter's entry is removed");
         assert_eq!(cold.waiters_count.load(Ordering::Relaxed), 0);
+    }
+
+    /// A `take_by_key` whose future is dropped (a cancelled task, a gateway handler whose client went away) on a key
+    /// nobody touches again leaves no registration and no `waiters` count behind.
+    #[tokio::test]
+    async fn a_dropped_keyed_take_on_a_cold_key_leaves_nothing() {
+        let store = Arc::new(TupleStore::transient(500));
+        let s1 = Arc::clone(&store);
+        let w = tokio::spawn(async move { s1.take_by_key("s", "job-9", Duration::from_secs(30)).await });
+        let_park().await;
+        assert_eq!(store.depth(Some("s"))[0].waiters, 1);
+        w.abort();
+        assert!(w.await.unwrap_err().is_cancelled());
+        let st = store.stage("s");
+        assert!(st.inner.lock().keyed_waiters.is_empty(), "the dropped take's registration is removed");
+        assert_eq!(st.waiters_count.load(Ordering::Relaxed), 0, "and not counted");
     }
 
     /// R11-11: a worker parked on `take_by_key` counts in the stage's `waiters`, and leaves it when served or

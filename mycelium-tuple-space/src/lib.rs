@@ -258,8 +258,8 @@ pub struct TupleDepth {
     /// Items queued (not yet taken).
     pub depth: u32,
     /// Workers parked on `take` or `take_by_key` (may transiently include
-    /// timed-out `take`s not yet reaped by a dispatch, and dropped
-    /// `take_by_key`s not yet pruned by their key's next registration or put).
+    /// timed-out or dropped `take`s not yet reaped by a dispatch; a
+    /// `take_by_key` leaves the count however it ends).
     pub waiters: u32,
     /// Items taken but not yet acked.
     pub inflight: u32,
@@ -1346,7 +1346,9 @@ impl TupleSpace {
     /// AND its matching purchase order") that exact lane names can't express without one lane per key.
     /// Exact-match only (O(1) hash), never template matching. A key need not be unique: items put under
     /// one key queue in arrival order and are claimed oldest first (an expired item re-queued under its
-    /// key goes to the back), and workers parked on one key are served in arrival order.
+    /// key goes to the back), and workers parked on one key are served in arrival order. That order is
+    /// the serving primary's: a requeue is not logged, so after a restart or a failover a key's items
+    /// are in id order.
     pub async fn put_keyed(&self, stage: &str, key: &str, payload: Bytes) -> Result<u64, TupleError> {
         if self.serving_locally().is_some() {
             return self.serve_put_keyed(stage, Arc::from(key), payload);
